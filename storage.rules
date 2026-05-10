@@ -1,0 +1,30 @@
+rules_version = '2';
+
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    // Helper: check that the user's email is in /authorized in Realtime DB
+    function isAuthorized() {
+      return request.auth != null
+        && firestore.exists(/databases/(default)/documents/authorized/$(request.auth.token.email));
+    }
+
+    // For now, simpler check: any authenticated user (assumes Auth is locked to whitelist)
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    // All photos under /aspen-warehouse/* require sign-in
+    match /aspen-warehouse/{allPaths=**} {
+      allow read:  if isSignedIn();
+      allow write: if isSignedIn()
+                   && request.resource.size < 10 * 1024 * 1024  // max 10 MB per file
+                   && request.resource.contentType.matches('image/.*');
+    }
+
+    // Default: deny everything else
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

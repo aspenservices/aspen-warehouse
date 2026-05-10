@@ -1,0 +1,33 @@
+{
+  "rules": {
+    ".read":  "auth != null && root.child('authorized').child(auth.token.email.replace('.', ',').replace('@', '_at_')).exists()",
+    ".write": "auth != null && root.child('authorized').child(auth.token.email.replace('.', ',').replace('@', '_at_')).exists()",
+
+    "authorized": {
+      ".read":  "auth != null",
+      ".write": "auth != null && root.child('authorized').child(auth.token.email.replace('.', ',').replace('@', '_at_')).child('role').val() == 'admin'"
+    },
+
+    "state": {
+      "$deviceId": {
+        ".read":  "auth != null && root.child('authorized').child(auth.token.email.replace('.', ',').replace('@', '_at_')).exists()",
+        ".write": "auth != null && root.child('authorized').child(auth.token.email.replace('.', ',').replace('@', '_at_')).exists()",
+        "snapshots": {
+          ".indexOn": ["timestamp"]
+        }
+      }
+    },
+
+    "photos-index": {
+      ".read":  "auth != null && root.child('authorized').child(auth.token.email.replace('.', ',').replace('@', '_at_')).exists()",
+      ".write": "auth != null && root.child('authorized').child(auth.token.email.replace('.', ',').replace('@', '_at_')).exists()",
+      ".indexOn": ["itemId", "timestamp", "type"]
+    },
+
+    "audit": {
+      ".read":  "auth != null && root.child('authorized').child(auth.token.email.replace('.', ',').replace('@', '_at_')).exists()",
+      ".write": "auth != null && root.child('authorized').child(auth.token.email.replace('.', ',').replace('@', '_at_')).exists()",
+      ".indexOn": ["timestamp", "user"]
+    }
+  }
+}

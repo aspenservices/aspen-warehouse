@@ -1,0 +1,34 @@
+# OS files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# Editor folders
+.idea/
+.vscode/
+*.sublime-*
+
+# Logs
+*.log
+npm-debug.log*
+
+# Local backups (don't commit accidental snapshots)
+*.backup
+*.bak
+state-snapshot-*.json
+local-state-*.json
+
+# Firebase secrets (never commit)
+firebase-config.local.js
+.firebaserc
+*.serviceAccount.json
+
+# Build artifacts
+dist/
+build/
+node_modules/
+
+# Test coverage
+coverage/
