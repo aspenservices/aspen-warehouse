@@ -1057,9 +1057,9 @@ tbody tr:hover td{background:var(--bg3)}
   /* Materials grid: 2 cols */
   .mat-card{font-size:10.5px}
 
-  /* Banner: hide description on tiny phones — keep only icon + title */
-  .view > div[style*="background:linear-gradient"]{padding:8px 10px !important}
-  .view > div[style*="background:linear-gradient"] [style*="margin-top:2px"]{display:none !important}
+  /* (Removed: overly aggressive .view > div[style*="background:linear-gradient"] rules
+     that were squashing banner padding on mobile and hiding description text. Banners now
+     manage their own mobile-friendly layout via inline styles.) */
 
   /* fct-tabs: smaller */
   .fct-tab{font-size:10.5px !important;padding:7px 8px !important}
@@ -1598,25 +1598,28 @@ tbody tr:hover td{background:var(--bg3)}
 
 <!-- LOADING BAY — dedicated view for Truck / Transit role -->
 <div id="view-truck" class="view">
-  <!-- Hero: prominent scan button + quick-load by S/N -->
+  <!-- Hero: prominent scan button + quick-load by S/N.
+       Vertical stack on mobile (no flex-wrap shuffling); horizontal on wider screens. -->
   <div class="card" style="margin-bottom:14px;background:linear-gradient(135deg,#fef3c7 0%,#fde68a 100%);border:2px solid #d97706">
-    <div class="card-body" style="padding:18px 22px">
-      <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">
-        <div style="width:52px;height:52px;border-radius:50%;background:#fff;display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:26px;box-shadow:0 2px 8px rgba(217,119,6,.3)">🚛</div>
-        <div style="flex:1 1 240px;min-width:0">
-          <div style="font-size:16px;font-weight:800;color:#78350f">Loading Truck — Scan Each Spa</div>
-          <div style="font-size:11.5px;color:#7c2d12;margin-top:3px">Scan the QR label on every spa before loading it on the truck. Each scan removes the spa from factory inventory and marks it IN TRANSIT.</div>
+    <div class="card-body" style="padding:16px 18px">
+      <!-- Title row: icon + title (stays compact on mobile) -->
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">
+        <div style="width:44px;height:44px;border-radius:50%;background:#fff;display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:22px;box-shadow:0 2px 8px rgba(217,119,6,.3)">🚛</div>
+        <div style="flex:1;min-width:0">
+          <div style="font-size:15px;font-weight:800;color:#78350f;line-height:1.2">Loading Truck — Scan Each Spa</div>
+          <div style="font-size:11px;color:#7c2d12;margin-top:3px;line-height:1.35">Scan the QR label on every spa before loading it on the truck. Each scan removes the spa from factory inventory and marks it IN TRANSIT.</div>
         </div>
-        <button class="btn" style="background:#7c2d12;border:none;color:#fff;padding:16px 28px;font-size:15px;font-weight:800;min-height:58px;flex:0 0 auto;box-shadow:0 4px 12px -2px rgba(124,45,18,.4)" onclick="openQRScanner('load')">
-          📷 Scan to Load
-        </button>
       </div>
+      <!-- Big scan button — full width below so it's the primary action -->
+      <button class="btn" style="width:100%;background:#7c2d12;border:none;color:#fff;padding:15px 22px;font-size:15px;font-weight:800;min-height:54px;box-shadow:0 4px 12px -2px rgba(124,45,18,.4);border-radius:9px" onclick="openQRScanner('load')">
+        📷 Scan to Load
+      </button>
       <!-- Quick-load fallback: type S/N manually if QR is damaged -->
-      <div style="margin-top:14px;padding-top:14px;border-top:1.5px dashed #d97706;display:flex;gap:8px;align-items:stretch;flex-wrap:wrap">
-        <div style="flex:0 0 auto;font-size:11px;font-weight:700;color:#7c2d12;align-self:center">Or type S/N if QR is damaged:</div>
-        <div style="flex:1 1 280px;display:flex;gap:7px">
-          <input id="trk-quick-sn" class="fi" placeholder="e.g. 30100" style="flex:1;padding:12px 14px;font-size:15px;font-family:ui-monospace,monospace;font-weight:700;background:#fff" onkeydown="if(event.key==='Enter')truckQuickLoad(this.value)">
-          <button class="btn" style="padding:0 22px;font-size:13px;font-weight:700;background:#7c2d12;border:none;color:#fff" onclick="truckQuickLoad(document.getElementById('trk-quick-sn').value)">✓ Load</button>
+      <div style="margin-top:12px;padding-top:12px;border-top:1.5px dashed #d97706">
+        <div style="font-size:10.5px;font-weight:700;color:#7c2d12;margin-bottom:6px;text-transform:uppercase;letter-spacing:.05em">Or type S/N if QR is damaged:</div>
+        <div style="display:flex;gap:7px">
+          <input id="trk-quick-sn" class="fi" placeholder="e.g. 30100" style="flex:1;padding:11px 13px;font-size:15px;font-family:ui-monospace,monospace;font-weight:700;background:#fff" onkeydown="if(event.key==='Enter')truckQuickLoad(this.value)">
+          <button class="btn" style="padding:0 18px;font-size:13px;font-weight:700;background:#7c2d12;border:none;color:#fff;flex-shrink:0" onclick="truckQuickLoad(document.getElementById('trk-quick-sn').value)">✓ Load</button>
         </div>
       </div>
     </div>
@@ -5816,9 +5819,9 @@ function renderTruck(){
 
   // Ready list — tap-friendly cards with prominent scan-load button per item
   if(ready.length === 0){
-    readyCards.innerHTML = `<div style="padding:36px 14px;text-align:center;color:var(--text3);font-size:13px">
-      📭 No spas in transit. Items appear here when the Transit/Loader scans a QR with "Scan to Load on Truck".<br>
-      <span style="font-size:11px;color:var(--text3);display:inline-block;margin-top:6px">When Factory marks a spa with "📦 Ship to WH", it'll show up here ready for you to scan.</span>
+    readyCards.innerHTML = `<div style="padding:36px 14px;text-align:center;color:var(--text3);font-size:13px;line-height:1.5">
+      📭 Nothing ready to load yet.<br>
+      <span style="font-size:11.5px;color:var(--text3);display:inline-block;margin-top:6px">When Factory marks a spa with <strong>"📦 Ship to WH"</strong>, it'll appear here ready for you to scan onto the truck.</span>
     </div>`;
   } else {
     readyCards.innerHTML = ready.map(f => {
@@ -9815,6 +9818,9 @@ function shipFromFactory(id){
   addAct(`📦 Ready for pickup: ${f.sn||f.dealer}`,'var(--amber)');
   toast(`${f.sn||f.dealer} marked ready — Truck / Transit will scan to load`,'ok');
   renderFactory(); updBadges();
+  // Also refresh truck view in case admin/factory user is testing across roles in same session,
+  // or the truck view is mounted in the DOM (it's a hidden view but still re-renders cleanly).
+  if(typeof renderTruck === 'function') renderTruck();
 }
 
 function rmFromFactory(id){
