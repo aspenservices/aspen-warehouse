@@ -891,9 +891,47 @@ tbody tr:hover td{background:var(--bg3)}
 
   /* Cards: tighter spacing */
   .card{margin-bottom:10px;border-radius:10px}
-  .card-hd{padding:9px 11px}
+  .card-hd{padding:9px 11px;flex-wrap:wrap;gap:7px}
+  .card-hd .card-acts{margin-left:0;width:100%;justify-content:flex-start;flex-wrap:wrap;gap:5px}
+  .card-hd .card-acts .btn{flex:0 1 auto;font-size:10.5px;padding:6px 9px}
   .card-body{padding:10px 11px}
-  .card-title{font-size:12.5px}
+  .card-title{font-size:12.5px;line-height:1.2}
+  .card-sub{font-size:10px;line-height:1.3}
+
+  /* Banner cards at top of views: more compact icon */
+  .view > div[style*="background:linear-gradient"]{padding:9px 11px !important;gap:8px !important;margin-bottom:9px !important;border-radius:9px !important}
+  .view > div[style*="background:linear-gradient"] > div:first-child{width:28px !important;height:28px !important}
+  .view > div[style*="background:linear-gradient"] > div:first-child svg{width:14px !important;height:14px !important}
+  .view > div[style*="background:linear-gradient"] [style*="font-size:13px"]{font-size:12px !important;line-height:1.2}
+  .view > div[style*="background:linear-gradient"] [style*="font-size:11px"]{font-size:10px !important;line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+
+  /* Factory tabs: full width with smaller buttons */
+  .fct-tabs{margin-bottom:9px;width:100%;overflow-x:auto;scrollbar-width:none}
+  .fct-tabs::-webkit-scrollbar{display:none}
+  .fct-tab{font-size:11px !important;padding:8px 11px !important;flex:1 1 auto;justify-content:center;min-width:auto}
+  .fct-tab svg{width:12px;height:12px}
+
+  /* Factory action card-acts: wraps nicely + horizontal layout */
+  .card-hd .fct-tabs + .card-acts{width:100%;border-top:1px solid var(--line);padding-top:8px !important;margin-top:4px;display:grid !important;grid-template-columns:1fr 1fr;gap:5px}
+  .card-hd .fct-tabs + .card-acts .btn{flex:initial;width:auto;font-size:10.5px;padding:7px 8px;min-height:34px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  /* Primary "Add to Factory" gets full row */
+  .card-hd .fct-tabs + .card-acts .btn-p{grid-column:1/-1}
+
+  /* Factory cards (per-item) actions: hide tertiary actions on mobile to fit */
+  .fct-acts .tracking-btn{display:none !important}
+  /* Per-card action buttons: grid 2-col layout in mobile so buttons line up nicely */
+  .fct-acts{display:grid !important;grid-template-columns:1fr 1fr;gap:6px;margin-top:9px}
+  .fct-acts .btn{flex:initial;width:auto;font-size:11px;padding:8px 6px;min-height:36px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .fct-acts .btn-sm{font-size:11px;padding:8px 6px;min-height:36px}
+  /* Primary action (Ship to WH) takes full row */
+  .fct-acts .btn-p{grid-column:1/-1}
+
+  /* Overflow protection: NO element overflows viewport */
+  *{max-width:100vw}
+  body, html{overflow-x:hidden;width:100%}
+  .view{max-width:100%;box-sizing:border-box}
+  .card,.fct-card,.sc{box-sizing:border-box;max-width:100%;overflow:hidden}
+  .sc-trend,.fct-dealer,.fct-sn{overflow:hidden;text-overflow:ellipsis}
 
   /* Floor map cells: smaller min size + smaller text */
   #floor > *{min-width:780px}
@@ -933,25 +971,16 @@ tbody tr:hover td{background:var(--bg3)}
   .fct-dealer{font-size:11.5px}
   .fct-meta{font-size:10.5px;margin-bottom:6px}
 
-  /* Action button rows: better wrap and bigger tap targets */
-  .fct-acts{display:flex;flex-wrap:wrap;gap:5px;margin-top:9px}
-  .fct-acts .btn{flex:1 1 auto;min-height:36px;padding:8px 10px;font-size:11px}
-  .fct-acts .btn-sm{font-size:11px;padding:8px 10px}
-
   /* Calendar: smaller */
   .cgrid{gap:2px}
   .cday{font-size:10px;min-height:30px;padding:3px}
   .cdn{font-size:9px}
 
-  /* Tables on mobile: simplified */
-  table{font-size:10.5px;display:block;overflow-x:auto;white-space:nowrap}
-  td,th{padding:5px 7px}
-
   /* Toast: bottom + full width */
   .toast{left:8px;right:8px;bottom:12px;top:auto;max-width:none;font-size:12px}
 
   /* Tables on mobile: hide low-priority columns + tighter padding */
-  table{font-size:11px}
+  table{font-size:11px;display:block;overflow-x:auto;white-space:nowrap}
   td,th{padding:6px 7px}
   /* Hide columns marked as secondary (.td-s = "small" content like notes/dates) */
   table .td-s,
@@ -1023,6 +1052,25 @@ tbody tr:hover td{background:var(--bg3)}
 
   /* Materials grid: 2 cols */
   .mat-card{font-size:10.5px}
+
+  /* Banner: hide description on tiny phones — keep only icon + title */
+  .view > div[style*="background:linear-gradient"]{padding:8px 10px !important}
+  .view > div[style*="background:linear-gradient"] [style*="margin-top:2px"]{display:none !important}
+
+  /* fct-tabs: smaller */
+  .fct-tab{font-size:10.5px !important;padding:7px 8px !important}
+  .fct-tab svg{display:none}  /* Hide icons on tiny screens, keep label */
+
+  /* Factory header action grid: stack all to single col on tiny phones */
+  .card-hd .fct-tabs + .card-acts{grid-template-columns:1fr !important}
+
+  /* Per-card actions: still 2-col but tighter */
+  .fct-acts{gap:5px !important}
+  .fct-acts .btn{font-size:10.5px !important;padding:7px 5px !important}
+
+  /* Card titles smaller */
+  .card-title{font-size:12px}
+  .card-sub{font-size:9.5px}
 }
 
 /* TOUCH DEVICES — hide native browser tooltips on long-press */
