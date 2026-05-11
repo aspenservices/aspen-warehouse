@@ -1190,6 +1190,11 @@ tbody tr:hover td{background:var(--bg3)}
       Marriages
       <span class="nb red" id="nb-mar">0</span>
     </div>
+    <div class="ni" data-page="covers" data-section="factory" onclick="goV('covers')">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><ellipse cx="8" cy="8" rx="6.5" ry="3"/><path d="M1.5 8v3a6.5 3 0 0013 0V8"/><path d="M5 8l1 1.5M11 8l-1 1.5M8 8v1.7"/></svg>
+      Cover Inventory
+      <span class="nb" style="background:#e0e7ff;color:#3730a3" id="nb-cov">0</span>
+    </div>
     <div class="nav-sec sb-sec" data-section="inventory">Inventory</div>
     <div class="ni" data-page="incoming" data-section="inventory" onclick="goV('incoming')">
       <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M8 1v10M4 7l4 4 4-4M2 13h12"/></svg>
@@ -1246,7 +1251,7 @@ tbody tr:hover td{background:var(--bg3)}
       <div class="role-current"><span id="role-indicator">Admin</span></div>
     </div>
   </div>
-  <div class="sb-foot"><div class="sb-ver">v3.36 · <span id="live-date"></span></div></div>
+  <div class="sb-foot"><div class="sb-ver">v3.53 · <span id="live-date"></span></div></div>
 </nav>
 
 <!-- MAIN -->
@@ -1848,6 +1853,42 @@ tbody tr:hover td{background:var(--bg3)}
 </div>
 
 <!-- ════════════════════════════════════════════════
+     COVER INVENTORY — physical covers in warehouse storage
+     Auto-decrements when a spa with cover is added/edited.
+     This view = source of truth (the Cover Dashboard file
+     will be migrated to read from the same Firebase path).
+════════════════════════════════════════════════ -->
+<div id="view-covers" class="view">
+  <!-- Banner: explanation -->
+  <div style="background:linear-gradient(135deg,#eef2ff 0%,#fff 100%);border:1px solid #c7d2fe;border-radius:var(--r-lg);padding:13px 16px;margin-bottom:12px;display:flex;align-items:center;gap:12px">
+    <div style="width:38px;height:38px;border-radius:50%;background:#eef2ff;display:flex;align-items:center;justify-content:center;flex-shrink:0;border:1px solid #c7d2fe;font-size:18px">🛌</div>
+    <div style="flex:1">
+      <div style="font-size:13px;font-weight:700;color:var(--text1)">Cover Inventory — Warehouse Storage</div>
+      <div style="font-size:11px;color:var(--text2);margin-top:2px">Physical covers waiting to be paired with spas. When you save a spa with a cover, stock here decrements automatically.</div>
+    </div>
+    <button class="btn btn-p btn-sm" onclick="openCoverAdd()">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 2v12M2 8h12"/></svg>
+      Add Cover Stock
+    </button>
+  </div>
+  <!-- Stats -->
+  <div class="stats-grid" id="cov-stats"></div>
+  <!-- Inventory table -->
+  <div class="card" style="margin-top:12px">
+    <div class="card-hd" style="padding:13px 16px">
+      <div>
+        <div class="card-title">All Cover Stock</div>
+        <div class="card-sub">Click a row to edit qty / threshold / location · Red = at or below low-stock threshold</div>
+      </div>
+    </div>
+    <div class="card-body" style="padding:14px 16px">
+      <div id="cov-content"></div>
+    </div>
+  </div>
+  <div id="cover-float-panel"></div>
+</div>
+
+<!-- ════════════════════════════════════════════════
      FACTORY REQUESTS — Factory asks WH to send items
 ════════════════════════════════════════════════ -->
 <div id="view-requests" class="view">
@@ -2121,7 +2162,7 @@ async function fbCloudSync(showToast){
     return;
   }
   try {
-    const state = {nid, units, dispatched, incoming, materials, events, activity, queue, cfg, factory, marriages, dispatchRequests};
+    const state = {nid, units, dispatched, incoming, materials, events, activity, queue, cfg, factory, marriages, dispatchRequests, coverInventory, colorLibrary, coverModelMapping};
     const ts = Date.now();
     const payload = {
       timestamp: ts,
@@ -2176,6 +2217,9 @@ async function fbRestoreFromCloud(){
     if(Array.isArray(restored.factory)) factory = restored.factory;
     if(Array.isArray(restored.marriages)) marriages = restored.marriages;
     if(Array.isArray(restored.dispatchRequests)) dispatchRequests = restored.dispatchRequests;
+    if(Array.isArray(restored.coverInventory)) coverInventory = restored.coverInventory;
+    if(restored.colorLibrary && typeof restored.colorLibrary === 'object') colorLibrary = Object.assign(colorLibrary, restored.colorLibrary);
+    if(restored.coverModelMapping && typeof restored.coverModelMapping === 'object') coverModelMapping = restored.coverModelMapping;
     if(restored.cfg && typeof restored.cfg === 'object') cfg = Object.assign(cfg, restored.cfg);
     saveState(); // persist to localStorage
     drawMap?.(); renderQueue?.(); updBadges();
@@ -2406,9 +2450,9 @@ const ROLES = {
   admin:     { label:'Admin', subtitle:'Full access', icon:'🔑',
                pages:['*'], canEdit:true, defaultPage:'dashboard', password:'0000' },
   warehouse: { label:'Warehouse Manager', subtitle:'Receive · acomodar · despachar', icon:'🏭',
-               pages:['map','schedule','incoming','intransit','dispatched','materials','requests'], canEdit:true, defaultPage:'map', password:'0000' },
+               pages:['map','schedule','incoming','intransit','dispatched','materials','requests','covers'], canEdit:true, defaultPage:'map', password:'0000' },
   factory:   { label:'Factory', subtitle:'Ship spas · request items · receive', icon:'🚚',
-               pages:['factory','marriages','map','intransit','requests','receiving'], canEdit:false, defaultPage:'factory', password:'0000' },
+               pages:['factory','marriages','map','intransit','requests','receiving','covers'], canEdit:false, defaultPage:'factory', password:'0000' },
   transit:   { label:'Truck / Transit', subtitle:'Scan QR when loading truck', icon:'🚛',
                pages:['truck','intransit'], canEdit:false, defaultPage:'truck', password:'0000' },
   organizer: { label:'Dispatch Organizer', subtitle:'Schedule pickups', icon:'📅',
@@ -2676,6 +2720,38 @@ let factory = [
   {id:5004, sn:'',      dealer:'Extra Cabinet Door — Mahogany', type:'accessory', qty:1, added:'2026-05-01', notes:'Married to S/N 30781 (Ritchie pools)', marriedSn:'30781'},
   {id:5005, sn:'',      dealer:'Extra Cabinet Door — Coastal Grey', type:'accessory', qty:1, added:'2026-05-02', notes:'Married to S/N 30538 (Pool people)', marriedSn:'30538'},
 ];
+
+// ═══════════════════════════════════════════════════════
+// COLOR & MODEL LIBRARY — editable lists that grow as Alberto uses the app
+// Empty by default. Every time a new value is typed in any of the spa form fields,
+// it gets auto-added here so the datalist suggests it next time.
+// ═══════════════════════════════════════════════════════
+let colorLibrary = {
+  acrylic:      [],   // e.g. Espresso, Sahara, Pearl
+  cabinet:      [],   // e.g. Mahogany, Charcoal
+  cover:        [],   // e.g. Black, Mahogany, Bluwater Special
+  coverModel:   [],   // e.g. Standard, Quattro, 84x84
+  plasticWrap:  [],   // e.g. White, Clear, Blue
+  spaModel:     [],   // e.g. Quattro VS, Pioneer, Trail
+};
+
+// Mapping: when a given spa model is used, what cover model + color was last paired with it?
+// Keyed by lowercase spa model. Updated on every save. Used to auto-fill cover fields.
+// Example: { "quattro vs": { coverModel: "Quattro", coverColor: "Black" } }
+let coverModelMapping = {};
+
+// Factory-known colors — when one of these is typed in the cover-color field,
+// the source toggle auto-switches to "Factory" (override-able by user).
+// Currently just Bluwater per Alberto's spec; can be extended.
+const FACTORY_COVER_COLORS = ['bluwater', 'bluwater special'];
+
+// ═══════════════════════════════════════════════════════
+// COVER INVENTORY — physical covers, split between Warehouse and Factory.
+// Schema: {id, color, model, qty, lowThreshold, location, source, updated, history}
+// source = 'warehouse' (default, majority) or 'factory' (mostly Bluwater + transfers)
+// Alberto fills real counts from physical inventory. Empty by default to start clean.
+// ═══════════════════════════════════════════════════════
+let coverInventory = [];
 
 // ═══════════════════════════════════════════════════════
 // MARRIAGES — spa-to-accessory pairings
@@ -3058,6 +3134,7 @@ const PAGES = {
   schedule:['Schedule','Calendar of shipments & dispatches'],
   factory:['Factory Warehouse','Aspen production · Spas & accessories ready to ship'],
   marriages:['Marriages','Spa + accessory pairings — must ship together'],
+  covers:['Cover Inventory','Spa covers in warehouse storage · auto-decrements when assigned to a spa'],
   incoming:['Incoming Spas','Units arriving to warehouse'],
   intransit:['In Transit','Spas loaded on truck · waiting at warehouse'],
   truck:['Loading Bay','Ready to load · scan QR to put on truck'],
@@ -3100,6 +3177,7 @@ function goV(v){
   if(v==='config')renderConfig();
   if(v==='factory')renderFactory();
   if(v==='marriages')renderMarriages();
+  if(v==='covers')renderCoverInventory();
   if(v==='requests')renderRequests();
   if(v==='receiving')renderReceiving();
   updBadges();
@@ -3134,6 +3212,14 @@ function updBadges(){
   document.getElementById('nb-fct').textContent = fctCount || '';
   document.getElementById('nb-mar').textContent = marPending || '';
   document.getElementById('nb-mar').className = 'nb'+(marPending>0?' red':'');
+  // Cover inventory badge: count rows that are at/below low threshold
+  const lowCovers = coverInventory.filter(c => c.qty <= (c.lowThreshold||0)).length;
+  const nbCov = document.getElementById('nb-cov');
+  if(nbCov){
+    nbCov.textContent = lowCovers || '';
+    nbCov.className = 'nb' + (lowCovers>0 ? ' red' : '');
+    nbCov.style = lowCovers>0 ? '' : 'background:#e0e7ff;color:#3730a3';
+  }
   const na=document.getElementById('notif-area');
   // Priority: dispatch-missing > marriage warnings > queue > incoming
   const missing = findMissingDispatches();
@@ -8565,6 +8651,13 @@ function renderFactory(){
         <span class="tbadge tb${(f.type||'h')[0]}" style="display:inline-block">${tl(f.type)}</span>
         <span style="margin-left:6px">Added ${fmtD(f.added)}</span>
       </div>
+      ${(f.model || f.colors || f.acrylicColor || f.cabinetColor) ? `<div style="font-size:10.5px;color:var(--text2);margin-top:3px">${f.model?`<strong>${escapeHTML(f.model)}</strong>`:''}${(f.model && (f.colors||f.acrylicColor||f.cabinetColor))?' · ':''}${f.acrylicColor||f.cabinetColor ? [f.acrylicColor && `Acrylic: ${escapeHTML(f.acrylicColor)}`, f.cabinetColor && `Cabinet: ${escapeHTML(f.cabinetColor)}`].filter(Boolean).join(' · ') : (f.colors?escapeHTML(f.colors):'')}</div>` : ''}
+      ${f.cover ? `<div style="display:inline-flex;align-items:center;gap:5px;background:#eef2ff;color:#3730a3;border:1px solid #c7d2fe;font-size:10px;font-weight:600;padding:2px 8px;border-radius:6px;margin-top:5px"${f.cover.note?` title="${escapeHTML(f.cover.note)}"`:''}>🛌 Cover: ${escapeHTML(f.cover.color)}${f.cover.color==='Bluwater Special'?' ⭐':''}</div>`:''}
+      ${f.plasticWrap ? `<div style="display:inline-flex;align-items:center;gap:5px;background:#f0f9ff;color:#0c4a6e;border:1px solid #bae6fd;font-size:10px;font-weight:600;padding:2px 8px;border-radius:6px;margin-top:5px;margin-left:4px">🎀 Wrap: ${escapeHTML(f.plasticWrap)}</div>`:''}
+      ${Array.isArray(f.looseAccessories) && f.looseAccessories.length ? `
+        <div style="background:#fef9c3;border:1px dashed #f59e0b;border-radius:6px;padding:5px 8px;margin-top:6px;font-size:10px;color:#78350f" title="${f.looseAccessories.map(a=>escapeHTML(a)).join(' · ')}">
+          📦 <strong>${f.looseAccessories.length}</strong> loose accessor${f.looseAccessories.length===1?'y':'ies'} inside
+        </div>` : ''}
       ${readyTag}${returnedTag}
       ${f.notes ? `<div style="font-size:10.5px;color:var(--text2);margin-bottom:7px;font-style:italic">${f.notes}</div>` : ''}
       ${marTag}
@@ -8596,9 +8689,75 @@ function openFactoryAdd(){
           </select>
         </div>
       </div>
+      <div class="fgrid fgrid3" style="margin-bottom:8px">
+        <div class="fg"><label class="fl">Model</label>
+          <input class="fi" id="fct-model" list="dl-spa-model" placeholder="e.g. Quattro VS, Pioneer, Trail" oninput="autoFillCoverFromModel('fct')">
+          <datalist id="dl-spa-model">${libOptions('spaModel')}</datalist>
+        </div>
+        <div class="fg"><label class="fl">Acrylic Color</label>
+          <input class="fi" id="fct-acrylic" list="dl-acrylic" placeholder="Type or pick…">
+          <datalist id="dl-acrylic">${libOptions('acrylic')}</datalist>
+        </div>
+        <div class="fg"><label class="fl">Cabinet Color</label>
+          <input class="fi" id="fct-cabinet" list="dl-cabinet" placeholder="Type or pick…">
+          <datalist id="dl-cabinet">${libOptions('cabinet')}</datalist>
+        </div>
+      </div>
+      <div class="fgrid fgrid3" style="margin-bottom:8px">
+        <div class="fg"><label class="fl">Plastic Wrap</label>
+          <input class="fi" id="fct-wrap" list="dl-wrap" placeholder="Type or pick…">
+          <datalist id="dl-wrap">${libOptions('plasticWrap')}</datalist>
+        </div>
+        <div class="fg"><label class="fl">Added Date</label><input class="fi" type="date" id="fct-added" value="${toISO()}"></div>
+        <div class="fg"></div>
+      </div>
+      <!-- Cover section — checkbox toggles the color picker. Source (Warehouse default / Factory)
+           determines which inventory gets decremented on save. Bluwater auto-switches to Factory. -->
+      <div style="background:#eef2ff;border:1px dashed #6366f1;border-radius:8px;padding:10px 12px;margin:8px 0">
+        <label style="display:flex;align-items:center;gap:8px;font-weight:700;color:#3730a3;font-size:12px;cursor:pointer;margin-bottom:6px">
+          <input type="checkbox" id="fct-has-cover" onchange="toggleCoverPicker('fct')" style="width:15px;height:15px;cursor:pointer">
+          🛌 Includes cover
+        </label>
+        <div id="fct-cover-picker" style="display:none">
+          <div class="fgrid fgrid3" style="margin-top:8px">
+            <div class="fg"><label class="fl">Cover Color</label>
+              <input class="fi" id="fct-cover-color" list="dl-cover" placeholder="Type or pick…" oninput="autoSuggestCoverSource('fct')">
+              <datalist id="dl-cover">${libOptions('cover')}</datalist>
+            </div>
+            <div class="fg"><label class="fl">Cover Model</label>
+              <input class="fi" id="fct-cover-model" list="dl-cover-model" placeholder="e.g. Quattro, Standard, 84x84" oninput="renderCoverStockHint('fct')">
+              <datalist id="dl-cover-model">${libOptions('coverModel')}</datalist>
+            </div>
+            <div class="fg"><label class="fl">Source (where the cover ships from)</label>
+              <div style="display:flex;gap:14px;padding:7px 0;font-size:11.5px;font-weight:600">
+                <label style="display:flex;align-items:center;gap:5px;cursor:pointer;color:#1e40af">
+                  <input type="radio" name="fct-cover-source" value="warehouse" checked onchange="markSourceTouched('fct')"> 🏬 Warehouse
+                </label>
+                <label style="display:flex;align-items:center;gap:5px;cursor:pointer;color:#92400e">
+                  <input type="radio" name="fct-cover-source" value="factory" onchange="markSourceTouched('fct')"> 🏭 Factory
+                </label>
+              </div>
+            </div>
+          </div>
+          <div id="fct-cover-stock" style="font-size:10.5px;margin-top:4px;min-height:14px;line-height:1.3"></div>
+          <div class="fgrid" style="margin-top:6px">
+            <div class="fg"><label class="fl">Bluwater Note (if special)</label>
+              <input class="fi" id="fct-cover-note" placeholder="e.g. PO #1234 / custom size">
+            </div>
+          </div>
+        </div>
+      </div>
       <div class="fgrid">
         <div class="fg"><label class="fl">Notes</label><input class="fi" id="fct-notes" placeholder="e.g. Built — ready to ship"></div>
-        <div class="fg"><label class="fl">Added Date</label><input class="fi" type="date" id="fct-added" value="${toISO()}"></div>
+      </div>
+      <!-- Loose accessories that travel inside the spa (steps, chemicals, table, etc.) -->
+      <div style="background:#fef9c3;border:1px dashed #f59e0b;border-radius:8px;padding:10px 12px;margin:8px 0">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+          <label class="fl" style="margin:0;color:#78350f;font-weight:700">📦 Loose accessories inside spa</label>
+          <button class="btn btn-sm" style="padding:4px 9px;font-size:10.5px" onclick="addLooseAccRow()">+ Add</button>
+        </div>
+        <div style="font-size:10px;color:#78350f;margin-bottom:6px">Anything packed inside the spa: steps, chemicals kit, folding table, ozonator, cover lifter…</div>
+        <div id="fct-loose-list"></div>
       </div>
       <div class="faction" style="margin-top:10px">
         <button class="btn btn-p" onclick="addFactorySpa()">Add Spa to Factory</button>
@@ -8639,12 +8798,73 @@ function switchFctAddTab(tab,btn){
   document.getElementById('fct-acc-form').style.display = tab==='accessory' ? '' : 'none';
 }
 
+// ── Loose-accessory form helpers ─────────────────────────────
+// Used in Add-to-Factory form to capture items that travel INSIDE the spa
+// (steps, chemicals kit, folding table, ozonator, cover lifter, etc.)
+// These are listed on the printed shipping label so warehouse + dealer know what's inside.
+let _looseAccCounter = 0;
+function addLooseAccRow(presetValue){
+  const list = document.getElementById('fct-loose-list');
+  if(!list) return;
+  const rowId = 'loose-row-' + (++_looseAccCounter);
+  const row = document.createElement('div');
+  row.id = rowId;
+  row.style.cssText = 'display:flex;gap:6px;margin-bottom:5px;align-items:center';
+  row.innerHTML = `
+    <input class="fi loose-acc-input" placeholder="e.g. Steps · 5lb chlorine starter · folding cocktail table"
+           value="${escapeHTML(presetValue||'')}"
+           style="flex:1;background:#fff;font-size:11px;padding:6px 9px">
+    <button class="btn btn-sm" style="background:#fee2e2;color:#991b1b;border-color:#fecaca;padding:5px 9px;font-size:11px;line-height:1"
+            onclick="document.getElementById('${rowId}')?.remove()" title="Remove this accessory">✕</button>
+  `;
+  list.appendChild(row);
+  // Focus the new input for fast multi-add
+  setTimeout(() => row.querySelector('.loose-acc-input')?.focus(), 30);
+}
+function readLooseAccessories(){
+  // Returns array of trimmed non-empty strings from the form inputs
+  return Array.from(document.querySelectorAll('#fct-loose-list .loose-acc-input'))
+    .map(el => (el.value || '').trim())
+    .filter(v => v.length > 0);
+}
+
+// When user types or changes the spa Model field, look up a previously-paired cover
+// and pre-fill the Cover Model + Color (only if "Includes cover" is already checked
+// and cover-color is still empty, so we don't overwrite their current entry).
+function autoFillCoverFromModel(prefix){
+  const spaModel = (document.getElementById(prefix+'-model')?.value || '').trim();
+  if(!spaModel) return;
+  const mapping = lookupCoverFromSpaModel(spaModel);
+  if(!mapping) return;
+  const hasCover = document.getElementById(prefix+'-has-cover')?.checked;
+  if(!hasCover) return; // only fill when user has indicated this spa carries a cover
+  const colorEl = document.getElementById(prefix+'-cover-color');
+  const modelEl = document.getElementById(prefix+'-cover-model');
+  if(colorEl && !colorEl.value.trim() && mapping.coverColor){ colorEl.value = mapping.coverColor; autoSuggestCoverSource(prefix); }
+  if(modelEl && !modelEl.value.trim() && mapping.coverModel){ modelEl.value = mapping.coverModel; }
+  renderCoverStockHint(prefix);
+}
+
 function addFactorySpa(){
   const sn = (document.getElementById('fct-sn').value||'').trim();
   const dealer = (document.getElementById('fct-dealer').value||'').trim();
   const type = document.getElementById('fct-type').value;
+  const model = (document.getElementById('fct-model')?.value||'').trim();
+  const acrylicColor = (document.getElementById('fct-acrylic')?.value||'').trim();
+  const cabinetColor = (document.getElementById('fct-cabinet')?.value||'').trim();
+  const plasticWrap = (document.getElementById('fct-wrap')?.value||'').trim();
   const notes = (document.getElementById('fct-notes').value||'').trim();
   const added = document.getElementById('fct-added').value || toISO();
+  const looseAccessories = readLooseAccessories();
+  // Cover: only set if "Includes cover" is checked AND a color was provided
+  const hasCover = document.getElementById('fct-has-cover')?.checked;
+  const coverColor = hasCover ? (document.getElementById('fct-cover-color')?.value||'').trim() : '';
+  const coverModel = hasCover ? (document.getElementById('fct-cover-model')?.value||'').trim() : '';
+  const coverNote  = hasCover ? (document.getElementById('fct-cover-note')?.value||'').trim() : '';
+  const coverSource = hasCover ? (document.querySelector('input[name="fct-cover-source"]:checked')?.value || 'warehouse') : '';
+  const cover = (hasCover && coverColor) ? {color: coverColor, model: coverModel, note: coverNote, source: coverSource, addedAt: toISO()} : null;
+  // Legacy combined colors string for backward-compat with code that reads f.colors
+  const colors = [acrylicColor && `Acrylic: ${acrylicColor}`, cabinetColor && `Cabinet: ${cabinetColor}`].filter(Boolean).join(' · ');
   if(!sn){ toast('Serial number required','err'); return; }
   if(!dealer){ toast('Dealer/Customer required','err'); return; }
   // Warn if SN already exists somewhere
@@ -8652,26 +8872,202 @@ function addFactorySpa(){
   if(existing){
     if(!confirm(`⚠ S/N ${sn} already exists in the system:\n\n${existing.dealer} (${existing.location})\n\nAdd anyway?`)) return;
   }
+  // If a cover is being added, try to decrement from the chosen source inventory
+  if(cover){
+    const ok = decrementCoverStock(cover.color, cover.model, cover.source, sn);
+    if(!ok) return; // user cancelled at low/zero/missing-row prompt
+  }
+  // Learn every typed value so future datalists suggest them (auto-growing library)
+  learnFromInput('spaModel',    model);
+  learnFromInput('acrylic',     acrylicColor);
+  learnFromInput('cabinet',     cabinetColor);
+  learnFromInput('plasticWrap', plasticWrap);
+  learnFromInput('cover',       coverColor);
+  learnFromInput('coverModel',  coverModel);
+  // Remember this spa-model → cover pairing for auto-fill next time
+  if(cover) rememberCoverForSpaModel(model, coverModel, coverColor);
   snapshot('factory add spa');
   // Generate a unique tracking ID — used by QR labels and end-to-end tracking workflow
   const trackingId = makeTrackingId('SPA');
   const newId = ++nid;
   factory.push({
     id: newId, sn, dealer, type, added, notes,
+    model, colors, acrylicColor, cabinetColor, plasticWrap, cover,
+    looseAccessories,
     trackingId,
     trackingState: 'created-at-factory',
     trackingHistory: [{state:'created-at-factory', at: toISO(), by: ROLES[currentRole].label}]
   });
-  addAct(`Added ${sn} (${dealer}) to factory · TID ${trackingId}`,'var(--accent)');
+  const accNote = looseAccessories.length ? ` · ${looseAccessories.length} loose accessor${looseAccessories.length===1?'y':'ies'} inside` : '';
+  const coverNoteAct = cover ? ` · 🛌 ${cover.color}${cover.model?' '+cover.model:''} (${cover.source==='factory'?'Factory':'Warehouse'})` : '';
+  addAct(`Added ${sn} (${dealer}) to factory · TID ${trackingId}${accNote}${coverNoteAct}`,'var(--accent)');
   toast(`${sn} added · ready to print QR label`,'ok');
   document.getElementById('factory-float-panel').innerHTML='';
   renderFactory(); updBadges();
   // Auto-prompt to print the QR label
   setTimeout(()=>{
-    if(confirm(`Print QR shipping label for ${sn}?\n\nThe label will include S/N, dealer, and a QR code for warehouse scanning.`)){
+    if(confirm(`Print QR shipping label for ${sn}?\n\nThe label will include S/N, dealer, model, colors, cover, wrap, and a QR code for warehouse scanning.`)){
       printQRLabel(newId, 'factory');
     }
   }, 250);
+}
+
+// ═══════════════════════════════════════════════════════
+// COLOR/MODEL LIBRARY HELPERS — auto-learn values as Alberto types them.
+// Every form save calls learnFromInput(category, value) for each field, so the
+// datalists grow organically. No "manage colors" UI needed for MVP.
+// ═══════════════════════════════════════════════════════
+function learnFromInput(category, value){
+  if(!value) return;
+  value = String(value).trim();
+  if(!value) return;
+  if(!colorLibrary[category]) colorLibrary[category] = [];
+  // Case-insensitive dedup — preserve first-typed casing
+  if(!colorLibrary[category].some(x => x.toLowerCase() === value.toLowerCase())){
+    colorLibrary[category].push(value);
+    colorLibrary[category].sort((a,b) => a.localeCompare(b));
+  }
+}
+
+// Build a <datalist> options string from the library (used inside form HTML).
+function libOptions(category){
+  const list = colorLibrary[category] || [];
+  return list.map(v => `<option value="${v.replace(/"/g,'&quot;')}">`).join('');
+}
+
+// Look up a previously-used cover for a given spa model. Case-insensitive partial match:
+// "Quattro VS" matches a saved mapping for "quattro" if exact key not found.
+// Returns {coverModel, coverColor} or null.
+function lookupCoverFromSpaModel(spaModel){
+  if(!spaModel) return null;
+  const key = String(spaModel).toLowerCase().trim();
+  if(!key) return null;
+  // Exact match first
+  if(coverModelMapping[key]) return coverModelMapping[key];
+  // Partial match: look for any mapping whose key is a prefix of the spa model's first word
+  const firstWord = key.split(/\s+/)[0];
+  for(const k of Object.keys(coverModelMapping)){
+    if(k.split(/\s+/)[0] === firstWord) return coverModelMapping[k];
+  }
+  return null;
+}
+
+// Save a spa-model → cover mapping so next time the user adds a similar spa,
+// we can auto-fill the cover fields. Called from addFactorySpa/saveFactoryEdit.
+function rememberCoverForSpaModel(spaModel, coverModel, coverColor){
+  if(!spaModel || (!coverModel && !coverColor)) return;
+  const key = String(spaModel).toLowerCase().trim();
+  if(!key) return;
+  coverModelMapping[key] = {coverModel: coverModel||'', coverColor: coverColor||''};
+}
+
+// Suggest a default cover source ('warehouse' vs 'factory') based on the color.
+// Bluwater colors live at factory per Alberto's spec; everything else defaults to warehouse.
+function suggestCoverSource(color){
+  if(!color) return 'warehouse';
+  const c = String(color).toLowerCase().trim();
+  return FACTORY_COVER_COLORS.some(fc => c.includes(fc)) ? 'factory' : 'warehouse';
+}
+// Show/hide cover color picker when "Includes cover" checkbox is toggled.
+// Prefix is 'fct' (Add form) or 'fe' (Edit form) — shared widget logic.
+function toggleCoverPicker(prefix){
+  const checked = document.getElementById(prefix+'-has-cover').checked;
+  const pickerEl = document.getElementById(prefix+'-cover-picker');
+  if(pickerEl) pickerEl.style.display = checked ? '' : 'none';
+  if(checked) renderCoverStockHint(prefix);
+}
+
+// Show live stock hint below the cover-color input so the user knows what's available
+// before they commit. Reads the source toggle so it looks at the right inventory.
+function renderCoverStockHint(prefix){
+  const color  = (document.getElementById(prefix+'-cover-color')?.value || '').trim();
+  const model  = (document.getElementById(prefix+'-cover-model')?.value || '').trim();
+  const source = document.querySelector(`input[name="${prefix}-cover-source"]:checked`)?.value || 'warehouse';
+  const hintEl = document.getElementById(prefix+'-cover-stock');
+  if(!hintEl) return;
+  const srcLabel = source === 'factory' ? '🏭 Factory' : '🏬 Warehouse';
+  if(!color){ hintEl.innerHTML = `<span style="color:var(--text3)">Cover will deduct from ${srcLabel} inventory on save</span>`; return; }
+  // Match color+model+source — covers come in color×model combos per source
+  const row = coverInventory.find(c =>
+    (c.source||'warehouse') === source &&
+    c.color.toLowerCase() === color.toLowerCase() &&
+    (!model || (c.model||'').toLowerCase() === model.toLowerCase())
+  );
+  if(!row){
+    hintEl.innerHTML = `<span style="color:#92400e;font-weight:600">⚠ Not in ${srcLabel} inventory — will be added as new row on save (qty -1)</span>`;
+    return;
+  }
+  if(row.qty <= 0){
+    hintEl.innerHTML = `<span style="color:#dc2626;font-weight:700">⛔ Out at ${srcLabel} (qty ${row.qty}) — save will proceed to ${row.qty-1}</span>`;
+  } else if(row.qty <= row.lowThreshold){
+    hintEl.innerHTML = `<span style="color:#dc2626;font-weight:700">⚠ Low: ${row.qty} left at ${srcLabel}${row.location?' · '+escapeHTML(row.location):''}</span>`;
+  } else {
+    hintEl.innerHTML = `<span style="color:#15803d;font-weight:600">✓ ${row.qty} in stock at ${srcLabel}${row.location?' · '+escapeHTML(row.location):''}</span>`;
+  }
+}
+
+// When user types a color, auto-suggest the source (Bluwater → factory, others → warehouse).
+// Only flips if the user hasn't manually clicked a radio already (data-touched flag).
+function autoSuggestCoverSource(prefix){
+  const color = (document.getElementById(prefix+'-cover-color')?.value || '').trim();
+  const touched = document.querySelector(`input[name="${prefix}-cover-source"][data-touched="true"]`);
+  if(!touched){
+    const suggested = suggestCoverSource(color);
+    const target = document.querySelector(`input[name="${prefix}-cover-source"][value="${suggested}"]`);
+    if(target) target.checked = true;
+  }
+  renderCoverStockHint(prefix);
+}
+
+// Mark source radio as user-touched so auto-suggest doesn't override it.
+function markSourceTouched(prefix){
+  document.querySelectorAll(`input[name="${prefix}-cover-source"]`).forEach(el => el.setAttribute('data-touched','true'));
+  renderCoverStockHint(prefix);
+}
+
+// Decrement cover stock by 1 from the specified source. Returns true if OK to proceed.
+// Confirms with user when stock is 0 or row is missing (auto-creates).
+function decrementCoverStock(color, model, source, spaSn){
+  source = source || 'warehouse';
+  let row = coverInventory.find(c =>
+    (c.source||'warehouse') === source &&
+    c.color.toLowerCase() === color.toLowerCase() &&
+    (!model || (c.model||'').toLowerCase() === model.toLowerCase())
+  );
+  const srcLabel = source === 'factory' ? 'Factory' : 'Warehouse';
+  if(!row){
+    if(!confirm(`Cover "${color}${model?' ('+model+')':''}" not in ${srcLabel} inventory yet.\n\nAdd as a new row with qty -1 (reminder to restock)?`)) return false;
+    row = {id:++nid, color, model: model||'', qty:0, lowThreshold:1, location:'', source, updated:toISO(), history:[]};
+    coverInventory.push(row);
+  }
+  if(row.qty <= 0){
+    if(!confirm(`⚠ "${color}${model?' ('+model+')':''}" at ${srcLabel} is out of stock (qty ${row.qty}).\n\nProceed and decrement to ${row.qty - 1}?`)) return false;
+  } else if(row.qty <= row.lowThreshold){
+    if(!confirm(`⚠ "${color}${model?' ('+model+')':''}" at ${srcLabel} is at low stock (${row.qty} left).\n\nProceed and deduct one?`)) return false;
+  }
+  row.qty -= 1;
+  row.updated = toISO();
+  row.history = row.history || [];
+  row.history.push({at: toISO(), action:'decrement', spaSn: spaSn||'', by: ROLES[currentRole].label});
+  return true;
+}
+
+// Re-credit a cover back to its source inventory (used when cover removed/changed via edit).
+function incrementCoverStock(color, model, source, spaSn, reason){
+  source = source || 'warehouse';
+  let row = coverInventory.find(c =>
+    (c.source||'warehouse') === source &&
+    c.color.toLowerCase() === color.toLowerCase() &&
+    (!model || (c.model||'').toLowerCase() === model.toLowerCase())
+  );
+  if(!row){
+    row = {id:++nid, color, model: model||'', qty:0, lowThreshold:1, location:'', source, updated:toISO(), history:[]};
+    coverInventory.push(row);
+  }
+  row.qty += 1;
+  row.updated = toISO();
+  row.history = row.history || [];
+  row.history.push({at: toISO(), action:'increment', spaSn: spaSn||'', by: ROLES[currentRole].label, reason: reason||''});
 }
 
 // Generate a short, human-readable tracking ID like "ASPN-SPA-A8K4M2" (12 chars).
@@ -8693,6 +9089,9 @@ function makeTrackingId(prefix){
 // QR CODE TRACKING — End-to-end label + scan workflow
 // Factory → Truck → Warehouse → Dispatch
 // ═══════════════════════════════════════════════════════════════
+
+// Aspen Spas logo (transparent PNG, ~6.7 KB base64) — embedded for printed shipping labels
+const ASPEN_LOGO_B64 = 'data:image/png;base64,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';
 
 // Lazy-load qrcode-generator (small ~7KB) — only when first QR is needed.
 let _qrLibLoading = null;
@@ -8766,54 +9165,281 @@ async function printQRLabel(itemId, source){
     type: item.type || '',
     dealer: item.dealer || ''
   });
-  // Generate QR (Type 0 = auto, Error correction M)
+  // Generate QR (Type 0 = auto, Error correction M) — sized for 1.6in print on full-width label
   const qr = qrcode(0, 'M');
   qr.addData(payload);
   qr.make();
-  const qrSvg = qr.createSvgTag({cellSize: 6, margin: 2});
+  const qrSvg = qr.createSvgTag({cellSize: 6, margin: 1});
+
+  // Detect whether this is an accessory (loose part) vs a spa — the label layout adapts.
+  // Spas show all available fields: Dealer / Serial / Model / Acrylic / Cabinet / Cover / Wrap / Date.
+  // Each field renders only if it has a value (filter at the end), so blank rows don't waste space.
+  // The `wide` flag controls landscape 2-column grid layout: wide fields span both columns;
+  // narrow fields pair up (Acrylic+Cabinet, Cover+Wrap) when both partners are present.
+  const isAccessory = (item.type === 'accessory' || item.type === 'misc');
+  const today = new Date().toLocaleDateString('en-US', { month:'long', day:'numeric', year:'numeric' });
+  // Cover field value: "Charcoal Quattro (W)" or "Bluwater Special (F)" — source-letter clarifies origin
+  const coverValue = item.cover
+    ? `${item.cover.color || ''}${item.cover.model ? ' ' + item.cover.model : ''} (${item.cover.source === 'factory' ? 'F' : 'W'})`.trim()
+    : '';
+  // Has-flags used to decide which color fields can pair up in the 2-col landscape grid
+  const hasAcrylic = !!item.acrylicColor;
+  const hasCabinet = !!item.cabinetColor;
+  const hasCover   = !!item.cover && !!coverValue;
+  const hasWrap    = !!item.plasticWrap;
+  const fields = (isAccessory ? [
+    { label: 'Accessory',  value: item.dealer || '',                       wide: true },
+    { label: 'Tracking',   value: item.trackingId || '',                   wide: true },
+    { label: 'Married to', value: item.marriedSn ? `S/N ${item.marriedSn}` : '', wide: true },
+    ...(((item.qty || 1) > 1) ? [{ label: 'Qty', value: String(item.qty), wide: true }] : []),
+    { label: 'Date',       value: today,                                   wide: true }
+  ] : [
+    { label: 'Dealer',    value: item.dealer || '',                     wide: true },
+    { label: 'Serial #',  value: item.sn || item.trackingId || '',      wide: true },
+    { label: 'Model',     value: item.model || '',                      wide: true },
+    // Acrylic and Cabinet on separate rows (avoids the truncation problem of combined "Colors").
+    // In 2-col landscape grid: pair up when both present; when alone, take full row.
+    ...((item.acrylicColor || item.cabinetColor)
+      ? [
+          ...(item.acrylicColor ? [{ label: 'Acrylic', value: item.acrylicColor, wide: !hasCabinet }] : []),
+          ...(item.cabinetColor ? [{ label: 'Cabinet', value: item.cabinetColor, wide: !hasAcrylic }] : [])
+        ]
+      : (item.colors ? [{ label: 'Colors', value: item.colors, wide: true }] : [])),
+    // Cover and Wrap pair up in 2-col grid (same logic as Acrylic+Cabinet).
+    // Cover includes source letter (W=Warehouse, F=Factory) so staff know where it came from.
+    { label: 'Cover',     value: coverValue,                            wide: !hasWrap },
+    { label: 'Wrap',      value: item.plasticWrap || '',                wide: !hasCover },
+    { label: 'Date',      value: today,                                 wide: true }
+  ]).filter(f => f.value);
+  const looseAcc = Array.isArray(item.looseAccessories) ? item.looseAccessories.filter(a=>a && a.trim()) : [];
+  const hasAcc = looseAcc.length > 0;
+  // The label has THREE sizing modes that switch automatically:
+  //   • Default ('label')              → big bumped fonts — used for 5 or fewer spa fields, no accessories
+  //   • Compact ('label compact')      → tighter sizing + 2-col grid in landscape — engages for 6+ fields or accessories
+  //   • Accessory ('label accessory')  → moderate sizing + wrap-friendly — for accessory-only labels
+  const labelCssClass = isAccessory ? 'label accessory landscape'
+                      : ((hasAcc || fields.length > 5) ? 'label compact landscape' : 'label landscape');
+  const accSection = (hasAcc && !isAccessory) ? `
+    <div class="acc-box">
+      <div class="acc-title">📦 Loose accessories packed inside spa</div>
+      <ul class="acc-list">
+        ${looseAcc.map(a => `<li>${escapeHTML(a)}</li>`).join('')}
+      </ul>
+    </div>` : '';
+
+  // Build the inner label content (used once — fills the top half of a letter sheet for visibility).
+  // Each field gets a 'wide' class when it should span both columns in the 2-col landscape grid.
+  // In portrait mode (single-column flex), the 'wide' class is a no-op.
+  const labelInner = `
+      <div class="logo-bar">
+        <img src="${ASPEN_LOGO_B64}" alt="Aspen Spas">
+      </div>
+      <div class="mid">
+        <div class="fields">
+          ${fields.map(f => `
+            <div class="field${f.wide ? ' wide' : ''}">
+              <div class="field-label">${f.label}</div>
+              <div class="field-value">${escapeHTML(f.value)}</div>
+            </div>`).join('')}
+        </div>
+        <div class="qr-col">
+          <div class="qr-box">${qrSvg}</div>
+          <div class="qr-cap">SCAN TO TRACK</div>
+          <div class="qr-tid">${item.trackingId}</div>
+        </div>
+      </div>
+      ${accSection}`;
 
   const w = window.open('', '_blank');
-  const labelHtml = `<!DOCTYPE html><html><head><title>Shipping Label · ${item.sn || item.trackingId}</title>
+  // Print layout: LETTER portrait, single label with inner padding ("normal margins")
+  // for content. Label has min-height to ensure all 5 fields + logo + QR are visible.
+  // Accessories area at bottom has its own max-height to prevent distortion.
+  const labelHtml = `<!DOCTYPE html><html><head><title>Aspen Spas Label · ${item.sn || item.trackingId}</title>
+    <!-- Dynamic @page rules — changed by setMode() when user picks portrait vs landscape.
+         Defaults to landscape since most spas now have many fields (cover/wrap) that fit best on landscape. -->
+    <style id="page-rules">@page { size: letter landscape; margin: 0.4in; }</style>
     <style>
-      @page { size: 4in 6in; margin: 0.15in; }
-      body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin:0; padding:18px; color:#0f172a; }
-      .label { width: 100%; max-width: 380px; margin: 0 auto; border: 2px solid #0f172a; border-radius: 8px; padding: 14px; box-sizing: border-box; }
-      .hd { display:flex; justify-content:space-between; align-items:center; border-bottom: 2px solid #0f172a; padding-bottom: 8px; margin-bottom: 12px; }
-      .brand { font-size: 14px; font-weight: 800; letter-spacing: 0.04em; }
-      .brand-sub { font-size: 9px; color: #475569; letter-spacing: 0.08em; text-transform: uppercase; }
-      .type-badge { font-size: 9px; padding: 3px 8px; border-radius: 11px; background: #0f172a; color: #fff; font-weight: 700; letter-spacing: 0.06em; }
-      .sn { font-family: ui-monospace, SFMono-Regular, monospace; font-size: 32px; font-weight: 800; line-height: 1; margin-bottom: 4px; }
-      .dealer { font-size: 14px; font-weight: 600; margin-bottom: 14px; color: #1e293b; }
-      .qr-wrap { display:flex; justify-content:center; padding: 8px 0; background: #fff; }
-      .qr-wrap svg { display:block; max-width: 100%; height: auto; }
-      .tid { font-family: ui-monospace, monospace; font-size: 10px; color:#475569; letter-spacing:0.05em; text-align:center; margin-top: 6px; word-break: break-all; }
-      .meta { display:flex; justify-content:space-between; font-size: 9px; color: #64748b; margin-top: 10px; padding-top: 8px; border-top: 1px dashed #cbd5e1; }
-      @media print { body { padding: 0; } .no-print { display:none; } }
-      .no-print { text-align:center; margin-top: 14px; }
-      .no-print button { padding: 8px 18px; background:#0f172a; color:#fff; border:0; border-radius:6px; font-size:13px; font-weight:600; cursor:pointer; margin: 0 4px; }
+      *, *::before, *::after { box-sizing: border-box; }
+      html, body { margin:0; padding:0; }
+      body { font-family: Georgia, 'Times New Roman', serif; color:#1a1a1a; background:#fff; }
+      /* The label has THREE modes that compose via CSS classes:
+         • Default (.label)              → 5.5in wide × auto-grows from 5in, big 38px fonts
+         • Compact (.label.compact)      → 5.5in wide × auto-grows from 6.7in, 31px fonts when 6+ fields or accessories present
+         • Landscape (.label.landscape)  → full letter landscape, HUGE 48px fonts
+         • Landscape+Compact combine     → full letter landscape, 40px when many fields/accessories
+         The container uses min-height (not height) so it expands when content requires it,
+         which prevents the bottom of the last field's letters from being clipped. */
+      .label {
+        width: 5.5in;
+        min-height: 5in;
+        margin: 0 auto;
+        padding: 0.1in 0.16in 0.2in 0.16in;
+        display: flex;
+        flex-direction: column;
+        page-break-inside: avoid;
+      }
+      /* TITLE — Aspen Spas logo */
+      .logo-bar { flex: 0 0 auto; text-align: center; padding: 0 0 4px 0; }
+      .logo-bar img { display: block; margin: 0 auto; height: 0.75in; width: auto; max-width: 55%; }
+      /* MIDDLE — fields + QR side-by-side. No overflow:hidden so descenders aren't clipped. */
+      .mid { flex: 1 1 auto; display: grid; grid-template-columns: 1fr 1.7in; gap: 16px; padding-top: 2px; align-items: stretch; min-height: 0; }
+      .fields { display: flex; flex-direction: column; gap: 2px; justify-content: space-between; min-height: 0; }
+      .field { font-family: Georgia, 'Times New Roman', serif; }
+      .field-label { font-size: 38px; font-weight: 400; color: #6b4226; letter-spacing: 0.4px; line-height: 1; margin-bottom: 0; }
+      .field-value { font-family: Georgia, serif; font-size: 49px; font-weight: 700; color: #1a1a1a; padding: 2px 6px 6px 6px; border-bottom: 2.5px solid #1a1a1a; min-height: 56px; line-height: 1.05; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: center; }
+      .field-value.empty { color: #cbd5e1; font-weight: 400; font-style: italic; }
+      /* QR column — vertically centered */
+      .qr-col { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; }
+      .qr-box { padding: 6px; border: 2.4px solid #1a1a1a; border-radius: 8px; background: #fff; }
+      .qr-box svg { display: block; width: 1.35in; height: 1.35in; }
+      .qr-cap { font-family: ui-monospace, 'Courier New', monospace; font-size: 10px; color: #475569; letter-spacing: 0.7px; margin-top: 2px; font-weight: 600; }
+      .qr-tid { font-family: ui-monospace, monospace; font-size: 8px; color: #94a3b8; word-break: break-all; max-width: 1.55in; text-align: center; line-height: 1.2; }
+      /* BOTTOM — accessories (slightly smaller than field labels for hierarchy + room) */
+      .acc-box { flex: 0 0 auto; margin-top: 6px; padding: 0; background: transparent; border: 0; }
+      .acc-title { font-family: Georgia, serif; font-size: 28px; font-weight: 400; color: #6b4226; letter-spacing: 0.4px; line-height: 1; margin-bottom: 2px; padding-bottom: 2px; border-bottom: 3px solid #1a1a1a; }
+      .acc-list { margin: 0; padding-left: 26px; font-family: Georgia, serif; font-size: 28px; font-weight: 700; color: #1a1a1a; line-height: 1.15; columns: 2; column-gap: 20px; }
+      .acc-list li { margin-bottom: 1px; break-inside: avoid; }
+
+      /* ═══ EXTRAS BOX — legacy CSS, no longer rendered (Cover/Wrap now render as fields).
+         Kept here in case we need to bring back the chip footer in a future variant. */
+      .extras-box { flex: 0 0 auto; margin-top: 4px; padding: 3px 0; display: flex; flex-wrap: wrap; gap: 6px; }
+      .extras-chip { display: inline-flex; align-items: center; gap: 4px; padding: 4px 10px; border: 1.5px solid; border-radius: 7px; font-family: Georgia, serif; font-size: 16px; font-weight: 600; line-height: 1.1; }
+      .extras-chip strong { font-weight: 800; }
+
+      /* ═══ COMPACT MODE — auto-engages when spa has 6+ fields (e.g. Cover+Wrap present) or
+         loose accessories present. Fields stack from the top with flex-start. Container
+         expands to fit (min-height: 6.7in is enough room for 8 fields + logo + accessories). */
+      .label.compact { min-height: 6.7in; }
+      .label.compact .logo-bar img { height: 0.5in; }
+      .label.compact .logo-bar { padding: 0 0 1px 0; }
+      .label.compact .mid { grid-template-columns: 1fr 1.2in; gap: 12px; padding-top: 0; }
+      .label.compact .fields { gap: 2px; justify-content: flex-start; }
+      .label.compact .field-label { font-size: 24px; }
+      .label.compact .field-value { font-size: 31px; min-height: 38px; line-height: 1.05; padding: 2px 4px 4px 4px; border-bottom: 1.5px solid #1a1a1a; text-align: center; }
+      .label.compact .qr-box svg { width: 1in; height: 1in; }
+      .label.compact .qr-box { padding: 4px; border-width: 1.6px; }
+      .label.compact .qr-cap { font-size: 8px; }
+      .label.compact .qr-tid { font-size: 6.5px; max-width: 1.15in; }
+      .label.compact .acc-box { margin-top: 4px; }
+      .label.compact .acc-title { font-size: 18px; padding-bottom: 1px; border-bottom-width: 1.5px; margin-bottom: 1px; }
+      .label.compact .acc-list { font-size: 18px; padding-left: 18px; column-gap: 12px; line-height: 1.15; }
+      .label.compact .extras-box { margin-top: 2px; gap: 4px; padding: 2px 0; }
+      .label.compact .extras-chip { font-size: 13px; padding: 2px 8px; border-width: 1.2px; }
+
+      /* ═══ ACCESSORY MODE — for accessory-only labels (cabinet doors, lights, etc.) ═══
+         Accessory names can be long ("Extra Cabinet Door — Mahogany"), so this mode uses
+         moderate font sizes and allows text wrapping instead of truncating with "..." */
+      .label.accessory .logo-bar img { height: 0.6in; }
+      .label.accessory .logo-bar { padding: 0 0 4px 0; }
+      .label.accessory .mid { grid-template-columns: 1fr 1.5in; gap: 14px; padding-top: 4px; }
+      .label.accessory .fields { gap: 6px; justify-content: flex-start; }
+      .label.accessory .field-label { font-size: 28px; }
+      .label.accessory .field-value { font-size: 34px; line-height: 1.15; min-height: 32px; padding: 0 6px 2px 6px; border-bottom: 2px solid #1a1a1a; white-space: normal; word-break: break-word; overflow: hidden; text-align: center; }
+      .label.accessory .qr-box svg { width: 1.2in; height: 1.2in; }
+      .label.accessory .qr-box { padding: 5px; border-width: 2px; }
+
+      /* Landscape variant of accessory mode — larger fonts since we have more room */
+      .label.landscape.accessory .logo-bar img { height: 0.7in; }
+      .label.landscape.accessory .mid { grid-template-columns: 1fr 2.2in; gap: 22px; }
+      .label.landscape.accessory .fields { gap: 10px; justify-content: center; }
+      .label.landscape.accessory .field-label { font-size: 44px; }
+      .label.landscape.accessory .field-value { font-size: 56px; line-height: 1.15; min-height: 50px; padding: 0 8px 2px 8px; border-bottom: 3px solid #1a1a1a; }
+      .label.landscape.accessory .qr-box svg { width: 2in; height: 2in; }
+      .label.landscape.accessory .qr-box { padding: 9px; border-width: 3px; }
+
+      /* ═══ LANDSCAPE MODE — full letter page horizontal, HUGE 48px fonts ═══
+         When .label.landscape is applied (via the Print Landscape button), the label
+         fills the entire letter landscape page (10.2 × 7.7 in usable area).
+         min-height:7.7in + max-height:7.7in + overflow:hidden guarantees the label
+         occupies exactly one landscape sheet — content past 7.7in clips rather than
+         pushing to a second page. */
+      .label.landscape {
+        width: 10.2in;
+        min-height: 7.7in;
+        max-height: 7.7in;
+        overflow: hidden;
+        margin: 0;
+        padding: 0.08in 0.3in 0.2in 0.3in;
+      }
+      .label.landscape .logo-bar { padding: 0 0 3px 0; }
+      .label.landscape .logo-bar img { height: 0.7in; max-width: 30%; }
+      .label.landscape .mid { grid-template-columns: 1fr 2in; gap: 22px; padding-top: 0; }
+      /* justify-content: center → fields cluster vertically in the middle of mid (Alberto: "más centradas") */
+      .label.landscape .fields { gap: 2px; justify-content: center; align-items: stretch; }
+      .label.landscape .field-label { font-size: 60px; margin-bottom: 0; line-height: 1; }
+      .label.landscape .field-value { font-size: 78px; line-height: 1.05; min-height: 88px; padding: 4px 8px 8px 8px; border-bottom: 3px solid #1a1a1a; text-align: center; }
+      .label.landscape .qr-box svg { width: 2in; height: 2in; }
+      .label.landscape .qr-box { padding: 9px; border-width: 3px; }
+      .label.landscape .qr-cap { font-size: 12px; }
+      .label.landscape .qr-tid { font-size: 9px; max-width: 2.1in; }
+      .label.landscape .acc-box { margin-top: 5px; }
+      .label.landscape .acc-title { font-size: 44px; padding-bottom: 2px; border-bottom: 3.5px solid #1a1a1a; margin-bottom: 3px; line-height: 1; }
+      .label.landscape .acc-list { font-size: 44px; padding-left: 38px; column-gap: 24px; line-height: 1.15; }
+      .label.landscape .extras-box { margin-top: 5px; gap: 8px; padding: 4px 0; }
+      .label.landscape .extras-chip { font-size: 24px; padding: 6px 14px; border-width: 2px; border-radius: 9px; }
+
+      /* Landscape + Compact combination — engages when spa has 6+ fields or loose accessories.
+         Uses a 2-column CSS grid for the fields area: pair-able fields (Acrylic+Cabinet,
+         Cover+Wrap) sit side-by-side; "wide" fields (Dealer, Serial #, Model, Date) span both
+         columns. This packs 8 fields into ~6 visual rows so the whole label fits on ONE
+         landscape letter sheet (7.7in usable height) with comfortable buffer. */
+      .label.landscape.compact { min-height: 7.7in; max-height: 7.7in; overflow: hidden; }
+      .label.landscape.compact .logo-bar img { height: 0.45in; }
+      .label.landscape.compact .logo-bar { padding: 0 0 2px 0; }
+      .label.landscape.compact .mid { grid-template-columns: 1fr 1.5in; gap: 18px; }
+      /* 2-column grid for the fields. align-content:start so rows stack from top. */
+      .label.landscape.compact .fields {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        column-gap: 22px;
+        row-gap: 4px;
+        align-content: start;
+      }
+      /* Fields without .wide take ONE grid column (paired side-by-side).
+         Fields with .wide span BOTH columns (full width row). */
+      .label.landscape.compact .field.wide { grid-column: 1 / -1; }
+      .label.landscape.compact .field-label { font-size: 32px; margin-bottom: 0; line-height: 1; }
+      .label.landscape.compact .field-value { font-size: 44px; line-height: 1.05; min-height: 52px; padding: 3px 7px 6px 7px; border-bottom: 2.5px solid #1a1a1a; text-align: center; }
+      .label.landscape.compact .qr-box svg { width: 1.3in; height: 1.3in; }
+      .label.landscape.compact .qr-box { padding: 6px; border-width: 2.2px; }
+      .label.landscape.compact .acc-box { margin-top: 4px; }
+      .label.landscape.compact .acc-title { font-size: 22px; border-bottom-width: 2px; padding-bottom: 1px; margin-bottom: 1px; line-height: 1; }
+      .label.landscape.compact .acc-list { font-size: 22px; line-height: 1.15; padding-left: 22px; column-gap: 18px; }
+      .label.landscape.compact .extras-box { margin-top: 2px; gap: 6px; padding: 2px 0; }
+      .label.landscape.compact .extras-chip { font-size: 19px; padding: 4px 11px; border-width: 1.6px; }
+
+      /* Print controls */
+      @media print { .no-print { display:none; } }
+      .no-print { text-align:center; margin: 18px 0; }
+      .no-print button { padding: 9px 22px; background:#1a1a1a; color:#fff; border:0; border-radius:6px; font-size:13px; font-weight:600; cursor:pointer; margin: 0 6px; font-family: -apple-system, sans-serif; }
+      .no-print button.secondary { background: #e2e8f0; color: #1a1a1a; }
+      .no-print .hint { font-size: 11px; color: #475569; margin-bottom: 10px; font-family: -apple-system, sans-serif; }
     </style></head><body>
-    <div class="label">
-      <div class="hd">
-        <div>
-          <div class="brand">ASPEN SPAS</div>
-          <div class="brand-sub">Shipping Label</div>
-        </div>
-        <div class="type-badge">${(item.type||'SPA').toUpperCase()}</div>
-      </div>
-      <div class="sn">${item.sn || '—'}</div>
-      <div class="dealer">${item.dealer || ''}</div>
-      <div class="qr-wrap">${qrSvg}</div>
-      <div class="tid">${item.trackingId}</div>
-      <div class="meta">
-        <span>Generated: ${new Date().toLocaleDateString()}</span>
-        <span>State: ${(item.trackingState||'created').replace(/-/g,' ')}</span>
-      </div>
-    </div>
+    <div class="${labelCssClass}" id="aspen-label">${labelInner}</div>
     <div class="no-print">
-      <button onclick="window.print()">🖨 Print Label</button>
-      <button onclick="window.close()">Close</button>
+      <div class="hint">📐 Default: Landscape · Standard. Click Portrait if you prefer 5.5″ × 5″ format.</div>
+      <button onclick="setMode('portrait')">🖨 Portrait 5.5″ × 5″</button>
+      <button onclick="setMode('landscape')">🖨 Landscape · Standard</button>
+      <button class="secondary" onclick="window.close()">Close</button>
     </div>
-    <script>setTimeout(()=>window.print(), 350);<\/script>
+    <script>
+      // Print mode switcher — toggles between landscape (default) and portrait.
+      // The label already has 'landscape' class at render, so we just remove/add it here.
+      function setMode(mode){
+        var pr = document.getElementById('page-rules');
+        var lb = document.getElementById('aspen-label');
+        if(mode === 'landscape'){
+          pr.textContent = '@page { size: letter landscape; margin: 0.4in; }';
+          lb.classList.add('landscape');
+        } else {
+          pr.textContent = '@page { size: letter portrait; margin: 0.4in; }';
+          lb.classList.remove('landscape');
+        }
+        setTimeout(function(){ window.print(); }, 120);
+      }
+      // Auto-open print dialog in landscape (which is also the default render orientation)
+      setTimeout(function(){ window.print(); }, 350);
+    <\/script>
     </body></html>`;
   w.document.write(labelHtml);
   w.document.close();
@@ -9205,6 +9831,9 @@ function rmFromFactory(id){
 function openFactoryEdit(id){
   const f = factory.find(x=>x.id===id); if(!f) return;
   const isAcc = f.type==='accessory' || f.type==='misc';
+  const looseAccItems = Array.isArray(f.looseAccessories) ? f.looseAccessories : [];
+  // Reset counter to avoid id collisions when reopening the panel
+  _looseAccCounter = 0;
   document.getElementById('factory-float-panel').innerHTML = `<div class="det-panel">
     <div class="dp-hd">
       <div><div class="dp-pos">Edit Factory Item</div></div>
@@ -9217,24 +9846,148 @@ function openFactoryEdit(id){
         : `<div class="fg"><label class="fl">Serial No.</label><input class="fi" id="fe-sn" value="${f.sn||''}"></div>
            <div class="fg"><label class="fl">Dealer</label><input class="fi" id="fe-dealer" value="${f.dealer.replace(/"/g,'&quot;')}"></div>`}
     </div>
+    ${!isAcc ? `
+    <div class="fgrid fgrid3">
+      <div class="fg"><label class="fl">Model</label>
+        <input class="fi" id="fe-model" list="dl-spa-model-e" value="${(f.model||'').replace(/"/g,'&quot;')}" placeholder="e.g. Quattro VS, Pioneer" oninput="autoFillCoverFromModel('fe')">
+        <datalist id="dl-spa-model-e">${libOptions('spaModel')}</datalist>
+      </div>
+      <div class="fg"><label class="fl">Acrylic Color</label>
+        <input class="fi" id="fe-acrylic" list="dl-acrylic-e" value="${(f.acrylicColor||'').replace(/"/g,'&quot;')}" placeholder="Type or pick…">
+        <datalist id="dl-acrylic-e">${libOptions('acrylic')}</datalist>
+      </div>
+      <div class="fg"><label class="fl">Cabinet Color</label>
+        <input class="fi" id="fe-cabinet" list="dl-cabinet-e" value="${(f.cabinetColor||'').replace(/"/g,'&quot;')}" placeholder="Type or pick…">
+        <datalist id="dl-cabinet-e">${libOptions('cabinet')}</datalist>
+      </div>
+    </div>
+    <div class="fgrid fgrid3" style="margin-top:8px">
+      <div class="fg"><label class="fl">Plastic Wrap</label>
+        <input class="fi" id="fe-wrap" list="dl-wrap-e" value="${(f.plasticWrap||'').replace(/"/g,'&quot;')}" placeholder="Type or pick…">
+        <datalist id="dl-wrap-e">${libOptions('plasticWrap')}</datalist>
+      </div>
+      <div class="fg"></div>
+      <div class="fg"></div>
+    </div>
+    <!-- Cover section (edit). Hidden inputs track original color/model/source so on save
+         we can reconcile inventory (re-credit original, decrement new). -->
+    <div style="background:#eef2ff;border:1px dashed #6366f1;border-radius:8px;padding:10px 12px;margin:10px 0">
+      <label style="display:flex;align-items:center;gap:8px;font-weight:700;color:#3730a3;font-size:12px;cursor:pointer;margin-bottom:6px">
+        <input type="checkbox" id="fe-has-cover" ${f.cover ? 'checked' : ''} onchange="toggleCoverPicker('fe')" style="width:15px;height:15px;cursor:pointer">
+        🛌 Includes cover
+      </label>
+      <div id="fe-cover-picker" style="display:${f.cover ? '' : 'none'}">
+        <input type="hidden" id="fe-cover-original-color"  value="${(f.cover?.color||'').replace(/"/g,'&quot;')}">
+        <input type="hidden" id="fe-cover-original-model"  value="${(f.cover?.model||'').replace(/"/g,'&quot;')}">
+        <input type="hidden" id="fe-cover-original-source" value="${(f.cover?.source||'warehouse').replace(/"/g,'&quot;')}">
+        <div class="fgrid fgrid3" style="margin-top:8px">
+          <div class="fg"><label class="fl">Cover Color</label>
+            <input class="fi" id="fe-cover-color" list="dl-cover-e" value="${(f.cover?.color||'').replace(/"/g,'&quot;')}" placeholder="Type or pick…" oninput="autoSuggestCoverSource('fe')">
+            <datalist id="dl-cover-e">${libOptions('cover')}</datalist>
+          </div>
+          <div class="fg"><label class="fl">Cover Model</label>
+            <input class="fi" id="fe-cover-model" list="dl-cover-model-e" value="${(f.cover?.model||'').replace(/"/g,'&quot;')}" placeholder="e.g. Quattro, Standard" oninput="renderCoverStockHint('fe')">
+            <datalist id="dl-cover-model-e">${libOptions('coverModel')}</datalist>
+          </div>
+          <div class="fg"><label class="fl">Source</label>
+            <div style="display:flex;gap:14px;padding:7px 0;font-size:11.5px;font-weight:600">
+              <label style="display:flex;align-items:center;gap:5px;cursor:pointer;color:#1e40af">
+                <input type="radio" name="fe-cover-source" value="warehouse" ${(f.cover?.source||'warehouse')==='warehouse'?'checked':''} onchange="markSourceTouched('fe')"> 🏬 Warehouse
+              </label>
+              <label style="display:flex;align-items:center;gap:5px;cursor:pointer;color:#92400e">
+                <input type="radio" name="fe-cover-source" value="factory"   ${f.cover?.source==='factory'?'checked':''} onchange="markSourceTouched('fe')"> 🏭 Factory
+              </label>
+            </div>
+          </div>
+        </div>
+        <div id="fe-cover-stock" style="font-size:10.5px;margin-top:4px;min-height:14px;line-height:1.3"></div>
+        <div class="fgrid" style="margin-top:6px">
+          <div class="fg"><label class="fl">Bluwater Note (if special)</label>
+            <input class="fi" id="fe-cover-note" value="${(f.cover?.note||'').replace(/"/g,'&quot;')}" placeholder="e.g. PO #1234 / custom size">
+          </div>
+        </div>
+      </div>
+    </div>` : ''}
     <div class="fg" style="margin-bottom:11px"><label class="fl">Notes</label><input class="fi" id="fe-notes" value="${(f.notes||'').replace(/"/g,'&quot;')}"></div>
+    ${!isAcc ? `
+    <!-- Loose accessories editor (same widget as Add form) -->
+    <div style="background:#fef9c3;border:1px dashed #f59e0b;border-radius:8px;padding:10px 12px;margin-bottom:10px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+        <label class="fl" style="margin:0;color:#78350f;font-weight:700">📦 Loose accessories inside spa</label>
+        <button class="btn btn-sm" style="padding:4px 9px;font-size:10.5px" onclick="addLooseAccRow()">+ Add</button>
+      </div>
+      <div id="fct-loose-list"></div>
+    </div>` : ''}
     <div class="faction">
       <button class="btn btn-p" onclick="saveFactoryEdit(${id})">Save</button>
       <button class="btn" onclick="document.getElementById('factory-float-panel').innerHTML=''">Cancel</button>
     </div>
   </div>`;
+  // Pre-populate the loose accessory rows
+  if(!isAcc){
+    looseAccItems.forEach(a => addLooseAccRow(a));
+  }
 }
 
 function saveFactoryEdit(id){
   const f = factory.find(x=>x.id===id); if(!f) return;
   const isAcc = f.type==='accessory' || f.type==='misc';
-  snapshot('factory edit');
   if(isAcc){
+    snapshot('factory edit');
     f.dealer = document.getElementById('fe-name').value.trim();
     f.qty = parseInt(document.getElementById('fe-qty').value)||1;
   } else {
+    const model        = (document.getElementById('fe-model')?.value || '').trim();
+    const acrylicColor = (document.getElementById('fe-acrylic')?.value || '').trim();
+    const cabinetColor = (document.getElementById('fe-cabinet')?.value || '').trim();
+    const plasticWrap  = (document.getElementById('fe-wrap')?.value || '').trim();
+    // Cover reconciliation: compare original (color, model, source) vs new state, adjust inventory.
+    const hasCover    = document.getElementById('fe-has-cover')?.checked;
+    const newColor    = hasCover ? (document.getElementById('fe-cover-color')?.value || '').trim() : '';
+    const newModel    = hasCover ? (document.getElementById('fe-cover-model')?.value || '').trim() : '';
+    const newNote     = hasCover ? (document.getElementById('fe-cover-note')?.value || '').trim() : '';
+    const newSource   = hasCover ? (document.querySelector('input[name="fe-cover-source"]:checked')?.value || 'warehouse') : '';
+    const origColor   = (document.getElementById('fe-cover-original-color')?.value || '').trim();
+    const origModel   = (document.getElementById('fe-cover-original-model')?.value || '').trim();
+    const origSource  = (document.getElementById('fe-cover-original-source')?.value || 'warehouse').trim();
+    // Has anything changed about the cover identity? (color OR model OR source)
+    const origHadCover = !!origColor;
+    const identityChanged = origHadCover && hasCover && (
+      origColor.toLowerCase()  !== newColor.toLowerCase()  ||
+      origModel.toLowerCase()  !== newModel.toLowerCase()  ||
+      origSource              !== newSource
+    );
+    if(!origHadCover && hasCover && newColor){
+      // Newly adding a cover → decrement new source
+      if(!decrementCoverStock(newColor, newModel, newSource, f.sn)) return;
+    } else if(origHadCover && !hasCover){
+      // Removing cover → re-credit original source
+      incrementCoverStock(origColor, origModel, origSource, f.sn, 'cover removed via edit');
+    } else if(identityChanged){
+      // Switched color/model/source → re-credit original, decrement new
+      incrementCoverStock(origColor, origModel, origSource, f.sn, 'cover changed via edit');
+      if(!decrementCoverStock(newColor, newModel, newSource, f.sn)) return;
+    }
+    // Learn library
+    learnFromInput('spaModel',    model);
+    learnFromInput('acrylic',     acrylicColor);
+    learnFromInput('cabinet',     cabinetColor);
+    learnFromInput('plasticWrap', plasticWrap);
+    learnFromInput('cover',       newColor);
+    learnFromInput('coverModel',  newModel);
+    if(hasCover && newColor) rememberCoverForSpaModel(model, newModel, newColor);
+    snapshot('factory edit');
     f.sn = document.getElementById('fe-sn').value.trim();
     f.dealer = document.getElementById('fe-dealer').value.trim();
+    f.model = model;
+    f.acrylicColor = acrylicColor;
+    f.cabinetColor = cabinetColor;
+    f.plasticWrap = plasticWrap;
+    f.colors = [acrylicColor && `Acrylic: ${acrylicColor}`, cabinetColor && `Cabinet: ${cabinetColor}`].filter(Boolean).join(' · ');
+    f.cover = (hasCover && newColor)
+      ? {color: newColor, model: newModel, note: newNote, source: newSource, addedAt: f.cover?.addedAt || toISO()}
+      : null;
+    f.looseAccessories = readLooseAccessories();
   }
   f.notes = document.getElementById('fe-notes').value.trim();
   document.getElementById('factory-float-panel').innerHTML='';
@@ -9429,6 +10182,412 @@ function rmMarriage(mid){
   marriages = marriages.filter(x => x.id !== mid);
   toast('Marriage removed','ok');
   renderMarriages(); renderFactory(); drawMap(); updBadges();
+}
+
+// ═══════════════════════════════════════════════════════
+// COVER INVENTORY — render, add, edit, remove
+// Two source tabs: Warehouse (majority) and Factory (mostly Bluwater + transfers).
+// Auto-decrements when a spa with a cover is added/edited from the chosen source.
+// ═══════════════════════════════════════════════════════
+
+let _covTab = 'warehouse'; // 'warehouse' or 'factory' — persists across renders
+function setCovTab(tab){
+  _covTab = tab;
+  renderCoverInventory();
+}
+
+function renderCoverInventory(){
+  // Per-source stats — separate totals so user sees what's where at a glance
+  const wh = coverInventory.filter(c => (c.source||'warehouse') === 'warehouse');
+  const fc = coverInventory.filter(c => (c.source||'warehouse') === 'factory');
+  const whQty = wh.reduce((s,c)=>s+(c.qty||0),0);
+  const fcQty = fc.reduce((s,c)=>s+(c.qty||0),0);
+  const whLow = wh.filter(c => c.qty <= (c.lowThreshold||0)).length;
+  const fcLow = fc.filter(c => c.qty <= (c.lowThreshold||0)).length;
+  document.getElementById('cov-stats').innerHTML = `
+    <div class="sc cb" style="cursor:pointer" onclick="setCovTab('warehouse')"><div class="sc-corner"></div><div class="sc-label">🏬 Warehouse Stock</div><div class="sc-val">${whQty}</div><div class="sc-trend">${wh.length} row${wh.length===1?'':'s'} · ${whLow} low/out</div></div>
+    <div class="sc" style="cursor:pointer;border-left:3px solid #92400e" onclick="setCovTab('factory')"><div class="sc-label">🏭 Factory Stock</div><div class="sc-val" style="color:#92400e">${fcQty}</div><div class="sc-trend">${fc.length} row${fc.length===1?'':'s'} · ${fcLow} low/out · mostly Bluwater</div></div>
+    <div class="sc"><div class="sc-label">Total Tracked</div><div class="sc-val">${whQty + fcQty}</div><div class="sc-trend">${coverInventory.length} row${coverInventory.length===1?'':'s'} total</div></div>
+  `;
+  const cont = document.getElementById('cov-content');
+  // Tabs at top of card — Warehouse | Factory
+  const tabsHtml = `
+    <div class="fct-tabs" style="border-bottom:1px solid var(--line2);margin:0 0 14px 0">
+      <div class="fct-tab ${_covTab==='warehouse'?'on':''}" onclick="setCovTab('warehouse')">
+        <span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:#1e40af"></span>
+        🏬 Warehouse <span class="nb" style="background:#dbeafe;color:#1e40af">${wh.length}</span>
+      </div>
+      <div class="fct-tab ${_covTab==='factory'?'on':''}" onclick="setCovTab('factory')">
+        <span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:#92400e"></span>
+        🏭 Factory <span class="nb" style="background:#fef3c7;color:#92400e">${fc.length}</span>
+      </div>
+      <div style="flex:1"></div>
+      <div style="display:flex;align-items:center;padding:8px 12px">
+        <button class="btn btn-sm btn-p" onclick="openCoverAdd('${_covTab}')">+ Add to ${_covTab==='factory'?'Factory':'Warehouse'}</button>
+      </div>
+    </div>`;
+  const list = _covTab === 'factory' ? fc : wh;
+  if(!list.length){
+    cont.innerHTML = tabsHtml + `<div style="padding:30px 14px;text-align:center;color:var(--text3);font-size:12px">No cover stock at ${_covTab==='factory'?'Factory':'Warehouse'} yet. <a href="#" onclick="event.preventDefault();openCoverAdd('${_covTab}')" style="color:var(--accent);font-weight:600">+ Add first cover</a></div>`;
+    return;
+  }
+  // Sort: out-of-stock first (red), then low stock, then in-stock alphabetically
+  const sorted = [...list].sort((a,b) => {
+    const aOut = a.qty<=0, bOut = b.qty<=0;
+    if(aOut !== bOut) return aOut ? -1 : 1;
+    const aLow = a.qty<=(a.lowThreshold||0), bLow = b.qty<=(b.lowThreshold||0);
+    if(aLow !== bLow) return aLow ? -1 : 1;
+    return (a.color||'').localeCompare(b.color||'');
+  });
+  cont.innerHTML = tabsHtml + `<div class="tw"><table>
+    <thead><tr>
+      <th>Status</th>
+      <th>Color</th>
+      <th>Model / Size</th>
+      <th class="td-s">Qty</th>
+      <th class="td-s" data-hide-mobile>Low Threshold</th>
+      <th data-hide-mobile>Location</th>
+      <th class="td-s" data-hide-mobile>Updated</th>
+      <th style="text-align:right">Actions</th>
+    </tr></thead>
+    <tbody>
+    ${sorted.map(c => {
+      const out = c.qty <= 0;
+      const low = !out && c.qty <= (c.lowThreshold||0);
+      const statusBadge = out
+        ? `<span style="display:inline-block;background:#fef2f2;color:#991b1b;border:1px solid #fecaca;font-size:9px;font-weight:700;padding:2px 7px;border-radius:6px">⛔ OUT</span>`
+        : low
+          ? `<span style="display:inline-block;background:#fffbeb;color:#92400e;border:1px solid #fde68a;font-size:9px;font-weight:700;padding:2px 7px;border-radius:6px">⚠ LOW</span>`
+          : `<span style="display:inline-block;background:#f0fdf4;color:#15803d;border:1px solid #bbf7d0;font-size:9px;font-weight:700;padding:2px 7px;border-radius:6px">✓ OK</span>`;
+      const rowStyle = out ? 'background:#fef2f2' : low ? 'background:#fffbeb' : '';
+      const isBluwater = (c.color||'').toLowerCase().includes('bluwater');
+      return `<tr style="${rowStyle}">
+        <td>${statusBadge}</td>
+        <td style="font-weight:600">${escapeHTML(c.color||'')}${isBluwater?' ⭐':''}</td>
+        <td style="font-size:11px;color:var(--text2)">${escapeHTML(c.model||'—')}</td>
+        <td style="font-weight:700;font-size:14px;color:${out?'#dc2626':low?'#92400e':'var(--text1)'}">${c.qty}</td>
+        <td data-hide-mobile style="font-size:11px;color:var(--text2)">${c.lowThreshold||0}</td>
+        <td data-hide-mobile style="font-size:11px">${escapeHTML(c.location||'—')}</td>
+        <td data-hide-mobile style="font-size:10px;color:var(--text3)">${fmtD(c.updated)}</td>
+        <td style="text-align:right;white-space:nowrap">
+          <button class="btn btn-sm" onclick="adjustCoverQty(${c.id}, 1)" title="+1 (e.g. shipment received)">+1</button>
+          <button class="btn btn-sm" onclick="adjustCoverQty(${c.id}, -1)" title="-1 (manual deduction)">-1</button>
+          <button class="btn btn-sm" onclick="openCoverTransfer(${c.id})" title="Move covers to the other location (Warehouse ↔ Factory)" style="background:#ecfeff;color:#0e7490;border-color:#a5f3fc">⇄</button>
+          <button class="btn btn-sm" onclick="openCoverEdit(${c.id})">Edit</button>
+          <button class="btn btn-sm btn-r" onclick="rmCover(${c.id})">×</button>
+        </td>
+      </tr>`;
+    }).join('')}
+    </tbody>
+  </table></div>`;
+}
+
+function openCoverAdd(presetSource){
+  // presetSource lets the "+ Add" button in a tab pre-select Warehouse or Factory
+  const src = presetSource || 'warehouse';
+  document.getElementById('cover-float-panel').innerHTML = `<div class="det-panel">
+    <div class="dp-hd">
+      <div><div class="dp-pos">Add Cover Stock</div><div class="dp-sub">New cover row in inventory (color × model × source)</div></div>
+      <button class="btn btn-sm" onclick="document.getElementById('cover-float-panel').innerHTML=''">✕</button>
+    </div>
+    <div class="fgrid fgrid3" style="margin-bottom:8px">
+      <div class="fg"><label class="fl">Color *</label>
+        <input class="fi" id="cv-color" list="dl-cover-add" placeholder="Type or pick…">
+        <datalist id="dl-cover-add">${libOptions('cover')}</datalist>
+      </div>
+      <div class="fg"><label class="fl">Model / Size</label>
+        <input class="fi" id="cv-model" list="dl-cover-model-add" placeholder="e.g. Standard, Quattro, 84x84">
+        <datalist id="dl-cover-model-add">${libOptions('coverModel')}</datalist>
+      </div>
+      <div class="fg"><label class="fl">Source *</label>
+        <div style="display:flex;gap:14px;padding:7px 0;font-size:11.5px;font-weight:600">
+          <label style="display:flex;align-items:center;gap:5px;cursor:pointer;color:#1e40af">
+            <input type="radio" name="cv-source" value="warehouse" ${src==='warehouse'?'checked':''}> 🏬 Warehouse
+          </label>
+          <label style="display:flex;align-items:center;gap:5px;cursor:pointer;color:#92400e">
+            <input type="radio" name="cv-source" value="factory" ${src==='factory'?'checked':''}> 🏭 Factory
+          </label>
+        </div>
+      </div>
+    </div>
+    <div class="fgrid fgrid3" style="margin-bottom:10px">
+      <div class="fg"><label class="fl">Initial Qty *</label><input class="fi" type="number" id="cv-qty" value="0" min="0"></div>
+      <div class="fg"><label class="fl">Low-Stock Threshold</label><input class="fi" type="number" id="cv-threshold" value="3" min="0"></div>
+      <div class="fg"><label class="fl">Location</label><input class="fi" id="cv-location" placeholder="e.g. Storage A, Rack 3"></div>
+    </div>
+    <div class="faction">
+      <button class="btn btn-p" onclick="saveCoverAdd()">Add to Inventory</button>
+      <button class="btn" onclick="document.getElementById('cover-float-panel').innerHTML=''">Cancel</button>
+    </div>
+  </div>`;
+  document.getElementById('cover-float-panel').scrollIntoView({behavior:'smooth',block:'nearest'});
+}
+
+function saveCoverAdd(){
+  const color = (document.getElementById('cv-color').value||'').trim();
+  const model = (document.getElementById('cv-model').value||'').trim();
+  const location = (document.getElementById('cv-location').value||'').trim();
+  const qty = parseInt(document.getElementById('cv-qty').value)||0;
+  const lowThreshold = parseInt(document.getElementById('cv-threshold').value)||0;
+  const source = document.querySelector('input[name="cv-source"]:checked')?.value || 'warehouse';
+  if(!color){ toast('Color required','err'); return; }
+  // Dedup on color+model+source — same physical row
+  const dup = coverInventory.find(c =>
+    (c.source||'warehouse') === source &&
+    c.color.toLowerCase() === color.toLowerCase() &&
+    (c.model||'').toLowerCase() === (model||'').toLowerCase()
+  );
+  if(dup){
+    if(!confirm(`"${color}${model?' ('+model+')':''}" already exists at ${source==='factory'?'Factory':'Warehouse'} (qty ${dup.qty}).\n\nAdd as a separate row anyway? (Usually you want to "Edit" the existing one instead.)`)) return;
+  }
+  snapshot('add cover stock');
+  learnFromInput('cover', color);
+  learnFromInput('coverModel', model);
+  coverInventory.push({
+    id: ++nid,
+    color, model, location, qty, lowThreshold, source,
+    updated: toISO(),
+    history: [{at: toISO(), action:'created', by: ROLES[currentRole].label, qty}]
+  });
+  addAct(`Added cover stock: ${color}${model?' '+model:''} × ${qty} at ${source==='factory'?'Factory':'Warehouse'}`, '#6366f1');
+  toast(`${color} added to ${source==='factory'?'Factory':'Warehouse'} inventory`, 'ok');
+  document.getElementById('cover-float-panel').innerHTML = '';
+  renderCoverInventory(); updBadges();
+}
+
+function openCoverEdit(id){
+  const c = coverInventory.find(x => x.id === id); if(!c) return;
+  const src = c.source || 'warehouse';
+  document.getElementById('cover-float-panel').innerHTML = `<div class="det-panel">
+    <div class="dp-hd">
+      <div><div class="dp-pos">Edit Cover Stock</div><div class="dp-sub">${escapeHTML(c.color)}${c.model?' · '+escapeHTML(c.model):''} · ${src==='factory'?'🏭 Factory':'🏬 Warehouse'}</div></div>
+      <button class="btn btn-sm" onclick="document.getElementById('cover-float-panel').innerHTML=''">✕</button>
+    </div>
+    <div class="fgrid fgrid3" style="margin-bottom:8px">
+      <div class="fg"><label class="fl">Color</label>
+        <input class="fi" id="cve-color" list="dl-cover-edit" value="${(c.color||'').replace(/"/g,'&quot;')}">
+        <datalist id="dl-cover-edit">${libOptions('cover')}</datalist>
+      </div>
+      <div class="fg"><label class="fl">Model / Size</label>
+        <input class="fi" id="cve-model" list="dl-cover-model-edit" value="${(c.model||'').replace(/"/g,'&quot;')}">
+        <datalist id="dl-cover-model-edit">${libOptions('coverModel')}</datalist>
+      </div>
+      <div class="fg"><label class="fl">Source</label>
+        <div style="display:flex;gap:14px;padding:7px 0;font-size:11.5px;font-weight:600">
+          <label style="display:flex;align-items:center;gap:5px;cursor:pointer;color:#1e40af">
+            <input type="radio" name="cve-source" value="warehouse" ${src==='warehouse'?'checked':''}> 🏬 Warehouse
+          </label>
+          <label style="display:flex;align-items:center;gap:5px;cursor:pointer;color:#92400e">
+            <input type="radio" name="cve-source" value="factory" ${src==='factory'?'checked':''}> 🏭 Factory
+          </label>
+        </div>
+      </div>
+    </div>
+    <div class="fgrid fgrid3" style="margin-bottom:10px">
+      <div class="fg"><label class="fl">Qty (current: ${c.qty})</label><input class="fi" type="number" id="cve-qty" value="${c.qty}"></div>
+      <div class="fg"><label class="fl">Low-Stock Threshold</label><input class="fi" type="number" id="cve-threshold" value="${c.lowThreshold||0}" min="0"></div>
+      <div class="fg"><label class="fl">Location</label><input class="fi" id="cve-location" value="${(c.location||'').replace(/"/g,'&quot;')}"></div>
+    </div>
+    ${Array.isArray(c.history) && c.history.length ? `
+    <div style="background:var(--bg2);border:1px solid var(--line2);border-radius:8px;padding:10px;margin-bottom:10px;max-height:140px;overflow-y:auto">
+      <div style="font-size:11px;font-weight:700;color:var(--text2);margin-bottom:6px">Recent Activity</div>
+      ${c.history.slice(-10).reverse().map(h => `
+        <div style="font-size:10.5px;color:var(--text2);padding:3px 0;border-bottom:1px solid var(--line2)">
+          <span style="font-family:var(--mono);color:var(--text3)">${fmtD(h.at)}</span> ·
+          <strong>${escapeHTML(h.action||'')}</strong>
+          ${h.spaSn?` for S/N ${escapeHTML(h.spaSn)}`:''}
+          ${h.reason?` (${escapeHTML(h.reason)})`:''}
+          ${h.qty!=null?` · qty=${h.qty}`:''}
+        </div>
+      `).join('')}
+    </div>` : ''}
+    <div class="faction">
+      <button class="btn btn-p" onclick="saveCoverEdit(${id})">Save Changes</button>
+      <button class="btn" onclick="document.getElementById('cover-float-panel').innerHTML=''">Cancel</button>
+    </div>
+  </div>`;
+  document.getElementById('cover-float-panel').scrollIntoView({behavior:'smooth',block:'nearest'});
+}
+
+function saveCoverEdit(id){
+  const c = coverInventory.find(x => x.id === id); if(!c) return;
+  const color = (document.getElementById('cve-color').value||'').trim();
+  const model = (document.getElementById('cve-model').value||'').trim();
+  const location = (document.getElementById('cve-location').value||'').trim();
+  const qty = parseInt(document.getElementById('cve-qty').value);
+  const lowThreshold = parseInt(document.getElementById('cve-threshold').value)||0;
+  const source = document.querySelector('input[name="cve-source"]:checked')?.value || (c.source||'warehouse');
+  if(!color){ toast('Color required','err'); return; }
+  if(isNaN(qty)){ toast('Qty must be a number','err'); return; }
+  snapshot('edit cover stock');
+  learnFromInput('cover', color);
+  learnFromInput('coverModel', model);
+  const oldQty = c.qty;
+  const oldSource = c.source || 'warehouse';
+  c.color = color;
+  c.model = model;
+  c.location = location;
+  c.qty = qty;
+  c.lowThreshold = lowThreshold;
+  c.source = source;
+  c.updated = toISO();
+  c.history = c.history || [];
+  if(oldQty !== qty){
+    c.history.push({at: toISO(), action:'manual-edit', qtyBefore: oldQty, qty, by: ROLES[currentRole].label});
+  }
+  if(oldSource !== source){
+    c.history.push({at: toISO(), action:'source-changed', from: oldSource, to: source, by: ROLES[currentRole].label});
+  }
+  toast('Saved','ok');
+  document.getElementById('cover-float-panel').innerHTML = '';
+  renderCoverInventory(); updBadges();
+}
+
+// Quick +1/-1 buttons from the table row — convenient for shipment receive / manual count fix
+function adjustCoverQty(id, delta){
+  const c = coverInventory.find(x => x.id === id); if(!c) return;
+  if(delta < 0 && c.qty <= 0){
+    if(!confirm(`"${c.color}" is already at qty ${c.qty}. Decrement to ${c.qty + delta} anyway?`)) return;
+  }
+  snapshot('adjust cover qty');
+  c.qty += delta;
+  c.updated = toISO();
+  c.history = c.history || [];
+  c.history.push({at: toISO(), action: delta>0 ? 'manual-increment' : 'manual-decrement', qty: c.qty, by: ROLES[currentRole].label});
+  renderCoverInventory(); updBadges();
+}
+
+function rmCover(id){
+  const c = coverInventory.find(x => x.id === id); if(!c) return;
+  if(!confirm(`Remove "${c.color}" from cover inventory?\n\nCurrent qty: ${c.qty}\n\nThis only removes the inventory row — any spas already assigned this cover keep their record.`)) return;
+  snapshot('remove cover row');
+  coverInventory = coverInventory.filter(x => x.id !== id);
+  toast('Cover row removed','ok');
+  renderCoverInventory(); updBadges();
+}
+
+// ═══════════════════════════════════════════════════════
+// MANUAL TRANSFER — move N covers between Warehouse ↔ Factory
+// without going through the formal request workflow.
+// Both sides see the movement in the row's history + the global activity log.
+// Use when factory needs covers fast and doesn't want to file a Factory Request,
+// or when warehouse just wants to push stock proactively to factory.
+// ═══════════════════════════════════════════════════════
+function openCoverTransfer(id){
+  const c = coverInventory.find(x => x.id === id); if(!c) return;
+  const fromSrc = c.source || 'warehouse';
+  const toSrc = fromSrc === 'warehouse' ? 'factory' : 'warehouse';
+  if(c.qty <= 0){
+    toast(`No stock at ${fromSrc==='factory'?'Factory':'Warehouse'} to transfer (qty ${c.qty})`,'err');
+    return;
+  }
+  // Check if a matching destination row already exists (so user knows result preview)
+  const destRow = coverInventory.find(x =>
+    (x.source||'warehouse') === toSrc &&
+    x.color.toLowerCase() === c.color.toLowerCase() &&
+    (x.model||'').toLowerCase() === (c.model||'').toLowerCase()
+  );
+  const destLabel = toSrc === 'factory' ? '🏭 Factory' : '🏬 Warehouse';
+  const fromLabel = fromSrc === 'factory' ? '🏭 Factory' : '🏬 Warehouse';
+  document.getElementById('cover-float-panel').innerHTML = `<div class="det-panel">
+    <div class="dp-hd">
+      <div>
+        <div class="dp-pos">Transfer Covers</div>
+        <div class="dp-sub">${escapeHTML(c.color)}${c.model?' · '+escapeHTML(c.model):''} · ${fromLabel} → ${destLabel}</div>
+      </div>
+      <button class="btn btn-sm" onclick="document.getElementById('cover-float-panel').innerHTML=''">✕</button>
+    </div>
+    <div style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:8px;padding:10px 12px;margin-bottom:12px;font-size:11.5px;color:#0c4a6e;line-height:1.45">
+      <strong>How it works:</strong> ${c.qty} cover${c.qty===1?'':'s'} at ${fromLabel}.
+      Transferring will decrement ${fromLabel} and ${destRow ? `add to the existing ${destLabel} row (qty ${destRow.qty})` : `create a new ${destLabel} row`}.
+      Both sides see the movement in the row history + activity log.
+    </div>
+    <div class="fgrid fgrid3" style="margin-bottom:12px">
+      <div class="fg">
+        <label class="fl">From</label>
+        <input class="fi" value="${fromLabel} (qty ${c.qty})" disabled style="background:#f5f5f5">
+      </div>
+      <div class="fg">
+        <label class="fl">To</label>
+        <input class="fi" value="${destLabel}${destRow ? ` (qty ${destRow.qty})` : ' (new row)'}" disabled style="background:#f5f5f5">
+      </div>
+      <div class="fg">
+        <label class="fl">Qty to transfer *</label>
+        <input class="fi" type="number" id="cvt-qty" value="1" min="1" max="${c.qty}">
+      </div>
+    </div>
+    <div class="fgrid" style="margin-bottom:12px">
+      <div class="fg"><label class="fl">Note (optional)</label>
+        <input class="fi" id="cvt-note" placeholder="e.g. urgent need for spa #30910, restock for Bluwater orders">
+      </div>
+    </div>
+    <div class="faction">
+      <button class="btn btn-p" onclick="saveCoverTransfer(${id})">Transfer ${escapeHTML(c.color)}</button>
+      <button class="btn" onclick="document.getElementById('cover-float-panel').innerHTML=''">Cancel</button>
+    </div>
+  </div>`;
+  document.getElementById('cover-float-panel').scrollIntoView({behavior:'smooth', block:'nearest'});
+}
+
+function saveCoverTransfer(fromId){
+  const fromRow = coverInventory.find(x => x.id === fromId); if(!fromRow) return;
+  const qty = parseInt(document.getElementById('cvt-qty').value)||0;
+  const note = (document.getElementById('cvt-note').value||'').trim();
+  if(qty <= 0){ toast('Qty must be greater than 0','err'); return; }
+  if(qty > fromRow.qty){ toast(`Only ${fromRow.qty} available at source — cannot transfer ${qty}`,'err'); return; }
+  const fromSrc = fromRow.source || 'warehouse';
+  const toSrc = fromSrc === 'warehouse' ? 'factory' : 'warehouse';
+  snapshot('manual cover transfer');
+  // Decrement source
+  fromRow.qty -= qty;
+  fromRow.updated = toISO();
+  fromRow.history = fromRow.history || [];
+  fromRow.history.push({
+    at: toISO(),
+    action: 'manual-transfer-out',
+    qty,
+    to: toSrc,
+    note,
+    by: ROLES[currentRole].label
+  });
+  // Find or create destination row
+  let toRow = coverInventory.find(x =>
+    (x.source||'warehouse') === toSrc &&
+    x.color.toLowerCase() === fromRow.color.toLowerCase() &&
+    (x.model||'').toLowerCase() === (fromRow.model||'').toLowerCase()
+  );
+  if(!toRow){
+    toRow = {
+      id: ++nid,
+      color: fromRow.color,
+      model: fromRow.model,
+      qty: 0,
+      lowThreshold: fromRow.lowThreshold || 1,
+      location: '',
+      source: toSrc,
+      updated: toISO(),
+      history: []
+    };
+    coverInventory.push(toRow);
+  }
+  toRow.qty += qty;
+  toRow.updated = toISO();
+  toRow.history = toRow.history || [];
+  toRow.history.push({
+    at: toISO(),
+    action: 'manual-transfer-in',
+    qty,
+    from: fromSrc,
+    note,
+    by: ROLES[currentRole].label
+  });
+  // Both sides see the movement in the global activity log too
+  const fromLabel = fromSrc === 'factory' ? 'Factory' : 'Warehouse';
+  const toLabel = toSrc === 'factory' ? 'Factory' : 'Warehouse';
+  addAct(`Transferred ${qty}× ${fromRow.color}${fromRow.model?' '+fromRow.model:''}: ${fromLabel} → ${toLabel}${note ? ' · '+note : ''}`, '#0891b2');
+  toast(`Transferred ${qty} from ${fromLabel} to ${toLabel}`,'ok');
+  document.getElementById('cover-float-panel').innerHTML = '';
+  renderCoverInventory(); updBadges();
 }
 
 // ═══════════════════════════════════════════════════════
@@ -9795,7 +10954,7 @@ function markRequestShipped(rid){
     }
     if(!confirm(`Ship ${r.qty}× ${r.coverModel}${r.coverColor?' '+r.coverColor:''} cover to factory?\n\nThis will deduct ${r.qty} from warehouse cover stock.`)) return;
     snapshot('ship cover to factory');
-    // FIFO deduction: walk material entries oldest-first, decrement coverShipped
+    // FIFO deduction on legacy materials FIFO (backward compat with old cover tracking system)
     let toDeduct = r.qty;
     const sortedEntries = stock.entries.slice().sort((a,b)=>(a.date||'').localeCompare(b.date||''));
     sortedEntries.forEach(m=>{
@@ -9805,7 +10964,23 @@ function markRequestShipped(rid){
       m.coverShipped = (m.coverShipped||0) + take;
       toDeduct -= take;
     });
-    extraNote = ` · Deducted ${r.qty} from cover stock`;
+    // Also decrement the NEW coverInventory (warehouse source) so the Cover Inventory view
+    // stays in sync. Match by color + model + source='warehouse'. No confirm dialogs here —
+    // the user already confirmed the ship action above.
+    let invDeducted = 0;
+    let invRow = coverInventory.find(c =>
+      (c.source||'warehouse') === 'warehouse' &&
+      c.color.toLowerCase() === (r.coverColor||'').toLowerCase() &&
+      (!r.coverModel || (c.model||'').toLowerCase() === r.coverModel.toLowerCase())
+    );
+    if(invRow){
+      invRow.qty -= r.qty;
+      invRow.updated = toISO();
+      invRow.history = invRow.history || [];
+      invRow.history.push({at: toISO(), action:'shipped-to-factory', requestId: rid, qty: r.qty, by: ROLES[currentRole].label});
+      invDeducted = r.qty;
+    }
+    extraNote = ` · Deducted ${r.qty} from cover stock${invDeducted ? ' (Warehouse inv)' : ''}`;
   } else {
     if(!confirm(`Mark "${r.description}" as shipped to factory?`)) return;
     snapshot('ship factory request');
@@ -9857,9 +11032,41 @@ function markRequestReceived(rid){
   snapshot('receive factory request');
   r.status = 'received';
   r.receivedAt = toISO();
-  addAct(`Factory received: ${r.description}`,'var(--teal)');
-  toast('Marked as received','ok');
+  // If this is a cover request, auto-increment the factory cover inventory.
+  // Creates a new factory row if none exists for that color×model combo.
+  // Also learns the color/model into the library so future datalists suggest them.
+  let extraNote = '';
+  if(r.type === 'cover' && r.coverModel && r.qty > 0){
+    learnFromInput('cover', r.coverColor);
+    learnFromInput('coverModel', r.coverModel);
+    let invRow = coverInventory.find(c =>
+      (c.source||'warehouse') === 'factory' &&
+      c.color.toLowerCase() === (r.coverColor||'').toLowerCase() &&
+      (c.model||'').toLowerCase() === (r.coverModel||'').toLowerCase()
+    );
+    if(!invRow){
+      invRow = {
+        id: ++nid,
+        color: r.coverColor || '',
+        model: r.coverModel || '',
+        qty: 0, lowThreshold: 1, location: '',
+        source: 'factory',
+        updated: toISO(),
+        history: []
+      };
+      coverInventory.push(invRow);
+    }
+    invRow.qty += r.qty;
+    invRow.updated = toISO();
+    invRow.history = invRow.history || [];
+    invRow.history.push({at: toISO(), action:'received-from-warehouse', requestId: rid, qty: r.qty, by: ROLES[currentRole].label});
+    extraNote = ` · Added ${r.qty} to Factory cover inventory`;
+  }
+  addAct(`Factory received: ${r.description}${extraNote}`,'var(--teal)');
+  toast(extraNote ? `Received — ${r.qty} cover${r.qty===1?'':'s'} added to Factory inventory` : 'Marked as received','ok');
   renderRequests(); renderReceiving(); updBadges();
+  // If user is on the Cover Inventory view, re-render to show the change live
+  if(typeof renderCoverInventory === 'function' && document.getElementById('cov-content')) renderCoverInventory();
 }
 
 function rejectRequest(rid){
@@ -9954,7 +11161,7 @@ function saveState(){
   if(_saveTimer) clearTimeout(_saveTimer);
   _saveTimer = setTimeout(()=>{
     try{
-      const state = {nid, units, dispatched, incoming, materials, events, activity, queue, cfg, factory, marriages, dispatchRequests, _saved: Date.now()};
+      const state = {nid, units, dispatched, incoming, materials, events, activity, queue, cfg, factory, marriages, dispatchRequests, coverInventory, colorLibrary, coverModelMapping, _saved: Date.now()};
       localStorage.setItem(LS_KEY, JSON.stringify(state));
     }catch(err){
       console.warn('saveState failed:', err.message);
@@ -9981,6 +11188,9 @@ function loadState(){
     if(Array.isArray(s.factory)) factory = s.factory;
     if(Array.isArray(s.marriages)) marriages = s.marriages;
     if(Array.isArray(s.dispatchRequests)) dispatchRequests = s.dispatchRequests;
+    if(Array.isArray(s.coverInventory)) coverInventory = s.coverInventory;
+    if(s.colorLibrary && typeof s.colorLibrary === 'object') colorLibrary = Object.assign(colorLibrary, s.colorLibrary);
+    if(s.coverModelMapping && typeof s.coverModelMapping === 'object') coverModelMapping = s.coverModelMapping;
     if(s.cfg && typeof s.cfg === 'object') cfg = Object.assign(cfg, s.cfg);
     return true;
   }catch(err){
@@ -10014,6 +11224,7 @@ function snapshot(label){
       factory: JSON.parse(JSON.stringify(factory)),
       marriages: JSON.parse(JSON.stringify(marriages)),
       dispatchRequests: JSON.parse(JSON.stringify(dispatchRequests)),
+      coverInventory: JSON.parse(JSON.stringify(coverInventory)),
     };
     _undoStack.push(snap);
     if(_undoStack.length > _UNDO_MAX) _undoStack.shift();
@@ -10034,6 +11245,7 @@ function undoLast(){
   if(Array.isArray(snap.factory)) factory = snap.factory;
   if(Array.isArray(snap.marriages)) marriages = snap.marriages;
   if(Array.isArray(snap.dispatchRequests)) dispatchRequests = snap.dispatchRequests;
+  if(Array.isArray(snap.coverInventory)) coverInventory = snap.coverInventory;
   toast(`Undone: ${snap.label}`, 'ok');
   // Refresh whatever view is active
   drawMap(); renderQueue(); renderDash(); renderIncoming(); renderMaterials(); renderDispatched();
@@ -10042,11 +11254,12 @@ function undoLast(){
   if(typeof renderMarriages === 'function') renderMarriages();
   if(typeof renderRequests === 'function') renderRequests();
   if(typeof renderReceiving === 'function') renderReceiving();
+  if(typeof renderCoverInventory === 'function') renderCoverInventory();
   if(typeof mapView !== 'undefined' && mapView === '3d' && W3D.state.inited) update3D();
   updBadges();
 }
 function exportBackup(){
-  const state = {nid, units, dispatched, incoming, materials, events, activity, queue, cfg, factory, marriages, dispatchRequests, _exported:new Date().toISOString(), _version:"v3.36"};
+  const state = {nid, units, dispatched, incoming, materials, events, activity, queue, cfg, factory, marriages, dispatchRequests, coverInventory, colorLibrary, coverModelMapping, _exported:new Date().toISOString(), _version:"v3.53"};
   const blob = new Blob([JSON.stringify(state, null, 2)], {type:'application/json'});
   const u = URL.createObjectURL(blob);
   const a = document.createElement('a');
