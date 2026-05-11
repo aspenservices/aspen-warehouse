@@ -902,12 +902,11 @@ tbody tr:hover td{background:var(--bg3)}
   .card-title{font-size:12.5px;line-height:1.2}
   .card-sub{font-size:10px;line-height:1.3}
 
-  /* Banner cards at top of views: more compact icon */
-  .view > div[style*="background:linear-gradient"]{padding:9px 11px !important;gap:8px !important;margin-bottom:9px !important;border-radius:9px !important}
-  .view > div[style*="background:linear-gradient"] > div:first-child{width:28px !important;height:28px !important}
-  .view > div[style*="background:linear-gradient"] > div:first-child svg{width:14px !important;height:14px !important}
-  .view > div[style*="background:linear-gradient"] [style*="font-size:13px"]{font-size:12px !important;line-height:1.2}
-  .view > div[style*="background:linear-gradient"] [style*="font-size:11px"]{font-size:10px !important;line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+  /* Banner cards at top of views — removed broken legacy rules that assumed a structure
+     where the first child of the gradient div was an icon. The current banners use the
+     .card → .card-body pattern, so those rules were shrinking .card-body to 28×28 and
+     squashing the entire banner. Banners now manage their own responsive layout via
+     inline styles. */
 
   /* Factory tabs: full width with smaller buttons */
   .fct-tabs{margin-bottom:9px;width:100%;overflow-x:auto;scrollbar-width:none}
@@ -1599,27 +1598,27 @@ tbody tr:hover td{background:var(--bg3)}
 <!-- LOADING BAY — dedicated view for Truck / Transit role -->
 <div id="view-truck" class="view">
   <!-- Hero: prominent scan button + quick-load by S/N.
-       Vertical stack on mobile (no flex-wrap shuffling); horizontal on wider screens. -->
+       Compact mobile-first design — title fits one line, description optional below. -->
   <div class="card" style="margin-bottom:14px;background:linear-gradient(135deg,#fef3c7 0%,#fde68a 100%);border:2px solid #d97706">
-    <div class="card-body" style="padding:16px 18px">
-      <!-- Title row: icon + title (stays compact on mobile) -->
-      <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">
-        <div style="width:44px;height:44px;border-radius:50%;background:#fff;display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:22px;box-shadow:0 2px 8px rgba(217,119,6,.3)">🚛</div>
-        <div style="flex:1;min-width:0">
-          <div style="font-size:15px;font-weight:800;color:#78350f;line-height:1.2">Loading Truck — Scan Each Spa</div>
-          <div style="font-size:11px;color:#7c2d12;margin-top:3px;line-height:1.35">Scan the QR label on every spa before loading it on the truck. Each scan removes the spa from factory inventory and marks it IN TRANSIT.</div>
+    <div class="card-body" style="padding:14px 16px">
+      <!-- Title row: small icon + short title (always fits on one line) -->
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+        <div style="width:36px;height:36px;border-radius:50%;background:#fff;display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:18px;box-shadow:0 2px 6px rgba(217,119,6,.3)">🚛</div>
+        <div style="flex:1;min-width:0;overflow:hidden">
+          <div style="font-size:14px;font-weight:800;color:#78350f;line-height:1.2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Scan to Load Truck</div>
+          <div style="font-size:10.5px;color:#7c2d12;margin-top:2px;line-height:1.3">Scan QR before loading. Each scan removes the spa from factory inventory.</div>
         </div>
       </div>
-      <!-- Big scan button — full width below so it's the primary action -->
-      <button class="btn" style="width:100%;background:#7c2d12;border:none;color:#fff;padding:15px 22px;font-size:15px;font-weight:800;min-height:54px;box-shadow:0 4px 12px -2px rgba(124,45,18,.4);border-radius:9px" onclick="openQRScanner('load')">
+      <!-- Big scan button — full width, primary action -->
+      <button class="btn" style="width:100%;background:#7c2d12;border:none;color:#fff;padding:14px 20px;font-size:14.5px;font-weight:800;min-height:52px;box-shadow:0 4px 12px -2px rgba(124,45,18,.4);border-radius:9px;box-sizing:border-box" onclick="openQRScanner('load')">
         📷 Scan to Load
       </button>
       <!-- Quick-load fallback: type S/N manually if QR is damaged -->
-      <div style="margin-top:12px;padding-top:12px;border-top:1.5px dashed #d97706">
-        <div style="font-size:10.5px;font-weight:700;color:#7c2d12;margin-bottom:6px;text-transform:uppercase;letter-spacing:.05em">Or type S/N if QR is damaged:</div>
-        <div style="display:flex;gap:7px">
-          <input id="trk-quick-sn" class="fi" placeholder="e.g. 30100" style="flex:1;padding:11px 13px;font-size:15px;font-family:ui-monospace,monospace;font-weight:700;background:#fff" onkeydown="if(event.key==='Enter')truckQuickLoad(this.value)">
-          <button class="btn" style="padding:0 18px;font-size:13px;font-weight:700;background:#7c2d12;border:none;color:#fff;flex-shrink:0" onclick="truckQuickLoad(document.getElementById('trk-quick-sn').value)">✓ Load</button>
+      <div style="margin-top:11px;padding-top:11px;border-top:1.5px dashed #d97706">
+        <div style="font-size:10px;font-weight:700;color:#7c2d12;margin-bottom:5px;text-transform:uppercase;letter-spacing:.04em">Or type S/N if QR is damaged:</div>
+        <div style="display:flex;gap:6px">
+          <input id="trk-quick-sn" class="fi" placeholder="e.g. 30100" style="flex:1;padding:10px 12px;font-size:14.5px;font-family:ui-monospace,monospace;font-weight:700;background:#fff;min-width:0;box-sizing:border-box" onkeydown="if(event.key==='Enter')truckQuickLoad(this.value)">
+          <button class="btn" style="padding:0 16px;font-size:13px;font-weight:700;background:#7c2d12;border:none;color:#fff;flex-shrink:0;box-sizing:border-box" onclick="truckQuickLoad(document.getElementById('trk-quick-sn').value)">✓ Load</button>
         </div>
       </div>
     </div>
@@ -9464,7 +9463,7 @@ async function openQRScanner(mode){
     dispatch: 'Loader: scan each spa being loaded for dealer pickup.'
   };
   overlay.innerHTML = `
-    <div style="width:100%;max-width:480px;background:#0f172a;border-radius:14px;overflow:hidden;border:1px solid rgba(255,255,255,.1)">
+    <div style="width:100%;max-width:480px;background:#0f172a;border-radius:14px;overflow:hidden;border:1px solid rgba(255,255,255,.1);position:relative">
       <div style="padding:14px 18px;border-bottom:1px solid rgba(255,255,255,.1);display:flex;justify-content:space-between;align-items:center">
         <div>
           <div style="font-size:14px;font-weight:700">📷 ${titleByMode[mode]||'Scan QR'}</div>
@@ -9479,9 +9478,13 @@ async function openQRScanner(mode){
           <div style="width:65%;aspect-ratio:1/1;border:3px solid rgba(251,191,36,.85);border-radius:14px;box-shadow:0 0 0 9999px rgba(0,0,0,.35)"></div>
         </div>
         <div id="qr-status" style="position:absolute;left:0;right:0;bottom:14px;text-align:center;font-size:12px;color:rgba(255,255,255,.85);pointer-events:none">Initializing camera...</div>
+        <!-- Full-screen flash overlay for successful scans — pulses briefly green/red so it's
+             impossible to miss. Click to dismiss faster. Auto-fades after ~1.8s. -->
+        <div id="qr-flash" style="position:absolute;inset:0;display:none;align-items:center;justify-content:center;background:rgba(16,185,129,.92);color:#fff;font-weight:800;text-align:center;padding:18px;cursor:pointer;z-index:5" onclick="this.style.display='none'"></div>
       </div>
       <div style="padding:14px 18px;border-top:1px solid rgba(255,255,255,.1)">
-        <div id="qr-result" style="font-size:11px;color:rgba(255,255,255,.7);min-height:32px"></div>
+        <!-- Result line: much larger so success/error is impossible to miss after a scan. -->
+        <div id="qr-result" style="font-size:14px;line-height:1.4;color:rgba(255,255,255,.85);min-height:40px;font-weight:600"></div>
         <div style="margin-top:10px;padding-top:10px;border-top:1px solid rgba(255,255,255,.08)">
           <div style="font-size:10px;color:rgba(255,255,255,.5);margin-bottom:5px">Or enter tracking ID manually:</div>
           <div style="display:flex;gap:6px">
@@ -9516,18 +9519,25 @@ async function openQRScanner(mode){
 
   _qrScanState = {stream, mode, scanning:true};
   const ctx = canvas.getContext('2d');
+  // Scan loop: runs continuously as long as the overlay is open (_qrScanState exists).
+  // Frame processing is gated behind _qrScanState.scanning so we can pause briefly while
+  // handleQRPayload processes a detected code, then resume scanning the next item.
+  // CRITICAL: the recursive requestAnimationFrame MUST happen on every tick (even when
+  // scanning is paused), otherwise the loop dies after the first scan and subsequent
+  // QRs are never detected.
   const scan = ()=>{
-    if(!_qrScanState || !_qrScanState.scanning) return;
-    if(video.readyState === video.HAVE_ENOUGH_DATA){
+    if(!_qrScanState) return;  // overlay closed → stop loop permanently
+    if(_qrScanState.scanning && video.readyState === video.HAVE_ENOUGH_DATA){
       canvas.width = video.videoWidth;
       canvas.height = video.videoHeight;
       ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
       const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
       const code = jsQR(imageData.data, imageData.width, imageData.height, {inversionAttempts: 'dontInvert'});
       if(code && code.data){
-        _qrScanState.scanning = false;
+        _qrScanState.scanning = false;  // pause until handleQRPayload finishes + 1.4s cooldown
         handleQRPayload(code.data, mode);
-        return;
+        // Note: do NOT return here. Keep rescheduling so the loop stays alive for the
+        // next scan. The 1.4s timeout in handleQRPayload will flip scanning back to true.
       }
     }
     requestAnimationFrame(scan);
@@ -9542,6 +9552,52 @@ function closeQRScanner(){
   _qrScanState = null;
   const o = document.getElementById('qr-scan-overlay');
   if(o) o.remove();
+}
+
+// Show a big, impossible-to-miss flash overlay on the scanner after a scan completes.
+// kind: 'ok' (green), 'err' (red), 'warn' (amber).
+// Stays visible ~1.6s then fades back to the live camera so user can scan another item.
+// Also tap-dismissable for immediate retry.
+function flashScanResult(kind, title, subtitle){
+  const flash = document.getElementById('qr-flash');
+  if(!flash) return;
+  const colors = {
+    ok:   { bg: 'rgba(16,185,129,.94)',  icon: '✓' },
+    err:  { bg: 'rgba(220,38,38,.94)',   icon: '✗' },
+    warn: { bg: 'rgba(245,158,11,.94)',  icon: '⚠' },
+  }[kind] || {bg:'rgba(15,23,42,.94)',icon:'•'};
+  flash.style.background = colors.bg;
+  flash.style.display = 'flex';
+  flash.innerHTML = `
+    <div style="display:flex;flex-direction:column;align-items:center;gap:10px;max-width:90%">
+      <div style="font-size:54px;line-height:1">${colors.icon}</div>
+      <div style="font-size:20px;font-weight:800;line-height:1.15">${title||''}</div>
+      ${subtitle ? `<div style="font-size:13px;font-weight:600;opacity:.92;line-height:1.3">${subtitle}</div>` : ''}
+      <div style="font-size:11px;opacity:.75;margin-top:4px">Tap anywhere to scan next</div>
+    </div>`;
+  // Auto-hide after a moment so the next scan can come in
+  clearTimeout(flashScanResult._t);
+  flashScanResult._t = setTimeout(() => {
+    if(flash) flash.style.display = 'none';
+  }, 1800);
+  // Haptic feedback on supported devices
+  try { if(navigator.vibrate) navigator.vibrate(kind === 'ok' ? [40,30,40] : [120]); } catch(e){}
+}
+
+// Unified scan-result handler: updates both the small text below the camera AND
+// triggers the big full-screen flash overlay. Use this everywhere instead of
+// manually setting resultEl.innerHTML so success/error feedback is consistent and visible.
+//   kind  → 'ok' | 'err' | 'warn'
+//   id    → the spa SN / tracking ID being acted on (shown big in flash)
+//   note  → short context line ("on truck", "not at factory", etc.)
+function setScanResult(kind, id, note){
+  const resultEl = document.getElementById('qr-result');
+  const palette = { ok:'#86efac', err:'#fca5a5', warn:'#fbbf24' };
+  const iconChar = { ok:'✓', err:'✗', warn:'⚠' };
+  if(resultEl){
+    resultEl.innerHTML = `<span style="color:${palette[kind]||'#fff'}">${iconChar[kind]||'•'} <strong>${id||''}</strong>${note?' · '+note:''}</span>`;
+  }
+  flashScanResult(kind, id||'', note||'');
 }
 
 // Process a scanned (or manually entered) QR payload. Routes the item through
@@ -9580,7 +9636,7 @@ function handleQRPayload(raw, mode){
   const resultEl = document.getElementById('qr-result');
 
   if(!found && !parsedSn) {
-    if(resultEl) resultEl.innerHTML = `<span style="color:#fca5a5">✗ <strong>${tid}</strong> not found in system</span>`;
+    setScanResult('err', tid, 'not found in system');
     toast(`${tid} not found in system`,'err');
     if(_qrScanState) _qrScanState.scanning = true;
     return;
@@ -9594,14 +9650,14 @@ function handleQRPayload(raw, mode){
   const snForLookup = parsedSn || (found && found.item && found.item.sn) || (/^\d+$/.test(tid) ? tid : '');
   const activeReq = findActiveFactoryRequest({sn: snForLookup, item: found ? found.item : null});
   if(activeReq){
-    if(resultEl) resultEl.innerHTML = `<span style="color:#86efac">✓ <strong>${snForLookup||tid}</strong> matched factory request · advancing state</span>`;
+    setScanResult('ok', snForLookup||tid, 'matched factory request · advancing state');
     handleFactoryRequestScanByRole(activeReq, currentRole);
     if(_qrScanState) _qrScanState.scanning = true;  // continue scanning next item
     return;
   }
 
   if(!found){
-    if(resultEl) resultEl.innerHTML = `<span style="color:#fca5a5">✗ <strong>${tid}</strong> not found in system</span>`;
+    setScanResult('err', tid, 'not found in system');
     toast(`${tid} not found in system`,'err');
     if(_qrScanState) _qrScanState.scanning = true;
     return;
@@ -9618,19 +9674,21 @@ function handleQRPayload(raw, mode){
     // 'created-at-factory' or 'ready-to-ship' state. After scan it becomes 'in-transit'
     // and disappears from the factory display (physically gone, on the truck).
     if(found.source !== 'factory'){
-      if(resultEl) resultEl.innerHTML = `<span style="color:#fca5a5">✗ <strong>${item.sn||tid}</strong> is not at the factory</span>`;
+      setScanResult('err', item.sn||tid, 'is not at the factory');
       toast(`${item.sn||tid} is not at factory — cannot load`,'err');
+      if(_qrScanState) _qrScanState.scanning = true;  // resume scanning so user can try next QR
       return;
     }
     if(item.trackingState === 'in-transit'){
-      if(resultEl) resultEl.innerHTML = `<span style="color:#fbbf24">⚠ <strong>${item.sn||tid}</strong> already on truck (in transit)</span>`;
+      setScanResult('warn', item.sn||tid, 'already on truck (in transit)');
       toast(`${item.sn||tid} already loaded on truck`,'err');
+      if(_qrScanState) _qrScanState.scanning = true;  // resume scanning
       return;
     }
     item.trackingState = 'in-transit';
     item.trackingHistory.push({state:'in-transit', at, by});
     addAct(`📦 Loaded on truck: ${item.sn||tid} (${item.dealer||''})`,'var(--accent)');
-    if(resultEl) resultEl.innerHTML = `<span style="color:#86efac">✓ <strong>${item.sn||tid}</strong> on truck · removed from factory</span>`;
+    setScanResult('ok', item.sn||tid, 'on truck · removed from factory');
     toast(`${item.sn||'Item'} on truck — removed from factory inventory`,'ok');
   } else if(mode === 'receive'){
     let incomingIdToOpen = null;
@@ -9642,7 +9700,7 @@ function handleQRPayload(raw, mode){
       item.trackingState = 'received-at-warehouse';
       item.trackingHistory.push({state:'received-at-warehouse', at, by});
       addAct(`📬 Received: ${item.sn||tid} (${item.dealer||''})`,'var(--teal)');
-      if(resultEl) resultEl.innerHTML = `<span style="color:#86efac">✓ <strong>${item.sn||tid}</strong> received · assigning position...</span>`;
+      setScanResult('ok', item.sn||tid, 'received · assigning position…');
       toast(`${item.sn||'Item'} received — assign position`,'ok');
       incomingIdToOpen = item.id;
     } else if(found.source === 'factory'){
@@ -9652,8 +9710,9 @@ function handleQRPayload(raw, mode){
       const latestTransit = (item.trackingHistory||[]).filter(h => h.state === 'in-transit').slice(-1)[0];
       const isReturning = item.trackingState === 'in-transit' && latestTransit?.note?.includes('rejected by warehouse');
       if(isReturning){
-        if(resultEl) resultEl.innerHTML = `<span style="color:#fca5a5">✗ <strong>${item.sn||tid}</strong> was rejected and is returning to factory — cannot re-receive</span>`;
+        setScanResult('err', item.sn||tid, 'rejected · returning to factory — cannot re-receive');
         toast(`${item.sn||tid} returning to factory after rejection — scan at factory`,'err');
+        if(_qrScanState) _qrScanState.scanning = true;  // resume scanning
         return;
       }
       // Came directly from factory tracking — promote into incoming as arrived
@@ -9667,7 +9726,7 @@ function handleQRPayload(raw, mode){
         trackingHistory: [...item.trackingHistory, {state:'received-at-warehouse', at, by}]
       });
       addAct(`📬 Received at warehouse: ${item.sn||tid} (${item.dealer||''})`,'var(--teal)');
-      if(resultEl) resultEl.innerHTML = `<span style="color:#86efac">✓ <strong>${item.sn||tid}</strong> received · assigning position...</span>`;
+      setScanResult('ok', item.sn||tid, 'received · assigning position…');
       toast(`${item.sn||'Item'} received — assign position`,'ok');
       incomingIdToOpen = incomingId;
     } else if(found.source === 'units'){
@@ -9675,13 +9734,13 @@ function handleQRPayload(raw, mode){
       item.trackingState = 'received-at-warehouse';
       item.trackingHistory.push({state:'received-at-warehouse', at, by, note:'Re-scanned'});
       addAct(`📬 Re-confirmed at warehouse: ${item.sn||tid} @ ${item.pos}`,'var(--teal)');
-      if(resultEl) resultEl.innerHTML = `<span style="color:#86efac">✓ <strong>${item.sn||tid}</strong> already at ${item.pos}</span>`;
+      setScanResult('ok', item.sn||tid, 'already at '+item.pos);
       toast(`${item.sn||'Item'} already placed at ${item.pos}`,'ok');
     } else {
       item.trackingState = 'received-at-warehouse';
       item.trackingHistory.push({state:'received-at-warehouse', at, by});
       addAct(`📬 Re-confirmed at warehouse: ${item.sn||tid}`,'var(--teal)');
-      if(resultEl) resultEl.innerHTML = `<span style="color:#86efac">✓ <strong>${item.sn||tid}</strong> received</span>`;
+      setScanResult('ok', item.sn||tid, 'received');
     }
 
     renderIncoming(); renderQueue(); renderBanner(); updBadges();
@@ -9698,23 +9757,23 @@ function handleQRPayload(raw, mode){
     item.trackingState = 'dispatched-out';
     item.trackingHistory.push({state:'dispatched-out', at, by});
     addAct(`🚚 Dispatched: ${item.sn||tid} (${item.dealer||''})`,'var(--accent)');
-    if(resultEl) resultEl.innerHTML = `<span style="color:#86efac">✓ <strong>${item.sn||tid}</strong> marked as DISPATCHED</span>`;
+    setScanResult('ok', item.sn||tid, 'marked as DISPATCHED');
     toast(`${item.sn||'Item'} dispatched`,'ok');
   } else if(mode === 'factory-receive'){
     // Factory scans an item that's coming back (return shipment).
     // Only valid when item is in factory[] with state='in-transit' (returning) — confirmed by the
     // presence of a 'rejected by warehouse' note in the tracking history.
     if(found.source !== 'factory'){
-      if(resultEl) resultEl.innerHTML = `<span style="color:#fca5a5">✗ <strong>${item.sn||tid}</strong> is not at the factory</span>`;
+      setScanResult('err', item.sn||tid, 'is not at the factory');
       toast(`${item.sn||tid} is not awaiting return at factory`,'err');
     } else if(item.trackingState !== 'in-transit'){
-      if(resultEl) resultEl.innerHTML = `<span style="color:#fca5a5">✗ <strong>${item.sn||tid}</strong> not in transit (state: ${item.trackingState||'unknown'})</span>`;
+      setScanResult('err', item.sn||tid, 'not in transit (state: '+(item.trackingState||'unknown')+')');
       toast(`${item.sn||tid} is not in transit — nothing to receive`,'err');
     } else {
       item.trackingState = 'received-back-at-factory';
       item.trackingHistory.push({state:'received-back-at-factory', at, by, note:'Confirmed return at factory'});
       addAct(`↩ Returned to factory: ${item.sn||tid} (${item.dealer||''})`,'var(--purple)');
-      if(resultEl) resultEl.innerHTML = `<span style="color:#86efac">✓ <strong>${item.sn||tid}</strong> received back at factory</span>`;
+      setScanResult('ok', item.sn||tid, 'received back at factory');
       toast(`${item.sn||'Item'} received back at factory — ready for repair/re-ship`,'ok');
     }
   }
