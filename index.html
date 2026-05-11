@@ -2055,6 +2055,15 @@ let _fbSharedRef = null;            // .ref('state/shared/latest') listener
 let _fbLastLocalWriteAt = 0;        // ms timestamp of our last successful push (echo guard)
 let _fbAutoPushTimer = null;        // debounce for fbAutoPush
 let _fbApplyingRemote = false;      // flag: we're applying a remote update, don't push back
+// ── Race-condition prevention ──
+// _fbLocalEditCounter increments synchronously inside saveState() (before its debounce).
+// _fbPushedEditCounter advances in fbCloudSync after a successful push.
+// When the listener receives a remote update while counter > pushed, we have unpushed
+// local edits — applying remote state would clobber them. So we defer the apply until
+// after our next push, then re-apply the latest deferred remote state if still newer.
+let _fbLocalEditCounter = 0;
+let _fbPushedEditCounter = 0;
+let _fbDeferredRemote = null;       // {payload} held while local edits pending
 
 // Generate / retrieve a stable device ID (one per browser, kept in localStorage)
 function getDeviceId(){
@@ -2182,11 +2191,27 @@ async function fbCloudSync(showToast){
     };
     // Track BEFORE the write so the echo back from the listener can be filtered out
     _fbLastLocalWriteAt = ts;
+    // Snapshot the counter so any edit that happens during the await won't be marked pushed
+    const counterAtPushStart = _fbLocalEditCounter;
     await _fbDb.ref(`state/${_fbDeviceId}/latest`).set(payload);
     await _fbDb.ref(`state/${_fbDeviceId}/snapshots/${ts}`).set(payload);
     // ── SHARED canonical state for realtime cross-device sync ──
     await _fbDb.ref('state/shared/latest').set({...payload, deviceId: _fbDeviceId});
     _fbLastSyncedAt = ts;
+    _fbPushedEditCounter = counterAtPushStart;  // all edits before push are now persisted to cloud
+    // If we deferred a remote update while pushing, apply it now (if still newer than our push)
+    if(_fbDeferredRemote){
+      const p = _fbDeferredRemote;
+      _fbDeferredRemote = null;
+      if(p.timestamp > _fbLastLocalWriteAt && p.deviceId !== _fbDeviceId){
+        try {
+          const restored = JSON.parse(p.state);
+          fbApplyRemoteState(restored);
+          fbRerenderActiveView();
+          console.log('[firebase] applied deferred remote update from', p.uploadedBy);
+        } catch(e){ console.error('[firebase] deferred apply failed:', e); }
+      }
+    }
     // Trim old snapshots — keep last 30 per device
     const snapsRef = _fbDb.ref(`state/${_fbDeviceId}/snapshots`);
     const snaps = await snapsRef.once('value');
@@ -2263,6 +2288,15 @@ function fbStartRealtimeSync(){
     if(payload.deviceId === _fbDeviceId) return;
     // Newness guard: ignore if older than our last local write (we have fresher data)
     if(payload.timestamp <= _fbLastLocalWriteAt) return;
+    // Race-condition guard: if we have unpushed local edits, defer this remote update
+    // until after our push completes (fbCloudSync will then apply the deferred one if
+    // still newer). This prevents the remote payload from clobbering brand-new local
+    // items like "factory items disappear after add".
+    if(_fbLocalEditCounter > _fbPushedEditCounter){
+      _fbDeferredRemote = payload;  // keep only the LATEST deferred payload
+      console.log('[firebase] DEFERRED remote update — local edits unpushed (counter '+_fbLocalEditCounter+' vs pushed '+_fbPushedEditCounter+')');
+      return;
+    }
     try {
       const restored = JSON.parse(payload.state);
       fbApplyRemoteState(restored);
@@ -2322,7 +2356,7 @@ function fbRerenderActiveView(){
   const renderMap = {
     'view-dashboard': () => updBadges?.(),
     'view-map': () => { try{drawMap?.();}catch(e){} try{renderQueue?.();}catch(e){} try{renderMobileFloorFinder?.(document.getElementById('mob-floor-search')?.value || '');}catch(e){} },
-    'view-schedule': () => renderSchedule?.(),
+    'view-schedule': () => { try{renderCal?.();}catch(e){} try{renderAllEvents?.();}catch(e){} },
     'view-incoming': () => renderIncoming?.(),
     'view-truck': () => renderTruck?.(),
     'view-intransit': () => renderInTransit?.(),
@@ -3625,7 +3659,25 @@ function collectMatItems(){
 function renderQueue(){
   const el=document.getElementById('queue-list');
   if(!el)return;
-  const filtered=queue.filter(i=>{
+  // Virtual queue entries for factory items currently in-transit to warehouse — these
+  // appear in the Arriving sidebar so the warehouse can SEE what's coming on the truck
+  // (informational only — they're not draggable until physically received).
+  const transitVirtual = getInTransitToWarehouse().map(f => {
+    const transitEvent = (f.trackingHistory||[]).filter(h => h.state === 'in-transit').slice(-1)[0];
+    return {
+      id: 'transit-' + f.id,    // string ID, won't collide with numeric queue IDs
+      _factoryId: f.id,
+      _isTransitVirtual: true,
+      dealer: f.dealer || '(no dealer)',
+      sn: f.sn,
+      type: f.type,
+      qty: 1,
+      transitLoadedAt: transitEvent?.at
+    };
+  });
+  // Apply current tab filter to the COMBINED list
+  const fullList = [...queue, ...transitVirtual];
+  const filtered=fullList.filter(i=>{
     if(qTabFilt==='all')return true;
     if(qTabFilt==='hot')return i.type==='hot'||i.type==='swim'||i.type==='extra';
     if(qTabFilt==='misc')return i.type==='misc';
@@ -3636,7 +3688,7 @@ function renderQueue(){
   if(!filtered.length){
     el.innerHTML=`<div class="queue-empty">
       <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" style="margin:0 auto 6px;display:block;color:var(--text4)"><path d="M20 7H4a2 2 0 00-2 2v10a2 2 0 002 2h16a2 2 0 002-2V9a2 2 0 00-2-2zM16 3H8l-2 4h12l-2-4z"/></svg>
-      ${queue.length===0?'No items in queue.<br>Click + Add to register arriving items.':'No items match this filter.'}
+      ${fullList.length===0?'No items in queue.<br>Click + Add to register arriving items.':'No items match this filter.'}
     </div>`;
     return;
   }
@@ -3647,9 +3699,11 @@ function renderQueue(){
   el.innerHTML=filtered.map(item=>{
     // For material pallets with multiple line items, show a compact breakdown
     const isMultiPallet = item.type==='material' && Array.isArray(item.items) && item.items.length > 0;
+    const isTransit = item._isTransitVirtual;
     // Spa types (hot/swim/extra) can use the click-to-place flow via the position picker.
     // Material/cover/misc still require drag-drop because they're not in the incoming array.
-    const canQuickPlace = ['hot','swim','extra'].includes(item.type) && item._fromIncoming;
+    // In-transit virtual entries are read-only (item hasn't physically arrived).
+    const canQuickPlace = !isTransit && ['hot','swim','extra'].includes(item.type) && item._fromIncoming;
     const itemsHtml = isMultiPallet ? `
       <div style="grid-column:1 / -1;padding:6px 8px 4px 28px;border-top:1px dashed var(--line);margin-top:2px">
         ${item.items.map(it=>`<div style="display:flex;justify-content:space-between;font-size:9px;color:var(--text2);font-family:var(--mono);padding:1px 0">
@@ -3657,6 +3711,21 @@ function renderQueue(){
           <span>${it.boxes}× × ${it.perBox} = <strong style="color:var(--orange)">${it.total}</strong></span>
         </div>`).join('')}
       </div>` : '';
+    // Transit virtual entries are not draggable (item physically not at warehouse yet)
+    if(isTransit){
+      return `
+      <div class="queue-item" style="background:#fef3c7;border-color:#fcd34d;opacity:.95;cursor:default">
+        <div class="qi-type" style="background:#d97706"></div>
+        <div class="qi-name" style="color:#78350f">${item.dealer}${item.sn?' · '+item.sn:''}</div>
+        <div style="display:flex;align-items:center;gap:5px;padding-left:8px">
+          <span class="tbadge" style="background:#d97706;color:#fff;font-size:8px;padding:1px 5px;border-radius:3px;font-weight:700;letter-spacing:.04em">🚛 IN TRANSIT</span>
+          <span class="tbadge" style="background:${typeColor[item.type]}18;color:${typeColor[item.type]};font-size:8px;padding:1px 5px;border-radius:3px;font-weight:700">${typeLabel[item.type]||item.type}</span>
+        </div>
+        <div class="qi-actions">
+          <button class="btn btn-sm" style="font-size:9px;padding:2px 7px;background:#16a34a;color:#fff;border-color:#16a34a" onclick="event.preventDefault();event.stopPropagation();receiveTransitItem(${item._factoryId})" title="Mark received at warehouse">✓ Received</button>
+        </div>
+      </div>`;
+    }
     return `
     <div class="queue-item" draggable="true"
       id="qi-${item.id}"
@@ -5279,23 +5348,49 @@ function renderIncoming(){
   const wrap = document.getElementById('inc-cards');
   const summary = document.getElementById('inc-summary');
   if(!wrap) return;
-  if(!incoming.length){
+  // Build virtual incoming entries from factory items currently in-transit TO warehouse.
+  // These spas have left the factory and are physically on the truck; the warehouse should
+  // see them on the Incoming list even though the real `incoming[]` entry is only created
+  // once the spa is scanned at arrival. Marked with status='transit-virtual'.
+  const transitItems = getInTransitToWarehouse();
+  const virtualIncoming = transitItems.map(f => {
+    const transitEvent = (f.trackingHistory||[]).filter(h => h.state === 'in-transit').slice(-1)[0];
+    return {
+      id: 'transit-' + f.id,        // string ID so it doesn't collide with numeric incoming IDs
+      _factoryId: f.id,             // reference back to factory[] for actions
+      _isTransitVirtual: true,
+      sn: f.sn,
+      dealer: f.dealer,
+      type: f.type,
+      date: transitEvent?.at ? transitEvent.at.split('T')[0] : '',
+      status: 'transit-virtual',
+      trackingId: f.trackingId,
+      trackingHistory: f.trackingHistory || [],
+      transitLoadedAt: transitEvent?.at,
+      transitLoadedBy: transitEvent?.by
+    };
+  });
+  // Combined list: real incoming entries first (existing flow), then in-transit virtuals
+  const combined = [...incoming, ...virtualIncoming];
+  if(!combined.length){
     wrap.innerHTML = `<div style="padding:34px 14px;text-align:center;color:var(--text3);font-size:13px">No incoming units. <button class="btn btn-sm btn-p" onclick="document.getElementById('inc-add-toggle').click()" style="margin-left:8px">+ Add Manually</button></div>`;
     if(summary) summary.textContent = 'Spas arriving to warehouse';
     return;
   }
-  // Sort: arrived (needs position) first, then in-queue by date asc
-  const sorted = incoming.slice().sort((a, b) => {
-    const aA = a.status === 'arrived' ? 0 : 1;
-    const bA = b.status === 'arrived' ? 0 : 1;
-    if(aA !== bA) return aA - bA;
+  // Sort: arrived (needs position) first, then in-transit virtuals, then in-queue by date asc
+  const sorted = combined.slice().sort((a, b) => {
+    const order = (it) => it.status === 'arrived' ? 0 : (it._isTransitVirtual ? 1 : 2);
+    const oa = order(a), ob = order(b);
+    if(oa !== ob) return oa - ob;
     return (a.date||'').localeCompare(b.date||'');
   });
   const arrivedCnt = incoming.filter(x => x.status === 'arrived').length;
   const queueCnt = incoming.filter(x => x.status !== 'arrived' && x.status !== 'stored').length;
+  const transitCnt = virtualIncoming.length;
   if(summary){
     const parts = [];
     if(arrivedCnt) parts.push(`<span style="color:var(--teal);font-weight:600">${arrivedCnt} arrived · need position</span>`);
+    if(transitCnt) parts.push(`<span style="color:#d97706;font-weight:600">🚛 ${transitCnt} in transit</span>`);
     if(queueCnt) parts.push(`<span style="color:var(--amber)">${queueCnt} expected</span>`);
     summary.innerHTML = parts.length ? parts.join(' · ') : 'Spas arriving to warehouse';
   }
@@ -5303,24 +5398,42 @@ function renderIncoming(){
     const typeIcon = {hot:'🛁', swim:'🏊', extra:'📦'}[it.type] || '📦';
     const typeLabel = {hot:'Hot Tub', swim:'Swim Spa', extra:'Extra/Stock'}[it.type] || it.type;
     const arrived = it.status === 'arrived';
+    const isTransit = it._isTransitVirtual;
+    // Card styling: green for arrived, amber for in-transit, white for queue
     const cardStyle = arrived
       ? 'background:#ecfdf5;border-color:#6ee7b7'
-      : 'background:#fff;border-color:var(--line)';
+      : isTransit
+        ? 'background:#fef3c7;border-color:#fcd34d'
+        : 'background:#fff;border-color:var(--line)';
     const statusBadge = arrived
       ? `<span style="background:#10b981;color:#fff;padding:4px 11px;border-radius:11px;font-size:10px;font-weight:700;letter-spacing:.06em;white-space:nowrap">✓ ARRIVED · NEEDS POSITION</span>`
-      : `<span style="background:#fef3c7;color:#78350f;padding:4px 11px;border-radius:11px;font-size:10px;font-weight:700;letter-spacing:.06em;white-space:nowrap">⏳ IN QUEUE</span>`;
-    const actions = arrived
-      ? `<button class="btn btn-p" style="padding:13px 20px;font-size:14px;font-weight:700;flex:1 1 200px;min-height:48px" onclick="openPositionPicker(${it.id})">📍 Assign Position</button>
+      : isTransit
+        ? `<span style="background:#d97706;color:#fff;padding:4px 11px;border-radius:11px;font-size:10px;font-weight:700;letter-spacing:.06em;white-space:nowrap">🚛 IN TRANSIT</span>`
+        : `<span style="background:#fef3c7;color:#78350f;padding:4px 11px;border-radius:11px;font-size:10px;font-weight:700;letter-spacing:.06em;white-space:nowrap">⏳ IN QUEUE</span>`;
+    // Actions vary by status
+    let actions;
+    if(arrived){
+      actions = `<button class="btn btn-p" style="padding:13px 20px;font-size:14px;font-weight:700;flex:1 1 200px;min-height:48px" onclick="openPositionPicker(${it.id})">📍 Assign Position</button>
          <button class="btn" style="padding:13px 14px;min-height:48px;background:#fef2f2;border-color:#fecaca;color:#991b1b" onclick="rejectIncoming(${it.id})" title="Reject — return to factory">✗ Reject</button>
          <button class="btn tracking-btn" style="padding:13px 14px;min-height:48px" onclick="openTrackingHistory('incoming',${it.id})" title="View tracking history (admin only)">📜</button>
-         <button class="btn btn-r" style="padding:13px 16px;min-height:48px" onclick="rmFromIncoming(${it.id})" title="Remove">✕</button>`
-      : `<button class="btn btn-p" style="padding:13px 20px;font-size:14px;font-weight:700;flex:1 1 200px;min-height:48px" onclick="markAsArrived(${it.id})">✓ Mark as Arrived</button>
+         <button class="btn btn-r" style="padding:13px 16px;min-height:48px" onclick="rmFromIncoming(${it.id})" title="Remove">✕</button>`;
+    } else if(isTransit){
+      // In-transit virtual entries — show "receive now" and "reject" actions referencing the factory item
+      actions = `<button class="btn btn-p" style="padding:13px 20px;font-size:14px;font-weight:700;flex:1 1 200px;min-height:48px;background:#16a34a;border-color:#16a34a" onclick="receiveTransitItem(${it._factoryId})">✓ Mark Received at WH</button>
+         <button class="btn" style="padding:13px 14px;min-height:48px;background:#fef2f2;border-color:#fecaca;color:#991b1b" onclick="rejectTransitItem(${it._factoryId})" title="Reject — send back to factory">✗ Reject</button>
+         <button class="btn tracking-btn" style="padding:13px 14px;min-height:48px" onclick="openTrackingHistory('factory',${it._factoryId})" title="View tracking history (admin only)">📜</button>`;
+    } else {
+      actions = `<button class="btn btn-p" style="padding:13px 20px;font-size:14px;font-weight:700;flex:1 1 200px;min-height:48px" onclick="markAsArrived(${it.id})">✓ Mark as Arrived</button>
          <button class="btn" style="padding:13px 14px;min-height:48px" onclick="goToFloorMapForDrag(${it.id})" title="Drag from queue on the floor map">📋 Drag from Map</button>
          <button class="btn" style="padding:13px 14px;min-height:48px;background:#fef2f2;border-color:#fecaca;color:#991b1b" onclick="rejectIncoming(${it.id})" title="Reject — return to factory">✗ Reject</button>
          <button class="btn" style="padding:13px 14px;min-height:48px" onclick="addPhotoToIncoming(${it.id})" title="Add photo (Firebase)">📷</button>
          <button class="btn" style="padding:13px 14px;min-height:48px;background:#fef2f2;border-color:#fecaca;color:#991b1b" onclick="addDamagePhoto('incoming',${it.id})" title="Add damage photo (Firebase)">⚠ 📷</button>
          <button class="btn tracking-btn" style="padding:13px 14px;min-height:48px" onclick="openTrackingHistory('incoming',${it.id})" title="View tracking history (admin only)">📜</button>
          <button class="btn btn-r" style="padding:13px 16px;min-height:48px" onclick="rmFromIncoming(${it.id})" title="Remove">✕</button>`;
+    }
+    const meta = isTransit
+      ? `<strong>${it.dealer||'No dealer'}</strong> · ${typeLabel} · <span style="color:#92400e;font-weight:600">loaded ${it.transitLoadedAt ? fmtTrackingTime(it.transitLoadedAt) : 'recently'}</span>${it.transitLoadedBy ? ' by '+it.transitLoadedBy : ''}`
+      : `<strong>${it.dealer||'No dealer'}</strong> · ${typeLabel} · expected ${it.date||'—'}`;
     return `<div style="${cardStyle};border:1.5px solid;border-radius:11px;padding:14px 16px;margin:11px 14px;display:flex;flex-direction:column;gap:11px">
       <div style="display:flex;align-items:start;justify-content:space-between;gap:12px;flex-wrap:wrap">
         <div style="flex:1 1 auto;min-width:0">
@@ -5330,15 +5443,61 @@ function renderIncoming(){
           </div>
           <div style="font-size:13px;color:var(--text2);line-height:1.4">
             <span style="font-size:15px;margin-right:5px">${typeIcon}</span>
-            <strong>${it.dealer||'No dealer'}</strong> · ${typeLabel} · expected ${it.date||'—'}
+            ${meta}
           </div>
         </div>
       </div>
-      ${renderPhotoStrip(it, 'incoming')}
-      ${(it.damagePhotos && it.damagePhotos.length) ? `<div style="display:flex;gap:5px;flex-wrap:wrap;align-items:center"><span style="font-size:10px;color:var(--red);font-weight:700">⚠ DAMAGE:</span>${it.damagePhotos.slice(0,4).map(p=>`<img src="${p.url}" style="width:38px;height:38px;object-fit:cover;border-radius:6px;border:2px solid var(--red);cursor:pointer" onclick="openPhotoLightbox('${p.url}','damage',${it.id})">`).join('')}</div>`:''}
+      ${isTransit ? '' : renderPhotoStrip(it, 'incoming')}
+      ${(!isTransit && it.damagePhotos && it.damagePhotos.length) ? `<div style="display:flex;gap:5px;flex-wrap:wrap;align-items:center"><span style="font-size:10px;color:var(--red);font-weight:700">⚠ DAMAGE:</span>${it.damagePhotos.slice(0,4).map(p=>`<img src="${p.url}" style="width:38px;height:38px;object-fit:cover;border-radius:6px;border:2px solid var(--red);cursor:pointer" onclick="openPhotoLightbox('${p.url}','damage',${it.id})">`).join('')}</div>`:''}
       <div style="display:flex;gap:8px;flex-wrap:wrap">${actions}</div>
     </div>`;
   }).join('');
+}
+
+// Receive a factory item that's currently in-transit. Mirrors the logic of the QR scan
+// 'receive' flow but invoked from the Incoming Spas list. Promotes the spa from
+// factory[] to incoming[] with status='arrived', then opens the position picker.
+function receiveTransitItem(factoryId){
+  const item = factory.find(f => f.id === factoryId);
+  if(!item){ toast('Item no longer in factory list','err'); return; }
+  if(item.trackingState !== 'in-transit'){ toast('Item is no longer in transit','err'); return; }
+  if(!confirm(`Mark ${item.sn||'this spa'} as received at warehouse?\n\nDealer: ${item.dealer||'—'}\n\nThis will move it to the Incoming list, ready for position assignment.`)) return;
+  snapshot('receive transit item');
+  const at = toISO();
+  const by = ROLES[currentRole].label;
+  // Remove from factory
+  factory.splice(factory.indexOf(item), 1);
+  // Create incoming entry as arrived
+  const incomingId = ++nid;
+  incoming.push({
+    id: incomingId, sn: item.sn, dealer: item.dealer, type: item.type,
+    date: toDateStr(at), status: 'arrived', arrivedAt: at,
+    trackingId: item.trackingId,
+    trackingState: 'received-at-warehouse',
+    trackingHistory: [...(item.trackingHistory||[]), {state:'received-at-warehouse', at, by}]
+  });
+  addAct(`📬 Received at warehouse: ${item.sn||item.trackingId} (${item.dealer||''})`,'var(--teal)');
+  toast(`${item.sn||'Item'} received — assign position`,'ok');
+  renderIncoming(); renderFactory?.(); renderInTransit?.(); renderQueue?.(); updBadges();
+  // Open position picker
+  setTimeout(()=> openPositionPicker(incomingId), 200);
+}
+
+// Reject a factory item that's currently in-transit. The truck driver will need to
+// bring it back to the factory.
+function rejectTransitItem(factoryId){
+  const item = factory.find(f => f.id === factoryId);
+  if(!item){ toast('Item no longer in factory list','err'); return; }
+  const reason = prompt(`Reject ${item.sn||'this spa'} — reason?\n\nThe spa will be flagged so the truck returns it to the factory.`, '');
+  if(reason === null) return;  // cancelled
+  snapshot('reject transit item');
+  const at = toISO();
+  const by = ROLES[currentRole].label;
+  item.trackingHistory = item.trackingHistory || [];
+  item.trackingHistory.push({state:'in-transit', at, by, note:'rejected by warehouse' + (reason?': '+reason:'')});
+  addAct(`✗ Rejected in-transit ${item.sn||item.trackingId} — returning to factory${reason?': '+reason:''}`,'var(--red)');
+  toast(`${item.sn||'Item'} rejected — truck will return to factory`,'err');
+  renderIncoming(); renderFactory?.(); renderInTransit?.(); updBadges();
 }
 
 // Remove an incoming entry — also removes its queue twin
@@ -5734,6 +5893,17 @@ function closeTrackingHistory(){
 // handleQRPayload mode='receive' moves them to incoming[].
 function getInTransitItems(){
   return factory.filter(f => f.trackingState === 'in-transit');
+}
+
+// Subset of getInTransitItems: only items moving FROM factory TO warehouse (new shipment).
+// Excludes rejected items that are returning back to factory (those have a 'rejected by
+// warehouse' note in their latest in-transit history entry).
+function getInTransitToWarehouse(){
+  return factory.filter(f => {
+    if(f.trackingState !== 'in-transit') return false;
+    const latestTransit = (f.trackingHistory||[]).filter(h => h.state === 'in-transit').slice(-1)[0];
+    return !latestTransit?.note?.includes('rejected by warehouse');
+  });
 }
 
 function renderInTransit(){
@@ -9037,6 +9207,10 @@ function addFactorySpa(){
   toast(`${sn} added · ready to print QR label`,'ok');
   document.getElementById('factory-float-panel').innerHTML='';
   renderFactory(); updBadges();
+  // CRITICAL: force-flush save NOW so the new factory item is on disk before any
+  // page reload, navigation, or remote update can clobber it. Without this, a 100ms
+  // window exists where the new item lives only in memory and can be lost.
+  flushSave();
   // Auto-prompt to print the QR label
   setTimeout(()=>{
     if(confirm(`Print QR shipping label for ${sn}?\n\nThe label will include S/N, dealer, model, colors, cover, wrap, and a QR code for warehouse scanning.`)){
@@ -9961,6 +10135,8 @@ function addFactoryAccessory(){
   renderFactory(); updBadges();
   // Refresh map so marriage flags update
   if(typeof drawMap === 'function') drawMap();
+  // CRITICAL: persist immediately so the new accessory + marriage survive page reload / remote update.
+  flushSave();
 }
 
 function shipFromFactory(id){
@@ -11353,7 +11529,13 @@ function toggleReceived(rid){
 
 
 function saveState(){
-  // Debounce: avoid saving 50× during a render cycle
+  // SYNCHRONOUS edit mark — must happen BEFORE the debounce. Any remote update
+  // arriving after this point but before our push will defer to avoid clobbering
+  // this local edit. Counter is only ever incremented; fbCloudSync advances the
+  // matching _fbPushedEditCounter once a push completes successfully.
+  if(!_fbApplyingRemote) _fbLocalEditCounter++;
+  // Debounce: batch rapid writes during a render cycle. Short window (100ms) keeps
+  // the on-close data-loss risk small while still avoiding 50× writes per second.
   if(_saveTimer) clearTimeout(_saveTimer);
   _saveTimer = setTimeout(()=>{
     try{
@@ -11369,7 +11551,21 @@ function saveState(){
     // After persisting locally, propagate to other devices via Firebase (debounced inside).
     // Skipped automatically when applying a remote update (echo guard).
     try { fbAutoPush?.(); } catch(e){}
-  }, 250);
+  }, 100);
+}
+
+// Force-flush any pending debounced saveState immediately. Call after critical mutations
+// (add, delete, manual sync) so the data is on disk before any potential page unload.
+function flushSave(){
+  if(_saveTimer){ clearTimeout(_saveTimer); _saveTimer = null; }
+  try{
+    const state = {nid, units, dispatched, incoming, materials, events, activity, queue, cfg, factory, marriages, dispatchRequests, coverInventory, colorLibrary, coverModelMapping, _saved: Date.now()};
+    localStorage.setItem(LS_KEY, JSON.stringify(state));
+  }catch(err){
+    console.warn('flushSave failed:', err.message);
+    if(err.name === 'QuotaExceededError'){ toast('⚠ Storage full — export backup soon', 'err'); }
+  }
+  try { fbAutoPush?.(); } catch(e){}
 }
 function loadState(){
   try{
