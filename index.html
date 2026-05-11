@@ -2048,8 +2048,13 @@ let _fbApp = null, _fbAuth = null, _fbDb = null, _fbStorage = null;
 let _fbUser = null;       // current signed-in user (or null)
 let _fbAuthorized = null; // whitelist record for current user (or null/false)
 let _fbDeviceId = null;   // unique per-device ID for snapshots
-let _fbSyncTimer = null;  // periodic sync interval
+let _fbSyncTimer = null;  // periodic sync interval (backup safety net)
 let _fbLastSyncedAt = 0;
+// ── REALTIME SYNC additions ───────────────────────────────────────────────
+let _fbSharedRef = null;            // .ref('state/shared/latest') listener
+let _fbLastLocalWriteAt = 0;        // ms timestamp of our last successful push (echo guard)
+let _fbAutoPushTimer = null;        // debounce for fbAutoPush
+let _fbApplyingRemote = false;      // flag: we're applying a remote update, don't push back
 
 // Generate / retrieve a stable device ID (one per browser, kept in localStorage)
 function getDeviceId(){
@@ -2112,6 +2117,7 @@ async function handleAuthChange(user){
   if(!user){
     _fbAuthorized = null;
     if(_fbSyncTimer){ clearInterval(_fbSyncTimer); _fbSyncTimer = null; }
+    fbStopRealtimeSync();  // detach realtime listener on sign-out
     updateAuthBadge();
     return;
   }
@@ -2129,10 +2135,12 @@ async function handleAuthChange(user){
     }
     console.log('[firebase] Authorized as', user.email, 'role:', _fbAuthorized.role);
     toast(`Welcome ${user.displayName||user.email}`, 'ok');
-    // Start periodic sync
+    // Start periodic sync (safety net — primary sync is now event-driven via fbAutoPush)
     if(!_fbSyncTimer){
       _fbSyncTimer = setInterval(() => fbCloudSync(false), 2 * 60 * 1000);  // every 2 min
     }
+    // Start realtime cross-device sync — listens for remote state changes
+    fbStartRealtimeSync();
     updateAuthBadge();
   } catch(err){
     console.error('[firebase] whitelist check failed:', err);
@@ -2157,7 +2165,7 @@ async function fbSignOut(){
   toast('Signed out', 'ok');
 }
 
-// Push current localStorage state to Firebase (snapshot + latest)
+// Push current localStorage state to Firebase (snapshot + latest + shared realtime)
 async function fbCloudSync(showToast){
   if(!_fbDb || !_fbUser || !_fbAuthorized){
     if(showToast) toast('Sign in to enable cloud sync', 'err');
@@ -2172,8 +2180,12 @@ async function fbCloudSync(showToast){
       version: 'v3.32',
       state: JSON.stringify(state)  // string to avoid deep nested ref limits
     };
+    // Track BEFORE the write so the echo back from the listener can be filtered out
+    _fbLastLocalWriteAt = ts;
     await _fbDb.ref(`state/${_fbDeviceId}/latest`).set(payload);
     await _fbDb.ref(`state/${_fbDeviceId}/snapshots/${ts}`).set(payload);
+    // ── SHARED canonical state for realtime cross-device sync ──
+    await _fbDb.ref('state/shared/latest').set({...payload, deviceId: _fbDeviceId});
     _fbLastSyncedAt = ts;
     // Trim old snapshots — keep last 30 per device
     const snapsRef = _fbDb.ref(`state/${_fbDeviceId}/snapshots`);
@@ -2230,6 +2242,125 @@ async function fbRestoreFromCloud(){
     console.error('[firebase] restore failed:', err);
     toast('Restore failed: ' + err.message, 'err');
   }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// REALTIME CROSS-DEVICE SYNC
+// Listens on a SHARED Firebase path (state/shared/latest). Whenever any device
+// pushes a new state there (via fbCloudSync), every other device receives it
+// immediately and re-renders the active view. Per-device backup snapshots are
+// still kept under state/{deviceId}/ for history.
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Start listening for remote state updates. Called on successful auth.
+function fbStartRealtimeSync(){
+  if(!_fbDb || _fbSharedRef) return;
+  _fbSharedRef = _fbDb.ref('state/shared/latest');
+  _fbSharedRef.on('value', snap => {
+    const payload = snap.val();
+    if(!payload || !payload.state) return;
+    // Echo guard: ignore writes that came from us
+    if(payload.deviceId === _fbDeviceId) return;
+    // Newness guard: ignore if older than our last local write (we have fresher data)
+    if(payload.timestamp <= _fbLastLocalWriteAt) return;
+    try {
+      const restored = JSON.parse(payload.state);
+      fbApplyRemoteState(restored);
+      fbRerenderActiveView();
+      console.log('[firebase] applied remote update from', payload.uploadedBy, 'at', new Date(payload.timestamp).toLocaleTimeString());
+    } catch(e){
+      console.error('[firebase] apply remote failed:', e);
+    }
+  }, err => {
+    console.error('[firebase] realtime listener error:', err);
+  });
+  console.log('[firebase] realtime listener attached on state/shared/latest');
+}
+
+// Stop listening (called on sign-out)
+function fbStopRealtimeSync(){
+  if(_fbSharedRef){
+    try { _fbSharedRef.off('value'); } catch(e){}
+    _fbSharedRef = null;
+  }
+}
+
+// Replace local state with the restored object from cloud. Mirrors fbRestoreFromCloud
+// but without the confirm dialog and without re-pushing back to cloud.
+function fbApplyRemoteState(restored){
+  _fbApplyingRemote = true;
+  try {
+    if(typeof restored.nid === 'number') nid = Math.max(nid, restored.nid);
+    if(Array.isArray(restored.units)) units = restored.units;
+    if(Array.isArray(restored.dispatched)) dispatched = restored.dispatched;
+    if(Array.isArray(restored.incoming)) incoming = restored.incoming;
+    if(Array.isArray(restored.materials)) materials = restored.materials;
+    if(Array.isArray(restored.events)) events = restored.events;
+    if(Array.isArray(restored.activity)) activity = restored.activity;
+    if(Array.isArray(restored.queue)) queue = restored.queue;
+    if(Array.isArray(restored.factory)) factory = restored.factory;
+    if(Array.isArray(restored.marriages)) marriages = restored.marriages;
+    if(Array.isArray(restored.dispatchRequests)) dispatchRequests = restored.dispatchRequests;
+    if(Array.isArray(restored.coverInventory)) coverInventory = restored.coverInventory;
+    if(restored.colorLibrary && typeof restored.colorLibrary === 'object') colorLibrary = restored.colorLibrary;
+    if(restored.coverModelMapping && typeof restored.coverModelMapping === 'object') coverModelMapping = restored.coverModelMapping;
+    if(restored.cfg && typeof restored.cfg === 'object') cfg = Object.assign({}, cfg, restored.cfg);
+    // Persist to localStorage. saveState() will detect _fbApplyingRemote and skip cloud push.
+    try { saveState(); } catch(e){}
+  } finally {
+    _fbApplyingRemote = false;
+  }
+}
+
+// Re-render whatever view is currently active. Called after applying a remote update.
+function fbRerenderActiveView(){
+  const active = document.querySelector('.view.active');
+  if(!active) return;
+  const id = active.id;
+  // Map view IDs to their render functions. We use optional chaining because not
+  // all render functions exist for all roles, and they're defined in different scopes.
+  const renderMap = {
+    'view-dashboard': () => updBadges?.(),
+    'view-map': () => { try{drawMap?.();}catch(e){} try{renderQueue?.();}catch(e){} try{renderMobileFloorFinder?.(document.getElementById('mob-floor-search')?.value || '');}catch(e){} },
+    'view-schedule': () => renderSchedule?.(),
+    'view-incoming': () => renderIncoming?.(),
+    'view-truck': () => renderTruck?.(),
+    'view-intransit': () => renderInTransit?.(),
+    'view-materials': () => renderMaterials?.(),
+    'view-dispatched': () => renderDispatched?.(),
+    'view-factory': () => renderFactory?.(),
+    'view-marriages': () => renderMarriages?.(),
+    'view-covers': () => renderCoverInventory?.(),
+    'view-requests': () => renderRequests?.(),
+    'view-receiving': () => renderReceiving?.()
+  };
+  try { renderMap[id]?.(); } catch(e){ console.warn('[rerender]', id, e); }
+  try { updBadges?.(); } catch(e){}
+  // Subtle visual ping so user knows data refreshed
+  try {
+    const badge = document.getElementById('fb-auth-badge');
+    if(badge){
+      const dot = badge.querySelector('.fb-sync-dot') || badge.querySelector('span');
+      if(dot){
+        dot.style.transition = 'color .25s';
+        const orig = dot.style.color || '';
+        dot.style.color = '#10b981';
+        setTimeout(()=>{ dot.style.color = orig; }, 700);
+      }
+    }
+  } catch(e){}
+}
+
+// Debounced push: any local edit triggers a cloud sync ~1.5s after the last change.
+// This is the "outbound" half of realtime sync — pairs with the listener on the other side.
+function fbAutoPush(){
+  if(_fbApplyingRemote) return;           // applying remote → don't echo back
+  if(!_fbDb || !_fbUser || !_fbAuthorized) return;
+  if(_fbAutoPushTimer) clearTimeout(_fbAutoPushTimer);
+  _fbAutoPushTimer = setTimeout(() => {
+    _fbAutoPushTimer = null;
+    fbCloudSync(false);  // silent (no toast)
+  }, 1500);
 }
 
 // Upload a photo to Firebase Storage. Returns {url, path} or null on failure.
@@ -11235,6 +11366,9 @@ function saveState(){
         toast('⚠ Storage full — export backup soon', 'err');
       }
     }
+    // After persisting locally, propagate to other devices via Firebase (debounced inside).
+    // Skipped automatically when applying a remote update (echo guard).
+    try { fbAutoPush?.(); } catch(e){}
   }, 250);
 }
 function loadState(){
