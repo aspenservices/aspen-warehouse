@@ -141,6 +141,36 @@ body.role-factory .pg-title::after{content:' · Factory (read-only)';font-size:1
 body.role-organizer .pg-title::after{content:' · Dispatch Organizer (read-only)';font-size:11px;font-weight:600;color:var(--purple);margin-left:6px}
 body.role-transit .pg-title::after{content:' · Truck / Transit';font-size:11px;font-weight:600;color:var(--purple);margin-left:6px}
 
+/* ── VIEWER ROLE — full read access · can only create requests for swim spas & covers ── */
+/* Hide all card-level action buttons except the New Request button */
+body.role-viewer .card-acts > button:not(#req-new-btn){display:none !important}
+/* Hide factory card per-item action buttons (Ship to WH, Edit, etc) */
+body.role-viewer .fct-acts{display:none !important}
+/* Hide cell-unit actions on the floor map */
+body.role-viewer .uc-acts{display:none !important}
+/* Hide queue + dispatch action buttons inside cards */
+body.role-viewer .qi-actions,
+body.role-viewer .req-card-actions button,
+body.role-viewer .req-actions{display:none !important}
+/* Hide marriage/dispatch CTA buttons */
+body.role-viewer button[onclick*="openFactoryAdd"],
+body.role-viewer button[onclick*="openCoverAdd"],
+body.role-viewer button[onclick*="openAddUnit"],
+body.role-viewer button[onclick*="openCreateDispatch"],
+body.role-viewer button[onclick*="openAddEvent"],
+body.role-viewer button[onclick*="openQueueAdd"],
+body.role-viewer button[onclick*="shipFromFactory"],
+body.role-viewer button[onclick*="markAsArrived"]{display:none !important}
+/* Allow the New Request button and its form */
+body.role-viewer #req-new-btn,
+body.role-viewer #req-float-panel button,
+body.role-viewer #req-float-panel .faction button{display:inline-flex !important}
+/* Restrict request types — viewer can only request tubs (swim spas) or covers */
+body.role-viewer #req-type option[value="material"],
+body.role-viewer #req-type option[value="accessory"]{display:none}
+/* Viewer page title suffix */
+body.role-viewer .pg-title::after{content:' · Viewer (read-only)';font-size:11px;font-weight:600;color:#0ea5e9;margin-left:6px}
+
 /* ── TRANSIT ROLE — minimal factory view, scan-only workflow ── */
 /* Hide: tabs (only show Spas Ready), all action buttons except the scanner, the Holding Married card, marriages page entry */
 body.role-transit .fct-acts > button:not([onclick*="openQRScanner"]),
@@ -1246,6 +1276,7 @@ tbody tr:hover td{background:var(--bg3)}
         <option value="factory">🚚 Factory</option>
         <option value="transit">🚛 Truck / Transit</option>
         <option value="organizer">📅 Dispatch Organizer</option>
+        <option value="viewer">👁 Viewer (read-only · request only)</option>
       </select>
       <div class="role-current"><span id="role-indicator">Admin</span></div>
     </div>
@@ -2008,6 +2039,29 @@ tbody tr:hover td{background:var(--bg3)}
           </div>
         </div>
       </div>
+      <!-- ── ADMIN TOOLS ── Only meaningful for the Admin role ── -->
+      <div class="card" id="admin-tools-card" style="margin-top:10px;border:2px solid #dc2626">
+        <div class="card-hd" style="background:#fef2f2">
+          <div>
+            <div class="card-title" style="color:#991b1b">🔑 Admin Tools</div>
+            <div class="card-sub" style="color:#7f1d1d">Restricted actions — admin role only</div>
+          </div>
+        </div>
+        <div class="card-body" style="display:flex;flex-direction:column;gap:8px">
+          <button class="btn btn-p" onclick="openAdminUsersModal()" style="background:#0ea5e9;border-color:#0ea5e9;justify-content:flex-start;padding:11px 14px;font-weight:700">
+            👥 Manage Authorized Users &amp; Roles
+          </button>
+          <button class="btn" onclick="openAdminRolePinsModal()" style="justify-content:flex-start;padding:11px 14px;font-weight:700">
+            🔢 Change Role Switch PINs
+          </button>
+          <div style="border-top:1px dashed #fca5a5;padding-top:10px;margin-top:4px">
+            <button class="btn btn-r" onclick="wipeInventoryData()" style="width:100%;justify-content:flex-start;padding:11px 14px;font-weight:700;background:#dc2626;border-color:#dc2626;color:#fff">
+              🗑 Wipe All Inventory · Start Fresh Count
+            </button>
+            <div style="font-size:10.5px;color:#991b1b;margin-top:6px;line-height:1.4">Deletes all units, factory items, marriages, dispatched, cover stock, materials, requests, incoming. Keeps color/model library + settings + authorized users. Auto-downloads a backup JSON first.</div>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 </div>
@@ -2397,6 +2451,258 @@ function fbAutoPush(){
   }, 1500);
 }
 
+// ══════════════════════════════════════════════════════════════════════════════
+// ADMIN USER MANAGEMENT — Firebase whitelist CRUD
+// The whitelist lives at /authorized/{emailKey} with {role, addedBy, addedAt}.
+// Only admin can view, add, remove, or change roles.
+// Note: actual passwords are managed by Google Sign-In — we do not store passwords.
+// To change a user's password, the user resets it via their Google Account.
+// ══════════════════════════════════════════════════════════════════════════════
+
+// List all authorized users from Firebase. Returns array of {emailKey, email, role, addedBy, addedAt}.
+async function fbListAuthorizedUsers(){
+  if(!_fbDb || !_fbUser){ toast('Sign in first','err'); return []; }
+  try {
+    const snap = await _fbDb.ref('authorized').once('value');
+    const data = snap.val() || {};
+    return Object.entries(data).map(([key, val]) => ({
+      emailKey: key,
+      // Reverse of emailKey(): _at_ → @, then , → . to get the original email back
+      email: key.replace(/_at_/g, '@').replace(/,/g, '.'),
+      role: val.role || 'unknown',
+      addedBy: val.addedBy || '—',
+      addedAt: val.addedAt || ''
+    })).sort((a, b) => a.email.localeCompare(b.email));
+  } catch(err){
+    console.error('[firebase] list users failed:', err);
+    toast('Failed to load users: ' + err.message, 'err');
+    return [];
+  }
+}
+
+// Add or update a user in the whitelist. Email is normalized to a Firebase-safe key.
+async function fbAddOrUpdateUser(email, role){
+  if(!_fbDb || !_fbUser){ toast('Sign in first','err'); return false; }
+  if(currentRole !== 'admin'){ toast('Admin only','err'); return false; }
+  email = (email||'').trim().toLowerCase();
+  if(!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)){ toast('Invalid email','err'); return false; }
+  if(!ROLES[role]){ toast('Invalid role','err'); return false; }
+  try {
+    const key = emailKey(email);
+    await _fbDb.ref(`authorized/${key}`).set({
+      role,
+      addedBy: _fbUser.email,
+      addedAt: new Date().toISOString()
+    });
+    toast(`✓ ${email} authorized as ${ROLES[role].label}`,'ok');
+    return true;
+  } catch(err){
+    console.error('[firebase] add user failed:', err);
+    toast('Failed: ' + err.message, 'err');
+    return false;
+  }
+}
+
+// Remove a user from the whitelist. They'll be signed out on next auth check.
+async function fbRemoveAuthorizedUser(emailK){
+  if(!_fbDb || !_fbUser){ toast('Sign in first','err'); return false; }
+  if(currentRole !== 'admin'){ toast('Admin only','err'); return false; }
+  try {
+    await _fbDb.ref(`authorized/${emailK}`).remove();
+    toast('✓ User removed from whitelist','ok');
+    return true;
+  } catch(err){
+    console.error('[firebase] remove user failed:', err);
+    toast('Failed: ' + err.message, 'err');
+    return false;
+  }
+}
+
+// Render the admin user management modal. Shows the whitelist with role-change and remove
+// controls, plus a form to add a new user.
+async function openAdminUsersModal(){
+  if(currentRole !== 'admin'){ toast('Admin only','err'); return; }
+  if(!_fbDb){ toast('Cloud sync not initialized','err'); return; }
+  if(!_fbUser){ toast('Sign in to Firebase first','err'); return; }
+  // Build modal shell first
+  const existing = document.getElementById('admin-users-overlay');
+  if(existing) existing.remove();
+  const overlay = document.createElement('div');
+  overlay.id = 'admin-users-overlay';
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(15,23,42,.65);z-index:9990;display:flex;align-items:center;justify-content:center;padding:20px;overflow-y:auto';
+  overlay.innerHTML = `
+    <div style="background:#fff;border-radius:14px;max-width:720px;width:100%;max-height:90vh;overflow-y:auto;box-shadow:0 20px 60px -10px rgba(0,0,0,.4)">
+      <div style="padding:18px 22px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center">
+        <div>
+          <div style="font-size:17px;font-weight:800">👥 Manage Authorized Users</div>
+          <div style="font-size:11.5px;color:var(--text3);margin-top:3px">Add/remove people who can sign in · change their role</div>
+        </div>
+        <button class="btn btn-sm" onclick="document.getElementById('admin-users-overlay').remove()">✕ Close</button>
+      </div>
+      <div style="padding:16px 22px;background:#f0f9ff;border-bottom:1px solid #bae6fd">
+        <div style="font-size:12px;color:#0c4a6e;line-height:1.5">
+          <strong>About passwords:</strong> Users sign in with their Google account, so passwords are managed by Google. To reset a user's password, they go to their Google Account → Security. Admin controls <em>who</em> can sign in and <em>which role</em> they get.
+        </div>
+      </div>
+      <!-- Add new user form -->
+      <div style="padding:14px 22px;border-bottom:1px solid var(--line);background:#fafbfc">
+        <div style="font-size:12.5px;font-weight:700;margin-bottom:8px;color:var(--text1)">+ Add User</div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+          <div style="flex:2 1 220px;min-width:0">
+            <label style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.05em;font-weight:600;display:block;margin-bottom:3px">Email</label>
+            <input id="adm-new-email" type="email" class="fi" placeholder="name@company.com" style="width:100%">
+          </div>
+          <div style="flex:1 1 130px;min-width:0">
+            <label style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.05em;font-weight:600;display:block;margin-bottom:3px">Role</label>
+            <select id="adm-new-role" class="fsel" style="width:100%">
+              <option value="admin">🔑 Admin</option>
+              <option value="warehouse">🏭 Warehouse Manager</option>
+              <option value="factory">🚚 Factory</option>
+              <option value="transit">🚛 Truck / Transit</option>
+              <option value="organizer">📅 Dispatch Organizer</option>
+              <option value="viewer" selected>👁 Viewer</option>
+            </select>
+          </div>
+          <button class="btn btn-p" onclick="submitAdminAddUser()" style="flex:0 0 auto;min-height:38px">Add</button>
+        </div>
+      </div>
+      <!-- User list -->
+      <div id="admin-users-list" style="padding:8px 14px 18px">
+        <div style="text-align:center;color:var(--text3);font-size:12px;padding:32px">Loading users…</div>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  // Click outside to close
+  overlay.addEventListener('click', e => { if(e.target === overlay) overlay.remove(); });
+  // Load and render users
+  refreshAdminUsersList();
+}
+
+async function refreshAdminUsersList(){
+  const wrap = document.getElementById('admin-users-list');
+  if(!wrap) return;
+  const users = await fbListAuthorizedUsers();
+  if(!users.length){
+    wrap.innerHTML = `<div style="text-align:center;color:var(--text3);font-size:12px;padding:32px">No authorized users yet. Add the first one above.</div>`;
+    return;
+  }
+  wrap.innerHTML = `
+    <div style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:.06em;font-weight:600;padding:8px 8px 6px">${users.length} authorized user${users.length===1?'':'s'}</div>
+    ${users.map(u => {
+      const isMe = (u.email === (_fbUser?.email||'').toLowerCase());
+      const roleOpts = Object.entries(ROLES).map(([k, r]) => `<option value="${k}" ${u.role===k?'selected':''}>${r.icon} ${r.label}</option>`).join('');
+      return `
+      <div style="display:flex;align-items:center;gap:10px;padding:11px 13px;border:1px solid var(--line);border-radius:9px;margin-bottom:7px;background:${isMe?'#f0fdf4':'#fff'}">
+        <div style="flex:1 1 200px;min-width:0">
+          <div style="font-size:13px;font-weight:700;color:var(--text1);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${u.email}${isMe?' <span style=\"font-size:9px;color:#15803d;font-weight:700;background:#dcfce7;padding:2px 6px;border-radius:4px;margin-left:6px;letter-spacing:.04em\">YOU</span>':''}</div>
+          <div style="font-size:10px;color:var(--text3);margin-top:2px">Added by ${u.addedBy} · ${u.addedAt ? new Date(u.addedAt).toLocaleDateString() : '—'}</div>
+        </div>
+        <select class="fsel" style="flex:0 0 auto;font-size:11px;padding:5px 8px" onchange="changeUserRole('${u.emailKey}', this.value, '${u.email.replace(/'/g,"\\'")}')" ${isMe?'disabled':''}>${roleOpts}</select>
+        <button class="btn btn-sm" style="background:#fef2f2;border-color:#fecaca;color:#991b1b;font-size:11px" onclick="removeUserConfirm('${u.emailKey}', '${u.email.replace(/'/g,"\\'")}')" ${isMe?'disabled':''} title="${isMe?'Cannot remove yourself':'Remove user'}">✕</button>
+      </div>`;
+    }).join('')}
+  `;
+}
+
+async function submitAdminAddUser(){
+  const email = document.getElementById('adm-new-email')?.value || '';
+  const role = document.getElementById('adm-new-role')?.value || 'viewer';
+  const ok = await fbAddOrUpdateUser(email, role);
+  if(ok){
+    document.getElementById('adm-new-email').value = '';
+    refreshAdminUsersList();
+  }
+}
+
+async function changeUserRole(emailK, newRole, displayEmail){
+  if(!confirm(`Change ${displayEmail}'s role to ${ROLES[newRole]?.label || newRole}?`)) {
+    refreshAdminUsersList(); // revert UI
+    return;
+  }
+  try {
+    await _fbDb.ref(`authorized/${emailK}/role`).set(newRole);
+    toast(`✓ ${displayEmail} → ${ROLES[newRole].label}`, 'ok');
+  } catch(err){
+    toast('Failed: ' + err.message, 'err');
+    refreshAdminUsersList();
+  }
+}
+
+async function removeUserConfirm(emailK, displayEmail){
+  if(!confirm(`Remove ${displayEmail} from the whitelist?\n\nThey will lose access on next sign-in.`)) return;
+  const ok = await fbRemoveAuthorizedUser(emailK);
+  if(ok) refreshAdminUsersList();
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ADMIN ROLE PIN MANAGEMENT — local PINs for the role-switcher dropdown
+// These are NOT Firebase passwords — they are short PINs (default 0000) that gate
+// switching the "Viewing As" role in the sidebar. Stored in cfg.rolePasswords.
+// ══════════════════════════════════════════════════════════════════════════════
+function openAdminRolePinsModal(){
+  if(currentRole !== 'admin'){ toast('Admin only','err'); return; }
+  const existing = document.getElementById('admin-pins-overlay');
+  if(existing) existing.remove();
+  const overlay = document.createElement('div');
+  overlay.id = 'admin-pins-overlay';
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(15,23,42,.65);z-index:9990;display:flex;align-items:center;justify-content:center;padding:20px;overflow-y:auto';
+  cfg.rolePasswords = cfg.rolePasswords || {};
+  const rolesList = Object.entries(ROLES).map(([k, r]) => {
+    const pin = (cfg.rolePasswords[k] !== undefined) ? cfg.rolePasswords[k] : (r.password || '0000');
+    return `
+      <div style="display:flex;align-items:center;gap:11px;padding:11px 13px;border:1px solid var(--line);border-radius:9px;margin-bottom:7px;background:#fff">
+        <div style="font-size:18px">${r.icon}</div>
+        <div style="flex:1 1 auto;min-width:0">
+          <div style="font-size:13px;font-weight:700">${r.label}</div>
+          <div style="font-size:10.5px;color:var(--text3)">${r.subtitle}</div>
+        </div>
+        <input id="pin-${k}" class="fi" type="text" inputmode="numeric" maxlength="8" value="${pin}" style="flex:0 0 90px;font-family:var(--mono);font-weight:700;text-align:center;font-size:14px">
+      </div>`;
+  }).join('');
+  overlay.innerHTML = `
+    <div style="background:#fff;border-radius:14px;max-width:540px;width:100%;max-height:90vh;overflow-y:auto;box-shadow:0 20px 60px -10px rgba(0,0,0,.4)">
+      <div style="padding:18px 22px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center">
+        <div>
+          <div style="font-size:17px;font-weight:800">🔑 Role Switch PINs</div>
+          <div style="font-size:11.5px;color:var(--text3);margin-top:3px">Set the PIN required to switch into each "Viewing As" role</div>
+        </div>
+        <button class="btn btn-sm" onclick="document.getElementById('admin-pins-overlay').remove()">✕ Close</button>
+      </div>
+      <div style="padding:14px 22px;background:#fef3c7;border-bottom:1px solid #fcd34d">
+        <div style="font-size:11.5px;color:#78350f;line-height:1.5">
+          <strong>⚠ Different from sign-in:</strong> These PINs control the in-app role switcher only. Firebase sign-in (with Google) is unaffected. Keep these simple (4-8 digits) — they're for quick role hand-off, not security.
+        </div>
+      </div>
+      <div style="padding:8px 18px 18px">
+        ${rolesList}
+        <div style="display:flex;gap:8px;margin-top:13px">
+          <button class="btn btn-p" onclick="saveAdminRolePins()" style="flex:1">💾 Save PINs</button>
+          <button class="btn" onclick="document.getElementById('admin-pins-overlay').remove()">Cancel</button>
+        </div>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  overlay.addEventListener('click', e => { if(e.target === overlay) overlay.remove(); });
+}
+
+function saveAdminRolePins(){
+  cfg.rolePasswords = cfg.rolePasswords || {};
+  let saved = 0;
+  Object.keys(ROLES).forEach(k => {
+    const inp = document.getElementById('pin-' + k);
+    if(inp){
+      const pin = (inp.value||'').trim();
+      if(pin){
+        cfg.rolePasswords[k] = pin;
+        saved++;
+      }
+    }
+  });
+  flushSave();
+  toast(`✓ Saved ${saved} role PIN${saved===1?'':'s'}`,'ok');
+  document.getElementById('admin-pins-overlay')?.remove();
+}
+
 // Upload a photo to Firebase Storage. Returns {url, path} or null on failure.
 async function fbUploadPhoto(file, type, itemId){
   if(!_fbStorage || !_fbUser || !_fbAuthorized){ toast('Sign in first', 'err'); return null; }
@@ -2624,6 +2930,8 @@ const ROLES = {
                pages:['truck','intransit'], canEdit:false, defaultPage:'truck', password:'0000' },
   organizer: { label:'Dispatch Organizer', subtitle:'Schedule pickups', icon:'📅',
                pages:['schedule','dispatched','map','intransit'], canEdit:false, defaultPage:'schedule', password:'0000' },
+  viewer:    { label:'Viewer', subtitle:'View only · request swim spas & covers from factory', icon:'👁',
+               pages:['*'], canEdit:false, defaultPage:'dashboard', password:'0000', isViewer:true },
 };
 let currentRole = localStorage.getItem('aspen_role') || 'admin';
 if(!ROLES[currentRole]) currentRole = 'admin';
@@ -2682,6 +2990,7 @@ function applyRoleVisibility(){
   document.body.classList.toggle('role-factory', currentRole==='factory');
   document.body.classList.toggle('role-transit', currentRole==='transit');
   document.body.classList.toggle('role-organizer', currentRole==='organizer');
+  document.body.classList.toggle('role-viewer', currentRole==='viewer');
   // Update the role label in the selector
   const ind = document.getElementById('role-indicator');
   if(ind) ind.textContent = ROLES[currentRole].label;
@@ -11190,6 +11499,15 @@ function openNewRequest(){
     </div>
   </div>`;
   refreshCoverDatalists();
+  // For Viewer role: lock the type to tub (default) since only tub & cover are allowed,
+  // and tub is the most common request from the warehouse.
+  if(currentRole === 'viewer'){
+    const sel = document.getElementById('req-type');
+    if(sel){
+      sel.value = 'tub';
+      reqTypeChange();
+    }
+  }
   document.getElementById('req-float-panel').scrollIntoView({behavior:'smooth',block:'nearest'});
 }
 
@@ -11297,6 +11615,8 @@ function submitRequest(){
     : 'Request submitted to warehouse', 'ok');
   document.getElementById('req-float-panel').innerHTML = '';
   renderRequests(); updBadges();
+  // Force-persist now so the request survives any page reload / remote update right after submit
+  flushSave();
 }
 
 function markRequestShipped(rid){
@@ -11701,6 +12021,52 @@ function clearAllData(){
   if(!confirm('Final confirmation: really clear everything?')) return;
   localStorage.removeItem(LS_KEY);
   location.reload();
+}
+
+// ADMIN: wipe all inventory/movement data but KEEP settings & libraries (color/model
+// auto-learned values, role passwords, etc.) so the admin can start a fresh physical
+// inventory count without losing typed-in customization. Pushes the cleared state to
+// the cloud so other devices reflect the reset immediately.
+async function wipeInventoryData(){
+  if(currentRole !== 'admin'){ toast('Admin only — switch to Admin role first','err'); return; }
+  const counts = `${units.length} units · ${factory.length} factory items · ${incoming.length} incoming · ${marriages.length} marriages · ${dispatched.length} dispatched · ${coverInventory.length} cover stock rows · ${materials.length} materials · ${dispatchRequests.length} requests · ${queue.length} queue`;
+  if(!confirm(`⚠ WIPE ALL INVENTORY DATA ⚠\n\nDeletes:\n${counts}\n\nKeeps:\n• Color/model library (typed-in suggestions)\n• Role passwords\n• Authorized users (Firebase whitelist)\n• Email recipients / Settings\n\nThis cannot be undone but a snapshot is saved (Cmd+Z).\n\nContinue?`)) return;
+  if(!confirm(`Final confirmation:\n\nReally wipe ALL inventory? Type-in OK.`)) return;
+  // Snapshot for undo
+  try { snapshot('ADMIN wipe inventory'); } catch(e){}
+  // Auto-download a CSV backup as safety net
+  try { if(typeof exportBackup === 'function') exportBackup(); } catch(e){ console.warn('backup failed:', e); }
+  // Clear inventory arrays
+  units = [];
+  factory = [];
+  incoming = [];
+  queue = [];
+  marriages = [];
+  dispatched = [];
+  dispatchRequests = [];
+  coverInventory = [];
+  materials = [];
+  // Drop spa-related events; keep generic events (meetings, etc.)
+  events = (events||[]).filter(e => e.type !== 'spa' && e.type !== 'dispatch');
+  activity = [];
+  // Reset id counter to a safe high number to avoid collisions with old QR-printed labels
+  nid = 1000;
+  // Persist + propagate
+  addAct('🗑 ADMIN WIPED ALL INVENTORY · ready for fresh physical count','var(--red)');
+  flushSave();
+  // Re-render whatever view is open
+  try { fbRerenderActiveView?.(); } catch(e){}
+  try { drawMap?.(); } catch(e){}
+  try { renderFactory?.(); } catch(e){}
+  try { renderIncoming?.(); } catch(e){}
+  try { renderQueue?.(); } catch(e){}
+  try { renderCoverInventory?.(); } catch(e){}
+  try { renderMaterials?.(); } catch(e){}
+  try { renderDispatched?.(); } catch(e){}
+  try { renderInTransit?.(); } catch(e){}
+  try { renderRequests?.(); } catch(e){}
+  try { updBadges?.(); } catch(e){}
+  toast('✓ Inventory wiped — start fresh physical count. Backup downloaded.','ok');
 }
 
 // ── BOOT ──
