@@ -3378,7 +3378,7 @@ body.dark-mode .mar-card-track {
       <div class="role-current"><span id="role-indicator">Admin</span></div>
     </div>
   </div>
-  <div class="sb-foot"><div class="sb-ver">v3.87 · <span id="live-date"></span></div></div>
+  <div class="sb-foot"><div class="sb-ver">v3.90 · <span id="live-date"></span></div></div>
 </nav>
 
 <!-- MAIN -->
@@ -3434,19 +3434,6 @@ body.dark-mode .mar-card-track {
 
 <!-- DASHBOARD -->
 <div id="view-dashboard" class="view active">
-  <!-- Sign-in prompt card — shown only when Firebase is enabled but user isn't signed in.
-       Auto-hides as soon as user signs in successfully. This is the FIRST thing users
-       see on the dashboard, ensuring they can't miss the call-to-action. -->
-  <div id="dash-signin-card" style="display:none;background:linear-gradient(135deg,#dc2626 0%,#991b1b 100%);color:#fff;border-radius:14px;padding:18px 18px;margin-bottom:14px;box-shadow:0 8px 24px -4px rgba(220,38,38,.4);cursor:pointer" onclick="fbSignIn()">
-    <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
-      <div style="font-size:32px;flex:0 0 auto">🔒</div>
-      <div style="flex:1 1 220px;min-width:0">
-        <div style="font-size:15px;font-weight:800;line-height:1.25;margin-bottom:3px">No estás conectado a Firebase</div>
-        <div style="font-size:12px;opacity:.92;line-height:1.4">Tus cambios no se sincronizan con otros devices · Toca aquí para iniciar sesión con Google</div>
-      </div>
-      <button onclick="event.stopPropagation();fbSignIn()" style="background:#fff;color:#991b1b;border:none;border-radius:9px;padding:11px 18px;font-size:13.5px;font-weight:800;cursor:pointer;flex:0 0 auto;box-shadow:0 2px 6px rgba(0,0,0,.15)">Iniciar sesión</button>
-    </div>
-  </div>
   <!-- Personalized greeting banner -->
   <div class="greeting-banner" id="greeting-banner" style="display:none">
     <div class="greeting-avatar" id="greeting-avatar">?</div>
@@ -4312,9 +4299,6 @@ body.dark-mode .mar-card-track {
           </div>
         </div>
         <div class="card-body" style="display:flex;flex-direction:column;gap:8px">
-          <button class="btn btn-p" onclick="openAdminUsersModal()" style="background:#0ea5e9;border-color:#0ea5e9;justify-content:flex-start;padding:11px 14px;font-weight:700">
-            👥 Manage Authorized Users &amp; Roles
-          </button>
           <button class="btn" onclick="openAdminRolePinsModal()" style="justify-content:flex-start;padding:11px 14px;font-weight:700">
             🔢 Change Role Switch PINs
           </button>
@@ -4456,7 +4440,7 @@ let _fbInitAttempts = 0;
 //   /app_version/current  (in Firebase console, manually, OR call
 //   pushVersionToFirebase() from the Admin console at deploy time)
 // ══════════════════════════════════════════════════════════════════
-const APP_VERSION = 'v3.87';
+const APP_VERSION = 'v3.90';
 window.APP_VERSION = APP_VERSION;
 
 let _updateBannerShown = false;
@@ -4558,20 +4542,33 @@ async function initFirebase(){
       try { await _fbAuth.setPersistence(firebase.auth.Auth.Persistence.SESSION); } catch(e){}
     }
     _fbAuth.onAuthStateChanged(handleAuthChange);
-    // ── Check for pending redirect sign-in result ──
-    // After fbSignIn() does signInWithRedirect on mobile, the user returns
-    // to the app and we need to pick up the result. onAuthStateChanged fires
-    // automatically when this resolves, but calling getRedirectResult() here
-    // makes failures explicit (e.g. domain not whitelisted, blocked, etc.)
-    try {
-      const redirResult = await _fbAuth.getRedirectResult();
-      if(redirResult && redirResult.user){
-        console.log('[firebase] redirect sign-in completed for', redirResult.user.email);
+
+    // ══════════════════════════════════════════════════════════════════
+    // AUTO ANONYMOUS SIGN-IN — connect automatically, no prompt
+    // ──────────────────────────────────────────────────────────────────
+    // The app uses anonymous-only auth. Right after the SDK loads, give
+    // Firebase ~600ms to restore any persisted session, then sign in
+    // anonymously if no session was restored. This is transparent: the
+    // user never sees a sign-in screen.
+    //
+    // Anonymous auth must be enabled in Firebase Console:
+    //   Authentication → Sign-in method → Anonymous → Enable
+    // ══════════════════════════════════════════════════════════════════
+    setTimeout(async () => {
+      if(_fbAuth.currentUser){
+        // Persisted session restored — nothing to do
+        return;
       }
-    } catch(redirErr){
-      console.warn('[firebase] redirect result error:', redirErr.code, redirErr.message);
-      toast('Sign-in error: ' + (redirErr.message || redirErr.code), 'err');
-    }
+      try {
+        console.log('[firebase] Auto-connecting anonymously…');
+        await _fbAuth.signInAnonymously();
+      } catch(anonErr){
+        console.warn('[firebase] Auto anonymous sign-in failed:', anonErr.code, anonErr.message);
+        if(anonErr.code === 'auth/admin-restricted-operation'){
+          toast('Anonymous sign-in is disabled — enable it in Firebase Console', 'err');
+        }
+      }
+    }, 600);
     _fbSdkLoadFailed = false;
     console.log('[firebase] SDK loaded' + (_fbInitAttempts > 1 ? ` (retry #${_fbInitAttempts-1} succeeded)` : ''));
   } catch(err) {
@@ -4606,104 +4603,86 @@ async function initFirebase(){
 }
 
 // Called when user signs in/out
+// ──────────────────────────────────────────────────────────────────
+// In v3.90+ all users get the 'warehouse' role automatically. The real
+// permission system inside the app is the PIN-based role switcher (admin
+// PIN 2804, warehouse 0000, etc.) — that controls what users can do.
+// This _fbAuthorized object is only used to display a badge in the topbar
+// and to enable cloud sync — it's not a security boundary.
 async function handleAuthChange(user){
   _fbUser = user;
   if(!user){
     _fbAuthorized = null;
     if(_fbSyncTimer){ clearInterval(_fbSyncTimer); _fbSyncTimer = null; }
-    fbStopRealtimeSync();  // detach realtime listener on sign-out
+    fbStopRealtimeSync();
     updateAuthBadge();
     return;
   }
-  // Check whitelist
-  try {
-    const snap = await _fbDb.ref('authorized/' + emailKey(user.email)).once('value');
-    _fbAuthorized = snap.val();  // null if not in whitelist, or {role: '...'}
-    if(!_fbAuthorized){
-      toast(`Access denied — ${user.email} not in whitelist. Contact admin.`, 'err');
-      console.warn('[firebase] User', user.email, 'not authorized');
-      // Sign them out so they don't think they're logged in
-      setTimeout(() => _fbAuth.signOut(), 4000);
-      updateAuthBadge();
-      return;
-    }
-    console.log('[firebase] Authorized as', user.email, 'role:', _fbAuthorized.role);
-    toast(`Welcome ${user.displayName||user.email}`, 'ok');
-    // Start periodic sync (safety net — primary sync is now event-driven via fbAutoPush)
-    if(!_fbSyncTimer){
-      _fbSyncTimer = setInterval(() => fbCloudSync(false), 2 * 60 * 1000);  // every 2 min
-    }
-    // Start realtime cross-device sync — listens for remote state changes
-    fbStartRealtimeSync();
-    // Start auto-update watcher — listens for new version announcements
-    startVersionWatcher();
-    updateAuthBadge();
-    // ══════════════════════════════════════════════════════════════
-    // FORCE FRESH PULL FROM CLOUD AFTER SIGN-IN
-    // ──────────────────────────────────────────────────────────────
-    // After a fresh sign-in, the user almost certainly has stale local
-    // data (that's WHY they were signed out — Firebase had been losing
-    // contact). Pull the latest cloud state right now so they see fresh
-    // data immediately, instead of waiting for the periodic sync.
-    // We do this in addition to the realtime listener's initial-fire
-    // logic, because that fires asynchronously and can race against
-    // the user's first actions.
-    // ══════════════════════════════════════════════════════════════
-    setTimeout(() => {
-      try {
-        if(_fbDb && _fbAuthorized){
-          _fbDb.ref('state/shared/latest').once('value').then(snap => {
-            const payload = snap.val();
-            if(payload && payload.state && payload.deviceId !== _fbDeviceId){
-              // Apply cloud state if it's newer than our local
-              if(payload.timestamp > _fbLastLocalWriteAt){
-                console.log('[firebase] Pulling fresh cloud state after sign-in');
-                fbApplyRemoteState(payload.state, payload.timestamp);
-                toast('☁ Synced with cloud — latest data loaded', 'ok');
-              }
-            }
-          }).catch(err => console.warn('[post-signin pull]', err));
-        }
-      } catch(e){ console.warn('[post-signin pull]', e); }
-    }, 500);
-  } catch(err){
-    console.error('[firebase] whitelist check failed:', err);
-    toast('Auth error: ' + err.message, 'err');
+
+  // Universal authorization — anonymous OR existing Google users from older
+  // versions. Everyone gets the same baseline role here; in-app PINs are
+  // what actually gates sensitive operations.
+  _fbAuthorized = {
+    role: 'warehouse',
+    anonymous: !!user.isAnonymous,
+    email: user.email || 'anonymous@device'
+  };
+  console.log('[firebase] Connected as', user.isAnonymous ? 'anonymous' : user.email, '— role: warehouse');
+
+  if(!_fbSyncTimer){
+    _fbSyncTimer = setInterval(() => fbCloudSync(false), 2 * 60 * 1000);  // safety-net every 2 min
   }
+  fbStartRealtimeSync();
+  startVersionWatcher();
+  updateAuthBadge();
+
+  // ══════════════════════════════════════════════════════════════
+  // FORCE FRESH PULL FROM CLOUD AFTER SIGN-IN
+  // ──────────────────────────────────────────────────────────────
+  // After a fresh connect, pull the latest cloud state right away so the
+  // user sees current data immediately instead of waiting for periodic
+  // sync. The realtime listener does this asynchronously, but it can race
+  // against the user's first actions — this explicit pull closes that gap.
+  // ══════════════════════════════════════════════════════════════
+  setTimeout(() => {
+    try {
+      if(_fbDb && _fbAuthorized){
+        _fbDb.ref('state/shared/latest').once('value').then(snap => {
+          const payload = snap.val();
+          if(payload && payload.state && payload.deviceId !== _fbDeviceId){
+            if(payload.timestamp > _fbLastLocalWriteAt){
+              console.log('[firebase] Pulling fresh cloud state after sign-in');
+              fbApplyRemoteState(payload.state, payload.timestamp);
+              toast('☁ Synced with cloud — latest data loaded', 'ok');
+            }
+          }
+        }).catch(err => console.warn('[post-signin pull]', err));
+      }
+    } catch(e){ console.warn('[post-signin pull]', e); }
+  }, 500);
 }
 
 // Sign in / out actions
+// ──────────────────────────────────────────────────────────────────
+// In v3.90+ we use ANONYMOUS-ONLY auth. The Google sign-in flow caused
+// constant problems on iOS Safari (popup blocks, redirect failures,
+// session not persisting). Anonymous auth is automatic, transparent,
+// and reliable across all devices. User identification happens via
+// the in-app Welcome screen (Alberto / Jarred / Tony / Dan).
 async function fbSignIn(){
-  if(!_fbAuth){ toast('Firebase not configured — see README', 'err'); return; }
+  if(!_fbAuth){ toast('Firebase not loaded yet — try again in a moment', 'err'); return; }
+  // If already signed in, nothing to do
+  if(_fbAuth.currentUser){ toast('✓ Already connected', 'ok'); return; }
   try {
-    const provider = new firebase.auth.GoogleAuthProvider();
-    // On mobile (iOS Safari especially), popup sign-in is unreliable — popups
-    // get blocked or the resulting auth state doesn't persist. Use redirect
-    // flow on mobile devices instead. Detection: small viewport OR touch device.
-    const isMobile = window.matchMedia('(max-width: 768px)').matches ||
-                     ('ontouchstart' in window && window.innerWidth < 900);
-    if(isMobile){
-      // signInWithRedirect navigates away and comes back. The result is then
-      // picked up by getRedirectResult() on next load (handled by onAuthStateChanged).
-      await _fbAuth.signInWithRedirect(provider);
-      return;
+    await _fbAuth.signInAnonymously();
+    // onAuthStateChanged fires next and handles the rest
+  } catch(e){
+    console.error('[signIn]', e);
+    if(e.code === 'auth/admin-restricted-operation'){
+      toast('Anonymous sign-in is disabled in Firebase Console. Enable it under Authentication → Sign-in method → Anonymous.', 'err');
+    } else {
+      toast('Connection failed: ' + e.message, 'err');
     }
-    await _fbAuth.signInWithPopup(provider);
-  } catch(err){
-    if(err.code === 'auth/popup-closed-by-user') return;
-    if(err.code === 'auth/popup-blocked'){
-      // Fall back to redirect if popup was blocked
-      try {
-        const provider = new firebase.auth.GoogleAuthProvider();
-        await _fbAuth.signInWithRedirect(provider);
-        return;
-      } catch(e){
-        toast('Sign-in blocked — allow popups for this site, or open in a regular browser tab', 'err');
-        return;
-      }
-    }
-    toast('Sign-in failed: ' + err.message, 'err');
-    console.error(err);
   }
 }
 async function fbSignOut(){
@@ -4779,8 +4758,36 @@ async function fbCloudSync(showToast){
   } catch(err){
     _fbConsecutiveFailures = (_fbConsecutiveFailures || 0) + 1;
     console.error('[firebase] sync failed:', err);
-    if(showToast) toast('Sync failed: ' + err.message, 'err');
+    // ── PERMISSION_DENIED is THE classic anonymous-auth-blocked-by-rules failure ──
+    // If Firebase rules require an email but the user is anonymous, every write
+    // fails with this error. Show a SPECIFIC actionable banner once.
+    if((err.code === 'PERMISSION_DENIED' || /permission/i.test(err.message)) && !window._permDeniedBannerShown){
+      window._permDeniedBannerShown = true;
+      _showPermissionDeniedBanner();
+    } else if(showToast){
+      toast('Sync failed: ' + err.message, 'err');
+    }
   }
+}
+
+// Banner shown once when Firebase rules reject an anonymous write. Tells the
+// user exactly what to do — there's no way for the app to fix this itself.
+function _showPermissionDeniedBanner(){
+  if(document.getElementById('perm-denied-banner')) return;
+  const banner = document.createElement('div');
+  banner.id = 'perm-denied-banner';
+  banner.style.cssText = 'position:fixed;bottom:0;left:0;right:0;z-index:99997;background:linear-gradient(135deg,#7f1d1d,#991b1b);color:#fff;padding:14px 16px;font-size:13px;font-weight:500;box-shadow:0 -4px 16px rgba(0,0,0,.2);line-height:1.45';
+  banner.innerHTML = `
+    <div style="max-width:680px;margin:0 auto;display:flex;align-items:flex-start;gap:12px;flex-wrap:wrap">
+      <span style="font-size:22px;flex:0 0 auto">🔧</span>
+      <div style="flex:1 1 220px;min-width:0">
+        <div style="font-weight:800;margin-bottom:4px">Firebase Security Rules bloquean writes</div>
+        <div style="font-size:11.5px;opacity:.92">Las rules requieren un email y este device entró como Anonymous. Un admin debe actualizar las rules en Firebase Console → Realtime Database → Rules. Mientras tanto, los cambios se guardan localmente.</div>
+      </div>
+      <button onclick="document.getElementById('perm-denied-banner').remove()" style="background:rgba(255,255,255,.15);color:#fff;border:1px solid rgba(255,255,255,.3);border-radius:7px;padding:6px 12px;font-size:12px;font-weight:700;cursor:pointer;flex:0 0 auto">OK</button>
+    </div>
+  `;
+  document.body.appendChild(banner);
 }
 
 // Restore the latest cloud snapshot — replaces local state
@@ -5391,29 +5398,24 @@ function pickAndUploadPhoto(type, item, onDone){
 // Update the auth badge in the topbar (signed-in user / sign-in button)
 function updateAuthBadge(){
   const el = document.getElementById('fb-auth-badge');
-  // Also control the prominent dashboard sign-in card
-  const dashSigninCard = document.getElementById('dash-signin-card');
-  const showDashSignin = FIREBASE_ENABLED && !_fbUser;
-  if(dashSigninCard) dashSigninCard.style.display = showDashSignin ? '' : 'none';
   if(!el) return;
   if(!FIREBASE_ENABLED){
-    el.innerHTML = `<span style="font-size:10.5px;color:var(--text3)" title="Firebase not configured — see README to enable cloud sync">📦 Local-only</span>`;
-    hideAuthBigBanner();
+    el.innerHTML = `<span style="font-size:10.5px;color:var(--text3)" title="Firebase not configured — running offline-only">📦 Local-only</span>`;
     return;
   }
   if(!_fbUser){
-    el.innerHTML = `<button class="btn btn-sm" onclick="fbSignIn()" style="display:inline-flex;align-items:center;gap:6px;padding:5px 11px;font-size:11.5px;background:#fef2f2;border-color:#fca5a5;color:#991b1b;font-weight:700"><svg width="14" height="14" viewBox="0 0 18 18"><path d="M16.51 8.18c0-.55-.05-1.05-.14-1.55H9v3.05h4.27c-.18 1-.74 1.84-1.58 2.4v2h2.55c1.49-1.37 2.27-3.41 2.27-5.9z" fill="#4285F4"/><path d="M9 17c2.14 0 3.93-.71 5.24-1.92l-2.55-2c-.7.47-1.61.75-2.69.75-2.07 0-3.83-1.4-4.45-3.27H1.92v2.07A8 8 0 009 17z" fill="#34A853"/><path d="M4.55 10.56c-.16-.47-.25-.97-.25-1.49s.09-1.02.25-1.49V5.51H1.92A8 8 0 001 9c0 1.31.31 2.54.92 3.49l2.63-2.04z" fill="#FBBC05"/><path d="M9 4.74c1.17 0 2.21.4 3.04 1.19l2.27-2.27A8 8 0 009 1a8 8 0 00-7.08 4.51L4.55 7.55C5.17 5.68 6.93 4.74 9 4.74z" fill="#EA4335"/></svg>Sign in</button>`;
-    showAuthBigBanner();    // ← also show the BIG red banner so user can't miss it
+    // Briefly empty during the ~600ms before auto-anon kicks in.
+    el.innerHTML = `<span style="font-size:10.5px;color:var(--text3)">⏳ Connecting…</span>`;
     return;
   }
-  hideAuthBigBanner();      // signed in — banner not needed
   if(!_fbAuthorized){
-    el.innerHTML = `<span style="font-size:10.5px;color:var(--red);background:#fee2e2;padding:3px 8px;border-radius:11px" title="Email not in authorized whitelist">⚠ Access denied</span>`;
+    el.innerHTML = `<span style="font-size:10.5px;color:var(--text3)">⏳ Setting up…</span>`;
     return;
   }
-  const initial = (_fbUser.displayName||_fbUser.email||'?').charAt(0).toUpperCase();
+  // Connected — show a clean green sync indicator. No identity displayed
+  // because users are anonymous; in-app Welcome screen identifies them.
   const lastSync = _fbLastSyncedAt ? new Date(_fbLastSyncedAt).toLocaleTimeString() : 'pending';
-  el.innerHTML = `<span style="display:inline-flex;align-items:center;gap:7px;font-size:11px;background:#dcfce7;color:#166534;padding:4px 9px;border-radius:11px;cursor:pointer" onclick="fbCloudSync(true)" title="Click to sync now · last sync: ${lastSync}"><span style="width:18px;height:18px;border-radius:50%;background:var(--accent);color:#fff;display:inline-flex;align-items:center;justify-content:center;font-weight:700;font-size:10px">${initial}</span>${_fbAuthorized.role||'user'} · ☁</span>`;
+  el.innerHTML = `<span style="display:inline-flex;align-items:center;gap:5px;font-size:11px;background:#dcfce7;color:#166534;padding:4px 9px;border-radius:11px;cursor:pointer" onclick="fbCloudSync(true)" title="Connected · click to sync now · last sync: ${lastSync}">☁ Synced</span>`;
 }
 
 // ══════════════════════════════════════════════════════════════════
@@ -5427,34 +5429,16 @@ function updateAuthBadge(){
 // That's how data on Alberto's iPhone got out of sync with his Mac.
 // ══════════════════════════════════════════════════════════════════
 function showAuthBigBanner(){
-  if(document.getElementById('auth-big-banner')) return;
-  // Don't show during the very first second of boot — Firebase auth needs
-  // a moment to restore the persisted session. Otherwise we'd briefly flash
-  // the banner on every page load even for already-signed-in users.
-  if(performance.now() < 2500){
-    setTimeout(showAuthBigBanner, 2500 - performance.now());
-    return;
-  }
-  const banner = document.createElement('div');
-  banner.id = 'auth-big-banner';
-  banner.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:99998;background:linear-gradient(135deg,#991b1b,#dc2626);color:#fff;padding:14px 18px;text-align:center;font-size:14px;font-weight:600;box-shadow:0 4px 20px rgba(220,38,38,.5);cursor:pointer';
-  banner.innerHTML = `
-    <div style="display:flex;align-items:center;justify-content:center;gap:12px;flex-wrap:wrap;line-height:1.4">
-      <span style="font-size:20px">⚠</span>
-      <div style="text-align:left;flex:0 1 auto">
-        <div style="font-weight:800;font-size:14px">No estás conectado a Firebase</div>
-        <div style="font-size:11.5px;opacity:.9;margin-top:2px">Sin esto, los cambios NO se sincronizan con otros devices · Toca aquí para iniciar sesión</div>
-      </div>
-      <button onclick="event.stopPropagation();fbSignIn()" style="background:#fff;color:#991b1b;border:none;border-radius:7px;padding:9px 18px;font-size:13px;font-weight:800;cursor:pointer;flex:0 0 auto">Iniciar sesión</button>
-    </div>
-  `;
-  banner.onclick = () => fbSignIn();
-  document.body.appendChild(banner);
-  // Push the rest of the app down so the banner doesn't cover content
-  document.body.style.paddingTop = (banner.offsetHeight + 4) + 'px';
+  // DISABLED in v3.88 — we now show a single, properly-placed sign-in card
+  // INSIDE the dashboard (dash-signin-card). The fixed-position banner was
+  // creating a duplicate UI element + layout shifts on mobile. The dashboard
+  // card is enough — it's prominent, in-flow, and doesn't overlay anything.
+  // Kept as a no-op so other call sites still work.
+  return;
 }
 
 function hideAuthBigBanner(){
+  // Clean up any banner that may have been added before this version
   const b = document.getElementById('auth-big-banner');
   if(b){
     b.remove();
@@ -18195,16 +18179,16 @@ function updateSyncStatusBadge(){
     return;
   }
   if(!isFb){
-    // CRITICAL: this badge is now the PRIMARY way users on mobile see they
-    // need to sign in. Make it BIG, RED, and tappable — opens sign-in directly.
-    badge.innerHTML = '🔒 Tap to Sign In';
-    badge.title = 'Tap to sign in for cloud sync — without this, changes only save on this device';
-    badge.style.background = '#dc2626';
-    badge.style.color = '#fff';
-    badge.style.fontWeight = '700';
-    badge.style.cursor = 'pointer';
-    badge.style.animation = 'pulseAuthBadge 2s ease-in-out infinite';
-    badge.onclick = () => { try { fbSignIn(); } catch(e){ toast('Sign-in error: '+e.message, 'err'); } };
+    // Anonymous auth is initializing. Show a clean "connecting" indicator.
+    // No more CTA — anonymous sign-in happens automatically, the user
+    // doesn't need to do anything.
+    badge.innerHTML = '⏳ Connecting…';
+    badge.title = 'Auto-connecting to cloud sync — this should only take a second';
+    badge.style.background = '#fef3c7';
+    badge.style.color = '#92400e';
+    badge.style.fontWeight = '600';
+    badge.style.cursor = 'default';
+    badge.style.animation = '';
     return;
   }
   // Signed-in states: reset animation
