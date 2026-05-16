@@ -3328,7 +3328,7 @@ body.dark-mode .mar-card-track {
       <div class="role-current"><span id="role-indicator">Admin</span></div>
     </div>
   </div>
-  <div class="sb-foot"><div class="sb-ver">v3.78 · <span id="live-date"></span></div></div>
+  <div class="sb-foot"><div class="sb-ver">v3.80 · <span id="live-date"></span></div></div>
 </nav>
 
 <!-- MAIN -->
@@ -4659,30 +4659,56 @@ function fbStopRealtimeSync(){
 // IMPORTANT: this also calls fbRerenderActiveView() INSIDE the _fbApplyingRemote
 // flag-protected block so the render's saveState calls are correctly skipped.
 // ── CFG MERGE HELPER (preserves custom role PINs across sync) ──
-// A shallow Object.assign for cfg would overwrite cfg.rolePasswords entirely
-// with the remote's version. If the remote was saved by an older client whose
-// cfg was missing some role keys (e.g. didn't know about 'marriages') or by a
-// freshly-booted device that pushed defaults before its ensureRolePinsInitialized
-// ran, the merge would clobber custom PINs the local device worked hard to set.
-// This helper does a key-by-key merge of rolePasswords: prefer remote when
-// present, keep local otherwise, backfill missing roles from DEFAULT_ROLE_PINS.
+// Per-PIN timestamps make this race-free: each PIN carries its own
+// "lastUpdated" timestamp recorded by setRolePin. When two devices have
+// different PINs for the same role, the newer timestamp wins — no matter
+// which device pushed first.
+//
+// A PIN with NO timestamp (e.g. a default backfilled by ensureRolePinsInitialized)
+// is treated as timestamp 0, so any real user-set PIN from any device always
+// beats a default. This is why the boot-time backfill MUST NOT push timestamps.
 function mergeCfgPreservingPins(localCfg, remoteCfg){
   if(!remoteCfg || typeof remoteCfg !== 'object') return localCfg;
   const remotePins = (remoteCfg.rolePasswords && typeof remoteCfg.rolePasswords === 'object') ? remoteCfg.rolePasswords : {};
   const localPins  = (localCfg && localCfg.rolePasswords && typeof localCfg.rolePasswords === 'object') ? localCfg.rolePasswords : {};
-  // Local first so remote values win when both present. Custom PINs set on
-  // ANY device (and pushed to Firebase) propagate to every other device.
-  const mergedPins = { ...localPins, ...remotePins };
-  const { rolePasswords: _ignored, ...remoteCfgRest } = remoteCfg;
-  const merged = Object.assign({}, localCfg, remoteCfgRest, { rolePasswords: mergedPins });
-  // Backfill any role that's missing entirely (newly added role or first run)
-  try {
-    if(typeof DEFAULT_ROLE_PINS !== 'undefined'){
-      for(const r of Object.keys(DEFAULT_ROLE_PINS)){
-        if(merged.rolePasswords[r] == null) merged.rolePasswords[r] = DEFAULT_ROLE_PINS[r];
-      }
+  const remoteTs   = (remoteCfg.rolePasswordsUpdatedAt && typeof remoteCfg.rolePasswordsUpdatedAt === 'object') ? remoteCfg.rolePasswordsUpdatedAt : {};
+  const localTs    = (localCfg && localCfg.rolePasswordsUpdatedAt && typeof localCfg.rolePasswordsUpdatedAt === 'object') ? localCfg.rolePasswordsUpdatedAt : {};
+
+  // For each known role, choose the value with the newer timestamp.
+  const mergedPins = {};
+  const mergedTs   = {};
+  const allRoles = new Set([
+    ...Object.keys(localPins),
+    ...Object.keys(remotePins),
+    ...((typeof DEFAULT_ROLE_PINS !== 'undefined') ? Object.keys(DEFAULT_ROLE_PINS) : [])
+  ]);
+  for(const role of allRoles){
+    const lT = Number(localTs[role])  || 0;
+    const rT = Number(remoteTs[role]) || 0;
+    if(rT > lT){
+      // Remote is newer — take its PIN + timestamp
+      if(remotePins[role] != null) mergedPins[role] = remotePins[role];
+      if(rT > 0) mergedTs[role] = rT;
+    } else if(lT > rT){
+      // Local is newer — keep local
+      if(localPins[role] != null) mergedPins[role] = localPins[role];
+      if(lT > 0) mergedTs[role] = lT;
+    } else {
+      // Both 0 (defaults) OR equal timestamps — prefer remote if it has a value,
+      // else local, else default. Tied timestamps means same write; either works.
+      const pick = (remotePins[role] != null) ? remotePins[role] : (localPins[role] != null ? localPins[role] : (typeof DEFAULT_ROLE_PINS !== 'undefined' ? DEFAULT_ROLE_PINS[role] : '0000'));
+      if(pick != null) mergedPins[role] = pick;
+      // No timestamp persisted for defaults
     }
-  } catch(e){}
+  }
+
+  // Build the merged cfg: shallow merge for everything EXCEPT rolePasswords/
+  // rolePasswordsUpdatedAt, which we just resolved with the timestamp logic.
+  const { rolePasswords: _ignored1, rolePasswordsUpdatedAt: _ignored2, ...remoteCfgRest } = remoteCfg;
+  const merged = Object.assign({}, localCfg, remoteCfgRest, {
+    rolePasswords: mergedPins,
+    rolePasswordsUpdatedAt: mergedTs
+  });
   return merged;
 }
 
@@ -5366,6 +5392,12 @@ function getRolePin(role){
 
 // Set a role's PIN. Only admin can call this for OTHER roles; any role can
 // change its own. Persists to cfg.rolePasswords + Firebase via saveState.
+//
+// Each PIN gets its own "lastUpdated" timestamp stored in cfg.rolePasswordsUpdatedAt.
+// The cross-device merge logic uses these timestamps to decide which PIN wins
+// when two devices have different values — newest write always wins, no matter
+// which device pushed first. This is what makes PIN changes actually stick
+// across iPhone/Mac/iPad without race conditions.
 function setRolePin(role, newPin){
   if(!ROLES[role]) throw new Error('Unknown role: ' + role);
   if(typeof newPin !== 'string') newPin = String(newPin);
@@ -5376,28 +5408,36 @@ function setRolePin(role, newPin){
   }
   if(!window.cfg) window.cfg = {};
   if(!cfg.rolePasswords) cfg.rolePasswords = { ...DEFAULT_ROLE_PINS };
+  if(!cfg.rolePasswordsUpdatedAt || typeof cfg.rolePasswordsUpdatedAt !== 'object') cfg.rolePasswordsUpdatedAt = {};
   cfg.rolePasswords[role] = newPin;
-  // Persist + sync
-  try { if(typeof saveState === 'function') saveState(); } catch(e){ console.warn(e); }
-  try { if(typeof fbAutoPush === 'function') fbAutoPush(); } catch(e){}
+  cfg.rolePasswordsUpdatedAt[role] = Date.now();
+  // Persist + sync. flushSave (not saveState) so the change hits localStorage
+  // synchronously before any unrelated debounced write could be cancelled by
+  // a page unload / tab background — this is the safest path for PIN edits.
+  try { if(typeof flushSave === 'function') flushSave(); else if(typeof saveState === 'function') saveState(); } catch(e){ console.warn(e); }
 }
 
 // Ensure cfg.rolePasswords exists with all defaults — called once at boot
 // (after loadState) so newly-added roles always have a PIN entry.
+//
+// IMPORTANT: we DO NOT call saveState() here. If the device booted with an
+// incomplete cfg (e.g. older client) we just fill in defaults in memory. The
+// next real edit will push them along. Pushing defaults proactively at boot
+// caused the "PIN reset" bug: a device that booted before receiving the
+// remote state would push fresh defaults, overriding custom PINs other
+// devices had already saved. The timestamp-based merge below relies on the
+// invariant that defaults have NO timestamp (so any custom write wins).
 function ensureRolePinsInitialized(){
   if(!window.cfg) window.cfg = {};
   if(!cfg.rolePasswords || typeof cfg.rolePasswords !== 'object'){
     cfg.rolePasswords = {};
   }
-  let changed = false;
   for(const r of Object.keys(DEFAULT_ROLE_PINS)){
     if(cfg.rolePasswords[r] == null){
       cfg.rolePasswords[r] = DEFAULT_ROLE_PINS[r];
-      changed = true;
+      // No timestamp — backfilled defaults are NEVER persisted as "user-set"
+      // and will be overwritten by any real edit from any device.
     }
-  }
-  if(changed){
-    try { if(typeof saveState === 'function') saveState(); } catch(e){}
   }
 }
 
@@ -10776,7 +10816,7 @@ function renderTruck(){
           <strong>${subLabel}</strong> · ${typeLabel}
         </div>
         <div style="font-size:11px;color:var(--text3)">Ready since ${readySince}</div>
-        <button class="btn btn-p" style="padding:13px 18px;font-size:14px;font-weight:700;min-height:50px;background:#7c2d12;border:none;color:#fff" onclick="truckLoadOne(${f.id})">
+        <button class="btn btn-p" style="padding:13px 18px;font-size:14px;font-weight:700;min-height:50px;background:#7c2d12;border:none;color:#fff" onclick="openQRScanner('load')">
           📷 Scan to Load on Truck
         </button>
       </div>`;
