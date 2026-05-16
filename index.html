@@ -239,6 +239,12 @@ body.role-transit .scan-load-btn{
   animation:pulse-transit 2.4s ease-in-out infinite
 }
 @keyframes pulse-transit{0%,100%{box-shadow:0 4px 16px -4px rgba(217,119,6,.3)}50%{box-shadow:0 6px 22px -2px rgba(217,119,6,.5)}}
+/* Sign-in badge attention animation — pulses gently to draw the eye in mobile.
+   Slow enough to not be annoying, prominent enough to be noticed. */
+@keyframes pulseAuthBadge {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(220,38,38,.5); transform: scale(1); }
+  50%      { box-shadow: 0 0 0 6px rgba(220,38,38,0); transform: scale(1.04); }
+}
 /* ── WELCOME SCREEN USER CARDS ── */
 .user-card {
   position: relative;
@@ -1945,6 +1951,27 @@ tbody tr:hover td{background:var(--bg3)}
     border: 0.5px solid rgba(0, 0, 0, 0.08) !important;
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04) !important;
     padding: 14px 15px !important;
+    /* Ensure all cards have the same minimum height for visual symmetry,
+       even when one has a 1-line label and another has a 2-line label. */
+    min-height: 108px !important;
+    display: flex !important;
+    flex-direction: column !important;
+    justify-content: space-between !important;
+  }
+  /* Constrain label to a single line where possible — wrapping creates uneven cards */
+  .sc .sc-label {
+    font-size: 9.5px !important;
+    letter-spacing: .07em !important;
+    line-height: 1.25 !important;
+    min-height: 24px !important;   /* reserve 2 lines of space so all cards align */
+  }
+  .sc .sc-val {
+    font-size: 30px !important;
+    margin: 2px 0 4px !important;
+  }
+  .sc .sc-trend {
+    font-size: 10.5px !important;
+    line-height: 1.35 !important;
   }
   body.dark-mode .sc {
     border-color: rgba(255, 255, 255, 0.08) !important;
@@ -2201,6 +2228,7 @@ tbody tr:hover td{background:var(--bg3)}
   .tba > button[onclick*="printReport"],
   .tba > button[onclick*="printFct"],
   .tba > button[onclick*="goV('incoming')"],
+  .tba > button[onclick*="openAddUnit"],         /* FAB handles this on mobile */
   .tba > .user-pill,                /* avatar+name goes to sidebar */
   .tba > #fb-auth-badge {            /* "Sign in / Offline" too */
     display: none !important;
@@ -2212,10 +2240,21 @@ tbody tr:hover td{background:var(--bg3)}
     gap: 3px !important;
   }
   #sync-status-badge {
-    padding: 4px 8px !important;
-    font-size: 10.5px !important;
-    font-weight: 600 !important;
+    padding: 6px 11px !important;
+    font-size: 12px !important;
+    font-weight: 700 !important;
     border-radius: 100px !important;
+    line-height: 1.2 !important;
+    white-space: nowrap !important;
+    max-width: 44vw !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
+  }
+  /* When the badge has the pulse animation (= sign-in needed), make it noticeably
+     bigger so users notice it even glancing at the topbar. */
+  #sync-status-badge[style*="pulseAuthBadge"] {
+    padding: 7px 13px !important;
+    font-size: 12.5px !important;
   }
   #sync-diag-btn {
     width: 28px !important;
@@ -3339,7 +3378,7 @@ body.dark-mode .mar-card-track {
       <div class="role-current"><span id="role-indicator">Admin</span></div>
     </div>
   </div>
-  <div class="sb-foot"><div class="sb-ver">v3.86 · <span id="live-date"></span></div></div>
+  <div class="sb-foot"><div class="sb-ver">v3.87 · <span id="live-date"></span></div></div>
 </nav>
 
 <!-- MAIN -->
@@ -3395,6 +3434,19 @@ body.dark-mode .mar-card-track {
 
 <!-- DASHBOARD -->
 <div id="view-dashboard" class="view active">
+  <!-- Sign-in prompt card — shown only when Firebase is enabled but user isn't signed in.
+       Auto-hides as soon as user signs in successfully. This is the FIRST thing users
+       see on the dashboard, ensuring they can't miss the call-to-action. -->
+  <div id="dash-signin-card" style="display:none;background:linear-gradient(135deg,#dc2626 0%,#991b1b 100%);color:#fff;border-radius:14px;padding:18px 18px;margin-bottom:14px;box-shadow:0 8px 24px -4px rgba(220,38,38,.4);cursor:pointer" onclick="fbSignIn()">
+    <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
+      <div style="font-size:32px;flex:0 0 auto">🔒</div>
+      <div style="flex:1 1 220px;min-width:0">
+        <div style="font-size:15px;font-weight:800;line-height:1.25;margin-bottom:3px">No estás conectado a Firebase</div>
+        <div style="font-size:12px;opacity:.92;line-height:1.4">Tus cambios no se sincronizan con otros devices · Toca aquí para iniciar sesión con Google</div>
+      </div>
+      <button onclick="event.stopPropagation();fbSignIn()" style="background:#fff;color:#991b1b;border:none;border-radius:9px;padding:11px 18px;font-size:13.5px;font-weight:800;cursor:pointer;flex:0 0 auto;box-shadow:0 2px 6px rgba(0,0,0,.15)">Iniciar sesión</button>
+    </div>
+  </div>
   <!-- Personalized greeting banner -->
   <div class="greeting-banner" id="greeting-banner" style="display:none">
     <div class="greeting-avatar" id="greeting-avatar">?</div>
@@ -4404,7 +4456,7 @@ let _fbInitAttempts = 0;
 //   /app_version/current  (in Firebase console, manually, OR call
 //   pushVersionToFirebase() from the Admin console at deploy time)
 // ══════════════════════════════════════════════════════════════════
-const APP_VERSION = 'v3.86';
+const APP_VERSION = 'v3.87';
 window.APP_VERSION = APP_VERSION;
 
 let _updateBannerShown = false;
@@ -4491,7 +4543,35 @@ async function initFirebase(){
     _fbAuth = firebase.auth();
     _fbDb = firebase.database();
     _fbStorage = firebase.storage();
+    // ══════════════════════════════════════════════════════════════
+    // CRITICAL: Force LOCAL persistence so Firebase remembers the user
+    // across browser sessions. Without this, iOS Safari's aggressive
+    // privacy mode (ITP) can silently log the user out, breaking sync.
+    // LOCAL = indexedDB (survives browser restarts, app closes, etc.)
+    // ══════════════════════════════════════════════════════════════
+    try {
+      await _fbAuth.setPersistence(firebase.auth.Auth.Persistence.LOCAL);
+      console.log('[firebase] auth persistence set to LOCAL (survives browser restarts)');
+    } catch(persistErr){
+      console.warn('[firebase] could not set LOCAL persistence:', persistErr.message);
+      // Fall back to SESSION — at least the user stays logged in for current tab
+      try { await _fbAuth.setPersistence(firebase.auth.Auth.Persistence.SESSION); } catch(e){}
+    }
     _fbAuth.onAuthStateChanged(handleAuthChange);
+    // ── Check for pending redirect sign-in result ──
+    // After fbSignIn() does signInWithRedirect on mobile, the user returns
+    // to the app and we need to pick up the result. onAuthStateChanged fires
+    // automatically when this resolves, but calling getRedirectResult() here
+    // makes failures explicit (e.g. domain not whitelisted, blocked, etc.)
+    try {
+      const redirResult = await _fbAuth.getRedirectResult();
+      if(redirResult && redirResult.user){
+        console.log('[firebase] redirect sign-in completed for', redirResult.user.email);
+      }
+    } catch(redirErr){
+      console.warn('[firebase] redirect result error:', redirErr.code, redirErr.message);
+      toast('Sign-in error: ' + (redirErr.message || redirErr.code), 'err');
+    }
     _fbSdkLoadFailed = false;
     console.log('[firebase] SDK loaded' + (_fbInitAttempts > 1 ? ` (retry #${_fbInitAttempts-1} succeeded)` : ''));
   } catch(err) {
@@ -4558,6 +4638,34 @@ async function handleAuthChange(user){
     // Start auto-update watcher — listens for new version announcements
     startVersionWatcher();
     updateAuthBadge();
+    // ══════════════════════════════════════════════════════════════
+    // FORCE FRESH PULL FROM CLOUD AFTER SIGN-IN
+    // ──────────────────────────────────────────────────────────────
+    // After a fresh sign-in, the user almost certainly has stale local
+    // data (that's WHY they were signed out — Firebase had been losing
+    // contact). Pull the latest cloud state right now so they see fresh
+    // data immediately, instead of waiting for the periodic sync.
+    // We do this in addition to the realtime listener's initial-fire
+    // logic, because that fires asynchronously and can race against
+    // the user's first actions.
+    // ══════════════════════════════════════════════════════════════
+    setTimeout(() => {
+      try {
+        if(_fbDb && _fbAuthorized){
+          _fbDb.ref('state/shared/latest').once('value').then(snap => {
+            const payload = snap.val();
+            if(payload && payload.state && payload.deviceId !== _fbDeviceId){
+              // Apply cloud state if it's newer than our local
+              if(payload.timestamp > _fbLastLocalWriteAt){
+                console.log('[firebase] Pulling fresh cloud state after sign-in');
+                fbApplyRemoteState(payload.state, payload.timestamp);
+                toast('☁ Synced with cloud — latest data loaded', 'ok');
+              }
+            }
+          }).catch(err => console.warn('[post-signin pull]', err));
+        }
+      } catch(e){ console.warn('[post-signin pull]', e); }
+    }, 500);
   } catch(err){
     console.error('[firebase] whitelist check failed:', err);
     toast('Auth error: ' + err.message, 'err');
@@ -4569,9 +4677,31 @@ async function fbSignIn(){
   if(!_fbAuth){ toast('Firebase not configured — see README', 'err'); return; }
   try {
     const provider = new firebase.auth.GoogleAuthProvider();
+    // On mobile (iOS Safari especially), popup sign-in is unreliable — popups
+    // get blocked or the resulting auth state doesn't persist. Use redirect
+    // flow on mobile devices instead. Detection: small viewport OR touch device.
+    const isMobile = window.matchMedia('(max-width: 768px)').matches ||
+                     ('ontouchstart' in window && window.innerWidth < 900);
+    if(isMobile){
+      // signInWithRedirect navigates away and comes back. The result is then
+      // picked up by getRedirectResult() on next load (handled by onAuthStateChanged).
+      await _fbAuth.signInWithRedirect(provider);
+      return;
+    }
     await _fbAuth.signInWithPopup(provider);
   } catch(err){
     if(err.code === 'auth/popup-closed-by-user') return;
+    if(err.code === 'auth/popup-blocked'){
+      // Fall back to redirect if popup was blocked
+      try {
+        const provider = new firebase.auth.GoogleAuthProvider();
+        await _fbAuth.signInWithRedirect(provider);
+        return;
+      } catch(e){
+        toast('Sign-in blocked — allow popups for this site, or open in a regular browser tab', 'err');
+        return;
+      }
+    }
     toast('Sign-in failed: ' + err.message, 'err');
     console.error(err);
   }
@@ -5261,15 +5391,22 @@ function pickAndUploadPhoto(type, item, onDone){
 // Update the auth badge in the topbar (signed-in user / sign-in button)
 function updateAuthBadge(){
   const el = document.getElementById('fb-auth-badge');
+  // Also control the prominent dashboard sign-in card
+  const dashSigninCard = document.getElementById('dash-signin-card');
+  const showDashSignin = FIREBASE_ENABLED && !_fbUser;
+  if(dashSigninCard) dashSigninCard.style.display = showDashSignin ? '' : 'none';
   if(!el) return;
   if(!FIREBASE_ENABLED){
     el.innerHTML = `<span style="font-size:10.5px;color:var(--text3)" title="Firebase not configured — see README to enable cloud sync">📦 Local-only</span>`;
+    hideAuthBigBanner();
     return;
   }
   if(!_fbUser){
-    el.innerHTML = `<button class="btn btn-sm" onclick="fbSignIn()" style="display:inline-flex;align-items:center;gap:6px;padding:5px 11px;font-size:11.5px"><svg width="14" height="14" viewBox="0 0 18 18"><path d="M16.51 8.18c0-.55-.05-1.05-.14-1.55H9v3.05h4.27c-.18 1-.74 1.84-1.58 2.4v2h2.55c1.49-1.37 2.27-3.41 2.27-5.9z" fill="#4285F4"/><path d="M9 17c2.14 0 3.93-.71 5.24-1.92l-2.55-2c-.7.47-1.61.75-2.69.75-2.07 0-3.83-1.4-4.45-3.27H1.92v2.07A8 8 0 009 17z" fill="#34A853"/><path d="M4.55 10.56c-.16-.47-.25-.97-.25-1.49s.09-1.02.25-1.49V5.51H1.92A8 8 0 001 9c0 1.31.31 2.54.92 3.49l2.63-2.04z" fill="#FBBC05"/><path d="M9 4.74c1.17 0 2.21.4 3.04 1.19l2.27-2.27A8 8 0 009 1a8 8 0 00-7.08 4.51L4.55 7.55C5.17 5.68 6.93 4.74 9 4.74z" fill="#EA4335"/></svg>Sign in</button>`;
+    el.innerHTML = `<button class="btn btn-sm" onclick="fbSignIn()" style="display:inline-flex;align-items:center;gap:6px;padding:5px 11px;font-size:11.5px;background:#fef2f2;border-color:#fca5a5;color:#991b1b;font-weight:700"><svg width="14" height="14" viewBox="0 0 18 18"><path d="M16.51 8.18c0-.55-.05-1.05-.14-1.55H9v3.05h4.27c-.18 1-.74 1.84-1.58 2.4v2h2.55c1.49-1.37 2.27-3.41 2.27-5.9z" fill="#4285F4"/><path d="M9 17c2.14 0 3.93-.71 5.24-1.92l-2.55-2c-.7.47-1.61.75-2.69.75-2.07 0-3.83-1.4-4.45-3.27H1.92v2.07A8 8 0 009 17z" fill="#34A853"/><path d="M4.55 10.56c-.16-.47-.25-.97-.25-1.49s.09-1.02.25-1.49V5.51H1.92A8 8 0 001 9c0 1.31.31 2.54.92 3.49l2.63-2.04z" fill="#FBBC05"/><path d="M9 4.74c1.17 0 2.21.4 3.04 1.19l2.27-2.27A8 8 0 009 1a8 8 0 00-7.08 4.51L4.55 7.55C5.17 5.68 6.93 4.74 9 4.74z" fill="#EA4335"/></svg>Sign in</button>`;
+    showAuthBigBanner();    // ← also show the BIG red banner so user can't miss it
     return;
   }
+  hideAuthBigBanner();      // signed in — banner not needed
   if(!_fbAuthorized){
     el.innerHTML = `<span style="font-size:10.5px;color:var(--red);background:#fee2e2;padding:3px 8px;border-radius:11px" title="Email not in authorized whitelist">⚠ Access denied</span>`;
     return;
@@ -5277,6 +5414,52 @@ function updateAuthBadge(){
   const initial = (_fbUser.displayName||_fbUser.email||'?').charAt(0).toUpperCase();
   const lastSync = _fbLastSyncedAt ? new Date(_fbLastSyncedAt).toLocaleTimeString() : 'pending';
   el.innerHTML = `<span style="display:inline-flex;align-items:center;gap:7px;font-size:11px;background:#dcfce7;color:#166534;padding:4px 9px;border-radius:11px;cursor:pointer" onclick="fbCloudSync(true)" title="Click to sync now · last sync: ${lastSync}"><span style="width:18px;height:18px;border-radius:50%;background:var(--accent);color:#fff;display:inline-flex;align-items:center;justify-content:center;font-weight:700;font-size:10px">${initial}</span>${_fbAuthorized.role||'user'} · ☁</span>`;
+}
+
+// ══════════════════════════════════════════════════════════════════
+// BIG AUTH BANNER — impossible-to-miss alert when user is not signed in
+// ──────────────────────────────────────────────────────────────────
+// The small "Sign in" button in the topbar is too easy to overlook,
+// especially on mobile. When the user is signed OUT but Firebase IS
+// enabled, we show a large red banner at the top of the page that
+// blocks key actions until they sign in — because without auth, every
+// operation they do is LOCAL ONLY and won't sync to other devices.
+// That's how data on Alberto's iPhone got out of sync with his Mac.
+// ══════════════════════════════════════════════════════════════════
+function showAuthBigBanner(){
+  if(document.getElementById('auth-big-banner')) return;
+  // Don't show during the very first second of boot — Firebase auth needs
+  // a moment to restore the persisted session. Otherwise we'd briefly flash
+  // the banner on every page load even for already-signed-in users.
+  if(performance.now() < 2500){
+    setTimeout(showAuthBigBanner, 2500 - performance.now());
+    return;
+  }
+  const banner = document.createElement('div');
+  banner.id = 'auth-big-banner';
+  banner.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:99998;background:linear-gradient(135deg,#991b1b,#dc2626);color:#fff;padding:14px 18px;text-align:center;font-size:14px;font-weight:600;box-shadow:0 4px 20px rgba(220,38,38,.5);cursor:pointer';
+  banner.innerHTML = `
+    <div style="display:flex;align-items:center;justify-content:center;gap:12px;flex-wrap:wrap;line-height:1.4">
+      <span style="font-size:20px">⚠</span>
+      <div style="text-align:left;flex:0 1 auto">
+        <div style="font-weight:800;font-size:14px">No estás conectado a Firebase</div>
+        <div style="font-size:11.5px;opacity:.9;margin-top:2px">Sin esto, los cambios NO se sincronizan con otros devices · Toca aquí para iniciar sesión</div>
+      </div>
+      <button onclick="event.stopPropagation();fbSignIn()" style="background:#fff;color:#991b1b;border:none;border-radius:7px;padding:9px 18px;font-size:13px;font-weight:800;cursor:pointer;flex:0 0 auto">Iniciar sesión</button>
+    </div>
+  `;
+  banner.onclick = () => fbSignIn();
+  document.body.appendChild(banner);
+  // Push the rest of the app down so the banner doesn't cover content
+  document.body.style.paddingTop = (banner.offsetHeight + 4) + 'px';
+}
+
+function hideAuthBigBanner(){
+  const b = document.getElementById('auth-big-banner');
+  if(b){
+    b.remove();
+    document.body.style.paddingTop = '';
+  }
 }
 
 // ─── PHOTO HELPERS — render a thumbnail strip + add-photo wrappers per type ───
@@ -7477,11 +7660,11 @@ function renderDash(){
     <div class="sc cb" style="animation-delay:.04s"><div class="sc-corner"></div><div class="sc-label">In Warehouse</div><div class="sc-val" data-stat="inWH">${units.length}</div><div class="sc-trend">Total active units</div></div>
     <div class="sc cb" style="animation-delay:.08s"><div class="sc-corner"></div><div class="sc-label">Hot Tubs</div><div class="sc-val" data-stat="hot">${hot}</div><div class="sc-trend">${pct(hot)}% of inventory</div></div>
     <div class="sc ct" style="animation-delay:.12s"><div class="sc-corner"></div><div class="sc-label">Swim Spas</div><div class="sc-val" data-stat="swim">${swim}</div><div class="sc-trend">${pct(swim)}% of inventory</div></div>
-    <div class="sc cp" style="animation-delay:.16s"><div class="sc-corner"></div><div class="sc-label">Extra/Stock</div><div class="sc-val" data-stat="extra">${extra}</div><div class="sc-trend">${pct(extra)}% of inventory</div></div>
-    <div class="sc${marPending>0?' marriage-warning-card':''}" style="animation-delay:.2s${marPending>0?';cursor:pointer':''}"${marPending>0?' onclick="goV(\'marriages\')"':''}><div class="sc-corner" style="background:var(--red)"></div><div class="sc-label">${marPending>0?'⚠ ':''}Married — At Factory</div><div class="sc-val" data-stat="marPending" style="color:${marPending>0?'var(--red)':'var(--text2)'}">${marPending}</div><div class="sc-trend">${marPending>0?'Spa(s) blocked from dispatch':'No pending marriages'}</div></div>
+    <div class="sc cp" style="animation-delay:.16s"><div class="sc-corner"></div><div class="sc-label">Extra / Stock</div><div class="sc-val" data-stat="extra">${extra}</div><div class="sc-trend">${pct(extra)}% of inventory</div></div>
+    <div class="sc${marPending>0?' marriage-warning-card':''}" style="animation-delay:.2s${marPending>0?';cursor:pointer':''}"${marPending>0?' onclick="goV(\'marriages\')"':''}><div class="sc-corner" style="background:var(--red)"></div><div class="sc-label">${marPending>0?'⚠ ':''}Pending Marriages</div><div class="sc-val" data-stat="marPending" style="color:${marPending>0?'var(--red)':'var(--text2)'}">${marPending}</div><div class="sc-trend">${marPending>0?'Accessory still at factory':'No pending marriages'}</div></div>
     <div class="sc" style="animation-delay:.24s;cursor:pointer" onclick="goV('factory')"><div class="sc-corner" style="background:var(--accent)"></div><div class="sc-label">At Factory</div><div class="sc-val" data-stat="fctCount" style="color:var(--accent)">${fctCount}</div><div class="sc-trend">Ready to ship</div></div>
-    <div class="sc${fullCells>0?' ca':''}" style="animation-delay:.28s${fullCells>0?';cursor:pointer':''}"${fullCells>0?' onclick="setFilt(\'hot\',document.querySelector(\'.fc\'));goV(\'map\')"':''}><div class="sc-corner"></div><div class="sc-label">${fullCells>0?'⚠ ':''}Full Cells (Spa)</div><div class="sc-val" data-stat="fullCells">${fullCells}</div><div class="sc-trend">${nearFull?nearFull+' near full · ':''}Max ${MAX_PER_CELL} per cell</div></div>
-    <div class="sc${missing.length>0?' marriage-warning-card':''}" style="animation-delay:.32s${missing.length>0?';cursor:pointer':''}"${missing.length>0?' onclick="goV(\'schedule\')"':''}><div class="sc-corner" style="background:var(--amber)"></div><div class="sc-label">${missing.length>0?'⚠ ':''}Missing for Dispatch</div><div class="sc-val" data-stat="missing" style="color:${missing.length>0?'var(--amber)':'var(--text2)'}">${missing.length}</div><div class="sc-trend">${missing.length>0?'Scheduled, not in warehouse':'All scheduled spas in stock'}</div></div>
+    <div class="sc${fullCells>0?' ca':''}" style="animation-delay:.28s${fullCells>0?';cursor:pointer':''}"${fullCells>0?' onclick="setFilt(\'hot\',document.querySelector(\'.fc\'));goV(\'map\')"':''}><div class="sc-corner"></div><div class="sc-label">${fullCells>0?'⚠ ':''}Full Cells</div><div class="sc-val" data-stat="fullCells">${fullCells}</div><div class="sc-trend">${nearFull?nearFull+' near full · ':''}Max ${MAX_PER_CELL} per cell</div></div>
+    <div class="sc${missing.length>0?' marriage-warning-card':''}" style="animation-delay:.32s${missing.length>0?';cursor:pointer':''}"${missing.length>0?' onclick="goV(\'schedule\')"':''}><div class="sc-corner" style="background:var(--amber)"></div><div class="sc-label">${missing.length>0?'⚠ ':''}Missing Spa</div><div class="sc-val" data-stat="missing" style="color:${missing.length>0?'var(--amber)':'var(--text2)'}">${missing.length}</div><div class="sc-trend">${missing.length>0?'Scheduled, not in warehouse':'All scheduled spas in stock'}</div></div>
     <div class="sc" style="animation-delay:.36s"><div class="sc-label">Empty Slots</div><div class="sc-val" data-stat="empty" style="color:var(--text2)">${total-occ}</div><div class="sc-trend">Of ${total} positions</div></div>
     <div class="sc${pend>0?' ca':''}" style="animation-delay:.40s"><div class="sc-corner"></div><div class="sc-label">Arriving</div><div class="sc-val" data-stat="pend">${pend}</div><div class="sc-trend">${dispatched.length} dispatched total</div></div>
   `;
@@ -17995,6 +18178,9 @@ function updateSyncStatusBadge(){
   const sdkLoaded = !!(typeof firebase !== 'undefined' && firebase.database);
   const isFb = !!(_fbDb && _fbUser && _fbAuthorized);
   const pending = _fbLocalEditCounter - _fbPushedEditCounter;
+  // Reset click handler each update (state-dependent action)
+  badge.onclick = null;
+  badge.style.cursor = 'default';
   if(!isOnline){
     badge.textContent = '⊘ Offline';
     badge.title = 'No internet — changes saved locally';
@@ -18002,8 +18188,6 @@ function updateSyncStatusBadge(){
     return;
   }
   // SDK never loaded → "Offline" rather than the misleading "Not signed in"
-  // (you can't sign in if Firebase didn't load). Auto-retry is running in
-  // the background — clicking the badge has no immediate effect here.
   if(!sdkLoaded || _fbSdkLoadFailed){
     badge.textContent = '⊘ Offline';
     badge.title = 'Firebase couldn\'t load — changes saved locally, will retry in background';
@@ -18011,11 +18195,21 @@ function updateSyncStatusBadge(){
     return;
   }
   if(!isFb){
-    badge.textContent = '⊘ Not signed in';
-    badge.title = 'Click "More" → Settings to sign in for cloud sync';
-    badge.style.background = '#fef3c7'; badge.style.color = '#92400e';
+    // CRITICAL: this badge is now the PRIMARY way users on mobile see they
+    // need to sign in. Make it BIG, RED, and tappable — opens sign-in directly.
+    badge.innerHTML = '🔒 Tap to Sign In';
+    badge.title = 'Tap to sign in for cloud sync — without this, changes only save on this device';
+    badge.style.background = '#dc2626';
+    badge.style.color = '#fff';
+    badge.style.fontWeight = '700';
+    badge.style.cursor = 'pointer';
+    badge.style.animation = 'pulseAuthBadge 2s ease-in-out infinite';
+    badge.onclick = () => { try { fbSignIn(); } catch(e){ toast('Sign-in error: '+e.message, 'err'); } };
     return;
   }
+  // Signed-in states: reset animation
+  badge.style.animation = '';
+  badge.style.fontWeight = '';
   if(pending > 0){
     badge.textContent = '⏳ Saving…';
     badge.title = pending + ' edit' + (pending>1?'s':'') + ' pending';
