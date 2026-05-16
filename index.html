@@ -156,6 +156,15 @@ body.role-readonly .det-panel #add-material-form{display:none !important}
 /* Hide the topbar Add Unit + New Shipment buttons */
 body.role-readonly .tba > button[onclick*="openAddUnit"],
 body.role-readonly .tba > button[onclick*="goV('incoming')"]{display:none}
+/* Marriages role: can edit its own pairings, but doesn't manage the
+   warehouse/factory inventory. Hide warehouse-only topbar actions. */
+body.role-marriages .tba > button[onclick*="openAddUnit"],
+body.role-marriages .tba > button[onclick*="goV('incoming')"],
+body.role-marriages .tba > button[onclick*="exportCSV"],
+body.role-marriages .tba > button[onclick*="exportFct"],
+body.role-marriages .tba > button[onclick*="exportDispatch"],
+body.role-marriages .tba > button[onclick*="printReport"],
+body.role-marriages .tba > button[onclick*="printFct"]{display:none !important}
 /* Empty cells: no "+" prompt to add */
 body.role-readonly .col-stor.empty .cell-empty-lbl{display:none}
 body.role-readonly .col-stor.empty{cursor:default;opacity:.4}
@@ -2544,6 +2553,612 @@ tbody tr:hover td{background:var(--bg3)}
   .sc-label { font-size: 9.5px !important; margin-bottom: 6px !important; }
 }
 
+/* ═══════════════════════════════════════════════════════════════════
+   ROLE PIN SYSTEM — modal styling
+   ═══════════════════════════════════════════════════════════════════ */
+
+/* Admin-only sidebar items: visible by default, hidden for non-admin */
+.admin-only { display: none !important; }
+body.role-admin .admin-only { display: flex !important; }
+
+/* Marriages role — body class colors role suffix in topbar */
+body.role-marriages .pg-title::after {
+  content: ' · Marriages Crew';
+  font-size: 11px;
+  font-weight: 600;
+  color: #ec4899;
+  margin-left: 6px;
+}
+
+/* ── PIN MODAL ── */
+#pin-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 100000;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  padding: env(safe-area-inset-top) 16px env(safe-area-inset-bottom);
+}
+.pin-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.75);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  animation: pinFadeIn 0.22s ease-out;
+}
+@keyframes pinFadeIn { from { opacity: 0 } to { opacity: 1 } }
+.pin-card {
+  position: relative;
+  background: #fff;
+  border-radius: 22px;
+  padding: 26px 22px 22px;
+  width: 100%;
+  max-width: 340px;
+  text-align: center;
+  box-shadow: 0 20px 50px -10px rgba(0, 0, 0, 0.4);
+  animation: pinPopIn 0.28s cubic-bezier(0.32, 0.72, 0, 1);
+}
+body.dark-mode .pin-card { background: #1e293b; color: #f1f5f9; }
+@keyframes pinPopIn {
+  from { opacity: 0; transform: translateY(20px) scale(0.94); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+.pin-card.shake { animation: pinShake 0.4s; }
+@keyframes pinShake {
+  10%, 90% { transform: translateX(-2px); }
+  20%, 80% { transform: translateX(4px); }
+  30%, 50%, 70% { transform: translateX(-8px); }
+  40%, 60% { transform: translateX(8px); }
+}
+.pin-close {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(0, 0, 0, 0.05);
+  font-size: 14px;
+  color: #64748b;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+body.dark-mode .pin-close { background: rgba(255, 255, 255, 0.08); color: #94a3b8; }
+.pin-close:active { opacity: 0.6; }
+.pin-avatar {
+  width: 72px;
+  height: 72px;
+  border-radius: 22px;
+  margin: 0 auto 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 8px 20px -4px rgba(0, 0, 0, 0.25);
+}
+.pin-emoji { font-size: 36px; line-height: 1; }
+.pin-title {
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: -0.015em;
+  margin-bottom: 2px;
+  color: var(--text1);
+}
+.pin-subtitle {
+  font-size: 12.5px;
+  color: var(--text3);
+  margin-bottom: 18px;
+}
+.pin-prompt {
+  font-size: 13px;
+  color: var(--text2);
+  margin-bottom: 12px;
+  font-weight: 500;
+}
+.pin-dots {
+  display: flex;
+  justify-content: center;
+  gap: 16px;
+  margin-bottom: 20px;
+}
+.pin-dot {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: transparent;
+  border: 2px solid rgba(100, 116, 139, 0.5);
+  transition: background 0.15s, border-color 0.15s, transform 0.1s;
+}
+.pin-dot.filled {
+  background: #1e40af;
+  border-color: #1e40af;
+  transform: scale(1.1);
+}
+body.dark-mode .pin-dot.filled { background: #60a5fa; border-color: #60a5fa; }
+.pin-input {
+  position: absolute;
+  left: -9999px;
+  opacity: 0;
+  pointer-events: none;
+}
+.pin-keypad {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.pin-key {
+  height: 56px;
+  border-radius: 14px;
+  border: none;
+  background: #f1f5f9;
+  color: #0f172a;
+  font-size: 22px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.08s, transform 0.06s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+body.dark-mode .pin-key { background: #334155; color: #f1f5f9; }
+.pin-key:active {
+  background: #cbd5e1;
+  transform: scale(0.96);
+}
+body.dark-mode .pin-key:active { background: #475569; }
+.pin-key-text {
+  font-size: 16px;
+  color: #64748b;
+  background: transparent;
+}
+body.dark-mode .pin-key-text { color: #94a3b8; }
+.pin-error {
+  font-size: 12px;
+  color: #dc2626;
+  min-height: 16px;
+  font-weight: 600;
+}
+body.dark-mode .pin-error { color: #f87171; }
+
+/* ── PASSWORD MANAGER MODAL (admin) ── */
+#pwmgr-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 100000;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  padding: 12px;
+}
+.pwmgr-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.75);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+.pwmgr-card {
+  position: relative;
+  background: #fff;
+  border-radius: 18px;
+  width: 100%;
+  max-width: 520px;
+  max-height: 90vh;
+  overflow-y: auto;
+  box-shadow: 0 20px 50px -10px rgba(0, 0, 0, 0.4);
+  animation: pinPopIn 0.28s cubic-bezier(0.32, 0.72, 0, 1);
+}
+body.dark-mode .pwmgr-card { background: #1e293b; color: #f1f5f9; }
+.pwmgr-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  padding: 20px 22px 12px;
+  border-bottom: 1px solid var(--line);
+  position: sticky;
+  top: 0;
+  background: #fff;
+  z-index: 1;
+}
+body.dark-mode .pwmgr-head { background: #1e293b; border-bottom-color: rgba(255, 255, 255, 0.08); }
+.pwmgr-title {
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: -0.015em;
+}
+.pwmgr-sub {
+  font-size: 12px;
+  color: var(--text3);
+  margin-top: 2px;
+}
+.pwmgr-close {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(0, 0, 0, 0.05);
+  cursor: pointer;
+  font-size: 14px;
+  color: #64748b;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+body.dark-mode .pwmgr-close { background: rgba(255, 255, 255, 0.08); color: #94a3b8; }
+.pwmgr-list {
+  padding: 8px 14px 14px;
+}
+.pwmgr-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 8px;
+  border-bottom: 1px solid var(--line);
+  transition: background 0.25s;
+}
+.pwmgr-row:last-child { border-bottom: none; }
+.pwmgr-row.saved { background: rgba(16, 185, 129, 0.08); }
+.pwmgr-avatar {
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 20px;
+  flex-shrink: 0;
+  color: #fff;
+}
+.pwmgr-info {
+  flex: 1;
+  min-width: 0;
+}
+.pwmgr-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text1);
+}
+.pwmgr-desc {
+  font-size: 11.5px;
+  color: var(--text3);
+  margin-top: 1px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pwmgr-pin-wrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.pwmgr-pin {
+  width: 70px;
+  height: 36px;
+  font-size: 15px;
+  font-family: 'SF Mono', 'Monaco', monospace;
+  letter-spacing: 0.15em;
+  text-align: center;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg2);
+  color: var(--text1);
+}
+.pwmgr-eye {
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font-size: 14px;
+  opacity: 0.55;
+}
+.pwmgr-eye:active { opacity: 1; }
+.pwmgr-save {
+  height: 32px;
+  padding: 0 12px;
+  border: none;
+  border-radius: 8px;
+  background: linear-gradient(180deg, #2563eb 0%, #1d4ed8 100%);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.pwmgr-save:active { opacity: 0.8; }
+.pwmgr-footer {
+  padding: 12px 22px 18px;
+}
+.pwmgr-help {
+  font-size: 11.5px;
+  color: var(--text3);
+  background: rgba(59, 130, 246, 0.06);
+  padding: 10px 12px;
+  border-radius: 10px;
+  line-height: 1.5;
+}
+body.dark-mode .pwmgr-help { background: rgba(59, 130, 246, 0.12); }
+.pwmgr-help code {
+  background: rgba(0, 0, 0, 0.08);
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-family: 'SF Mono', Monaco, monospace;
+  font-size: 11px;
+}
+body.dark-mode .pwmgr-help code { background: rgba(255, 255, 255, 0.1); }
+
+@media (max-width: 480px) {
+  .pwmgr-row { flex-wrap: wrap; }
+  .pwmgr-pin-wrap { width: 100%; justify-content: flex-end; }
+  .pin-key { height: 50px; font-size: 20px; }
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   MARRIAGES — CARD VIEW (used when currentRole === 'marriages')
+   Designed to feel like a polished operations dashboard: each pairing
+   is a self-contained card with clear status, big serial number, and
+   a primary "Send to WH" action that stands out.
+   ═══════════════════════════════════════════════════════════════════ */
+.mar-cards-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(310px, 1fr));
+  gap: 14px;
+  padding: 4px;
+}
+.mar-card {
+  position: relative;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  padding: 16px 17px 13px;
+  box-shadow: 0 1px 2px rgba(0,0,0,.04), 0 4px 14px rgba(0,0,0,.04);
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+  transition: box-shadow .18s ease, transform .18s ease;
+  overflow: hidden;
+}
+.mar-card::before {
+  /* Soft gradient overlay at top — gives the card a subtle premium feel */
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 4px;
+  border-radius: 16px 16px 0 0;
+  pointer-events: none;
+}
+.mar-card:hover {
+  box-shadow: 0 2px 4px rgba(0,0,0,.05), 0 12px 28px rgba(0,0,0,.07);
+  transform: translateY(-1px);
+}
+body.dark-mode .mar-card {
+  background: #1e293b;
+  border-color: rgba(255,255,255,.08);
+  box-shadow: 0 1px 2px rgba(0,0,0,.2), 0 4px 14px rgba(0,0,0,.25);
+}
+
+/* Top accent bar + soft gradient background per status */
+.mar-card-pending::before { background: linear-gradient(90deg, #ef4444, #f87171); }
+.mar-card-pending { background: linear-gradient(180deg, #fef9f9 0%, #fff 50%); }
+.mar-card-delivered::before { background: linear-gradient(90deg, #10b981, #34d399); }
+.mar-card-delivered { background: linear-gradient(180deg, #f0fdf4 0%, #fff 50%); }
+.mar-card-completed::before { background: linear-gradient(90deg, #94a3b8, #cbd5e1); }
+.mar-card-completed { opacity: .88; }
+.mar-card-split-pending::before { background: linear-gradient(90deg, #dc2626, #b91c1c); }
+.mar-card-split-pending {
+  background: linear-gradient(135deg, #fef2f2 0%, #fff 60%);
+  animation: marPulse 2.5s ease-in-out infinite;
+}
+body.dark-mode .mar-card-pending,
+body.dark-mode .mar-card-delivered { background: #1e293b; }
+@keyframes marPulse {
+  0%, 100% { box-shadow: 0 1px 2px rgba(0,0,0,.04), 0 4px 14px rgba(0,0,0,.04), 0 0 0 0 rgba(220, 38, 38, 0); }
+  50% { box-shadow: 0 1px 2px rgba(0,0,0,.04), 0 4px 14px rgba(0,0,0,.04), 0 0 0 5px rgba(220, 38, 38, .15); }
+}
+body.dark-mode .mar-card-split-pending {
+  background: linear-gradient(135deg, #4c1d24 0%, #1e293b 60%);
+}
+
+.mar-card-hd {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 10px;
+}
+.mar-card-sn-wrap {
+  flex: 1;
+  min-width: 0;
+}
+.mar-card-sn-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.mar-card-sn-icon {
+  width: 28px;
+  height: 28px;
+  padding: 5px;
+  background: rgba(59, 130, 246, 0.1);
+  color: #2563eb;
+  border-radius: 9px;
+  flex-shrink: 0;
+}
+body.dark-mode .mar-card-sn-icon {
+  background: rgba(59, 130, 246, 0.18);
+  color: #93c5fd;
+}
+.mar-card-sn {
+  font-family: ui-monospace, 'SF Mono', Monaco, monospace;
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--text1);
+  letter-spacing: -0.015em;
+  line-height: 1.05;
+}
+.mar-card-sn-dot {
+  font-size: 10px;
+  color: var(--text3);
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  margin-top: 1px;
+}
+.mar-card-badge {
+  font-size: 9.5px;
+  font-weight: 700;
+  padding: 4px 10px;
+  border-radius: 14px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  border: 1px solid;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex-shrink: 0;
+  box-shadow: 0 1px 2px rgba(0,0,0,.04);
+}
+
+.mar-card-split {
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  color: #991b1b;
+  font-size: 11.5px;
+  font-weight: 600;
+  padding: 8px 11px;
+  border-radius: 9px;
+  line-height: 1.4;
+}
+body.dark-mode .mar-card-split {
+  background: rgba(239, 68, 68, 0.12);
+  border-color: rgba(239, 68, 68, 0.35);
+  color: #fca5a5;
+}
+
+.mar-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.mar-card-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 10px;
+  font-size: 13px;
+  line-height: 1.4;
+}
+.mar-card-lbl {
+  color: var(--text3);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  flex-shrink: 0;
+  min-width: 72px;
+  padding-top: 2px;
+}
+.mar-card-val {
+  color: var(--text1);
+  font-weight: 500;
+  text-align: right;
+  word-break: break-word;
+  flex: 1;
+}
+.mar-card-acc {
+  font-weight: 600;
+  color: var(--text1);
+}
+.mar-card-notes {
+  font-style: italic;
+  font-size: 12px;
+  color: var(--text2);
+}
+.mar-card-meta {
+  font-size: 11px;
+  color: var(--text3);
+  padding-top: 2px;
+  border-top: 1px dashed var(--line);
+  margin-top: 2px;
+}
+.mar-card-meta .mar-card-lbl { font-size: 9.5px; }
+.mar-card-meta > span:last-child {
+  font-size: 11px;
+  color: var(--text3);
+  font-weight: 500;
+}
+
+.mar-card-track {
+  background: linear-gradient(135deg, #eff6ff 0%, #dbeafe 100%);
+  border: 1px solid #bfdbfe;
+  color: #1e40af;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 9px 12px;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+body.dark-mode .mar-card-track {
+  background: linear-gradient(135deg, rgba(59, 130, 246, 0.15), rgba(59, 130, 246, 0.05));
+  border-color: rgba(59, 130, 246, 0.35);
+  color: #93c5fd;
+}
+
+.mar-card-acts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+.mar-card-acts .btn-sm {
+  font-size: 11.5px;
+  padding: 7px 11px;
+  flex: 0 0 auto;
+  border-radius: 8px;
+  font-weight: 600;
+}
+/* Primary action button — "Send to WH" gets the spotlight */
+.mar-btn-primary {
+  background: linear-gradient(180deg, #2563eb 0%, #1d4ed8 100%) !important;
+  color: #fff !important;
+  border: none !important;
+  box-shadow: 0 1px 0 rgba(255,255,255,.2) inset, 0 2px 6px rgba(29, 78, 216, .3) !important;
+  flex: 1 1 auto !important;
+  min-width: 130px;
+}
+.mar-btn-primary:hover {
+  background: linear-gradient(180deg, #1d4ed8 0%, #1e40af 100%) !important;
+}
+.mar-btn-primary:active {
+  opacity: 0.85;
+  transform: translateY(1px);
+}
+
+@media (max-width: 480px) {
+  .mar-cards-grid {
+    grid-template-columns: 1fr;
+    gap: 12px;
+  }
+  .mar-card { padding: 14px 14px 11px; }
+  .mar-card-sn { font-size: 20px; }
+  .mar-card-sn-icon { width: 26px; height: 26px; }
+  .mar-card-acts .btn-sm {
+    flex: 1 1 calc(50% - 3px);
+    min-width: 0;
+    text-align: center;
+    justify-content: center;
+  }
+  .mar-btn-primary { flex-basis: 100% !important; }
+}
+
 </style>
 </head>
 <body>
@@ -2633,7 +3248,7 @@ tbody tr:hover td{background:var(--bg3)}
     </div>
     <div class="ni" data-page="marriages" data-section="factory" onclick="goV('marriages')">
       <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M5.5 8.5l-2 2a2.5 2.5 0 003.5 3.5l2-2M10.5 7.5l2-2a2.5 2.5 0 00-3.5-3.5l-2 2M5 11l6-6"/></svg>
-      Marriages
+      <span id="ni-marriages-label">Marriages</span>
       <span class="nb red" id="nb-mar">0</span>
     </div>
     <div class="ni" data-page="covers" data-section="factory" onclick="goV('covers')">
@@ -2683,6 +3298,11 @@ tbody tr:hover td{background:var(--bg3)}
       <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="8" cy="8" r="2.5"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3.2 3.2l1.4 1.4M11.4 11.4l1.4 1.4M3.2 12.8l1.4-1.4M11.4 4.6l1.4-1.4"/></svg>
       Settings
     </div>
+    <!-- Role PINs manager — only shown to admin. Hidden by .role-readonly etc. -->
+    <div class="ni admin-only" id="ni-passwords" data-section="system" onclick="openPasswordManager()">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="7" width="10" height="7" rx="1.5"/><path d="M5 7V5a3 3 0 016 0v2"/><circle cx="8" cy="10.5" r="1"/></svg>
+      Role PINs
+    </div>
 
     <!-- User identity footer — shows current user + tap to switch -->
     <div class="sidebar-user-footer" id="sidebar-user-footer" onclick="showWelcomeScreen()" title="Tap to switch user">
@@ -2708,7 +3328,7 @@ tbody tr:hover td{background:var(--bg3)}
       <div class="role-current"><span id="role-indicator">Admin</span></div>
     </div>
   </div>
-  <div class="sb-foot"><div class="sb-ver">v3.64 · <span id="live-date"></span></div></div>
+  <div class="sb-foot"><div class="sb-ver">v3.73 · <span id="live-date"></span></div></div>
 </nav>
 
 <!-- MAIN -->
@@ -3419,8 +4039,8 @@ tbody tr:hover td{background:var(--bg3)}
       <svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="#dc2626" stroke-width="1.7"><path d="M5.5 8.5l-2 2a2.5 2.5 0 003.5 3.5l2-2M10.5 7.5l2-2a2.5 2.5 0 00-3.5-3.5l-2 2M5 11l6-6"/></svg>
     </div>
     <div style="flex:1">
-      <div style="font-size:13px;font-weight:700;color:var(--text1)">Marriages — Tina + Accessory Pairings <span class="help-bubble" onclick="event.stopPropagation();showHelp('marriage',this)" title="What's a marriage?">?</span></div>
-      <div style="font-size:11px;color:var(--text2);margin-top:2px">A married spa CANNOT be dispatched until its accessory arrives from the factory. The dispatch button will warn you.</div>
+      <div style="font-size:13px;font-weight:700;color:var(--text1)" id="marriages-hero-title">Marriages — Tina + Accessory Pairings <span class="help-bubble" onclick="event.stopPropagation();showHelp('marriage',this)" title="What's a marriage?">?</span></div>
+      <div style="font-size:11px;color:var(--text2);margin-top:2px" id="marriages-hero-desc">A married spa CANNOT be dispatched until its accessory arrives from the factory. The dispatch button will warn you.</div>
     </div>
     <button class="btn btn-p btn-sm" onclick="openMarriageAdd()">
       <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 2v12M2 8h12"/></svg>
@@ -4701,11 +5321,18 @@ function dealerBorderColor(dealerName){
 // ═══════════════════════════════════════════════════════
 const ROLES = {
   admin:     { label:'Admin', subtitle:'Full access', icon:'🔑',
-               pages:['*'], canEdit:true, defaultPage:'dashboard', password:'0000' },
+               pages:['*'], canEdit:true, defaultPage:'dashboard', password:'2804' },
   warehouse: { label:'Warehouse Manager', subtitle:'Receive · acomodar · despachar', icon:'🏭',
                pages:['map','schedule','incoming','intransit','dispatched','materials','requests','covers','marriages'], canEdit:true, defaultPage:'map', password:'0000' },
   factory:   { label:'Factory', subtitle:'Ship spas · request items · receive', icon:'🚚',
                pages:['factory','marriages','map','intransit','requests','receiving','covers'], canEdit:false, defaultPage:'factory', password:'0000' },
+  // Marriages: its own department. Sees ONLY the marriages list (and
+  // intransit so they can track what's coming from factory). Cannot see
+  // factory's internal list or the floor map. When Marriages creates a
+  // pending marriage, that IS the request to Factory — Factory sees the
+  // same marriages list in their role and ships the accessory.
+  marriages: { label:'Marriages', subtitle:'Spa + Accessory Pairings', icon:'🔗',
+               pages:['marriages','intransit'], canEdit:true, defaultPage:'marriages', password:'0000' },
   transit:   { label:'Truck / Transit', subtitle:'Scan QR when loading truck', icon:'🚛',
                pages:['truck','intransit'], canEdit:false, defaultPage:'truck', password:'0000' },
   organizer: { label:'Dispatch Organizer', subtitle:'Schedule pickups', icon:'📅',
@@ -4718,6 +5345,313 @@ if(!ROLES[currentRole]) currentRole = 'admin';
 // Expose currentRole on window for testability (read-only — use setUser to change)
 Object.defineProperty(window, 'currentRole', { get(){ return currentRole; }, configurable:true });
 
+// ═══════════════════════════════════════════════════════════════════
+// ROLE PASSWORD SYSTEM
+// ═══════════════════════════════════════════════════════════════════
+// Each role has a PIN required to sign in. The PINs live in cfg.rolePasswords
+// (synced to Firebase as part of cfg) so they're shared across all devices.
+// Defaults: admin = 2804, all others = 0000.
+//
+// IMPORTANT — this is NOT cryptographic security. PINs live in localStorage
+// and any user with browser DevTools can read them. This is a UX gating layer
+// to prevent accidental role switches and casual misuse on shared devices.
+// For real authentication, use the Firebase Email sign-in already wired up.
+//
+// Admin behavior: admin is the only role allowed to view/edit ALL PINs. Other
+// roles can only change their own PIN (from Settings) after logging in.
+// ═══════════════════════════════════════════════════════════════════
+
+const DEFAULT_ROLE_PINS = {
+  admin:     '2804',
+  warehouse: '0000',
+  factory:   '0000',
+  marriages: '0000',
+  transit:   '0000',
+  organizer: '0000',
+  viewer:    '0000'
+};
+
+// Returns the current PIN for a role. Reads from cfg.rolePasswords (synced),
+// falls back to the in-memory default if cfg hasn't loaded yet.
+function getRolePin(role){
+  try {
+    if(window.cfg && cfg.rolePasswords && cfg.rolePasswords[role] != null){
+      return String(cfg.rolePasswords[role]);
+    }
+  } catch(e){}
+  return DEFAULT_ROLE_PINS[role] || '0000';
+}
+
+// Set a role's PIN. Only admin can call this for OTHER roles; any role can
+// change its own. Persists to cfg.rolePasswords + Firebase via saveState.
+function setRolePin(role, newPin){
+  if(!ROLES[role]) throw new Error('Unknown role: ' + role);
+  if(typeof newPin !== 'string') newPin = String(newPin);
+  if(!/^\d{4}$/.test(newPin)) throw new Error('PIN must be exactly 4 digits');
+  // Permission check: admin can change anything; others can only change their own
+  if(currentRole !== 'admin' && role !== currentRole){
+    throw new Error('Only admin can change other roles\' PINs');
+  }
+  if(!window.cfg) window.cfg = {};
+  if(!cfg.rolePasswords) cfg.rolePasswords = { ...DEFAULT_ROLE_PINS };
+  cfg.rolePasswords[role] = newPin;
+  // Persist + sync
+  try { if(typeof saveState === 'function') saveState(); } catch(e){ console.warn(e); }
+  try { if(typeof fbAutoPush === 'function') fbAutoPush(); } catch(e){}
+}
+
+// Ensure cfg.rolePasswords exists with all defaults — called once at boot
+// (after loadState) so newly-added roles always have a PIN entry.
+function ensureRolePinsInitialized(){
+  if(!window.cfg) window.cfg = {};
+  if(!cfg.rolePasswords || typeof cfg.rolePasswords !== 'object'){
+    cfg.rolePasswords = {};
+  }
+  let changed = false;
+  for(const r of Object.keys(DEFAULT_ROLE_PINS)){
+    if(cfg.rolePasswords[r] == null){
+      cfg.rolePasswords[r] = DEFAULT_ROLE_PINS[r];
+      changed = true;
+    }
+  }
+  if(changed){
+    try { if(typeof saveState === 'function') saveState(); } catch(e){}
+  }
+}
+
+// ── PIN MODAL ──
+// Shows a 4-digit numeric input. Calls onSuccess() when correct PIN entered,
+// onCancel() if user closes. Locks for 2s after 3 wrong attempts.
+let _pinAttempts = 0;
+let _pinLockedUntil = 0;
+function promptForPin(role, onSuccess, onCancel){
+  const r = ROLES[role];
+  if(!r) { if(onCancel) onCancel(); return; }
+  const correctPin = getRolePin(role);
+  const member = TEAM_MEMBERS.find(t => t.role === role);
+  const memberColor = member?.color || '#1e40af';
+  const memberEmoji = member?.emoji || r.icon || '🔐';
+  const memberName = member?.name || r.label;
+
+  // Build modal
+  let modal = document.getElementById('pin-modal');
+  if(modal) modal.remove();
+  modal = document.createElement('div');
+  modal.id = 'pin-modal';
+  modal.innerHTML = `
+    <div class="pin-backdrop"></div>
+    <div class="pin-card">
+      <button class="pin-close" onclick="window._pinCancel()" aria-label="Close">✕</button>
+      <div class="pin-avatar" style="background:linear-gradient(135deg, ${memberColor}, ${memberColor}dd)">
+        <span class="pin-emoji">${memberEmoji}</span>
+      </div>
+      <div class="pin-title">${memberName}</div>
+      <div class="pin-subtitle">${r.subtitle || ''}</div>
+      <div class="pin-prompt">Enter 4-digit PIN</div>
+      <div class="pin-dots" id="pin-dots">
+        <span class="pin-dot"></span><span class="pin-dot"></span><span class="pin-dot"></span><span class="pin-dot"></span>
+      </div>
+      <input type="tel" inputmode="numeric" pattern="[0-9]*" maxlength="4" class="pin-input" id="pin-input" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+      <div class="pin-keypad" id="pin-keypad">
+        ${[1,2,3,4,5,6,7,8,9].map(n=>`<button class="pin-key" data-digit="${n}">${n}</button>`).join('')}
+        <button class="pin-key pin-key-text" data-action="forgot">?</button>
+        <button class="pin-key" data-digit="0">0</button>
+        <button class="pin-key pin-key-text" data-action="back">⌫</button>
+      </div>
+      <div class="pin-error" id="pin-error"></div>
+    </div>
+  `;
+  document.body.appendChild(modal);
+  modal.style.display = 'flex';
+
+  const input = document.getElementById('pin-input');
+  const dots = modal.querySelectorAll('.pin-dot');
+  const errEl = document.getElementById('pin-error');
+  let value = '';
+
+  function renderDots(){
+    dots.forEach((d, i) => {
+      d.classList.toggle('filled', i < value.length);
+    });
+  }
+  function setError(msg){
+    errEl.textContent = msg || '';
+    if(msg){
+      const card = modal.querySelector('.pin-card');
+      card.classList.remove('shake');
+      void card.offsetWidth;
+      card.classList.add('shake');
+    }
+  }
+  function tryUnlock(){
+    if(Date.now() < _pinLockedUntil){
+      setError('Too many attempts — wait a moment');
+      return;
+    }
+    if(value === correctPin){
+      _pinAttempts = 0;
+      cleanup();
+      if(onSuccess) onSuccess();
+    } else {
+      _pinAttempts++;
+      value = '';
+      renderDots();
+      if(_pinAttempts >= 3){
+        _pinLockedUntil = Date.now() + 4000;
+        setError('Locked 4s — try again');
+        _pinAttempts = 0;
+      } else {
+        setError(`Incorrect PIN (${3 - _pinAttempts} ${3 - _pinAttempts === 1 ? 'try' : 'tries'} left)`);
+      }
+    }
+  }
+  function addDigit(d){
+    if(value.length >= 4) return;
+    value += d;
+    renderDots();
+    setError('');
+    if(value.length === 4){
+      setTimeout(tryUnlock, 120);
+    }
+  }
+  function backspace(){
+    value = value.slice(0, -1);
+    renderDots();
+    setError('');
+  }
+  function cleanup(){
+    document.removeEventListener('keydown', onKey);
+    if(modal.parentNode) modal.parentNode.removeChild(modal);
+  }
+  function onKey(e){
+    if(/^[0-9]$/.test(e.key)){ addDigit(e.key); e.preventDefault(); }
+    else if(e.key === 'Backspace'){ backspace(); e.preventDefault(); }
+    else if(e.key === 'Enter' && value.length === 4){ tryUnlock(); e.preventDefault(); }
+    else if(e.key === 'Escape'){ window._pinCancel(); }
+  }
+  document.addEventListener('keydown', onKey);
+
+  // Keypad clicks
+  modal.querySelector('.pin-keypad').addEventListener('click', e => {
+    const btn = e.target.closest('.pin-key');
+    if(!btn) return;
+    if(btn.dataset.digit) addDigit(btn.dataset.digit);
+    else if(btn.dataset.action === 'back') backspace();
+    else if(btn.dataset.action === 'forgot'){
+      setError('Ask your admin for the PIN');
+    }
+  });
+
+  window._pinCancel = () => {
+    cleanup();
+    if(onCancel) onCancel();
+  };
+  modal.querySelector('.pin-backdrop').addEventListener('click', () => window._pinCancel());
+
+  // Focus invisible input so iOS shows numeric keypad
+  setTimeout(() => input?.focus(), 100);
+  input.addEventListener('input', e => {
+    const v = e.target.value.replace(/\D/g, '').slice(0, 4);
+    value = v;
+    renderDots();
+    setError('');
+    if(value.length === 4) setTimeout(tryUnlock, 120);
+  });
+}
+
+// ── ADMIN: Password Manager ──
+// Opens a modal where admin can view/edit all role PINs. Hidden for non-admin.
+function openPasswordManager(){
+  if(currentRole !== 'admin'){
+    if(typeof toast === 'function') toast('Only admin can manage role PINs', 'err');
+    return;
+  }
+  ensureRolePinsInitialized();
+  let modal = document.getElementById('pwmgr-modal');
+  if(modal) modal.remove();
+  modal = document.createElement('div');
+  modal.id = 'pwmgr-modal';
+  const roleList = ['admin','warehouse','factory','marriages','transit','organizer','viewer'];
+  modal.innerHTML = `
+    <div class="pwmgr-backdrop" onclick="document.getElementById('pwmgr-modal').remove()"></div>
+    <div class="pwmgr-card">
+      <div class="pwmgr-head">
+        <div>
+          <div class="pwmgr-title">🔐 Role PINs</div>
+          <div class="pwmgr-sub">Manage 4-digit PINs for each role · Admin only</div>
+        </div>
+        <button class="pwmgr-close" onclick="document.getElementById('pwmgr-modal').remove()" aria-label="Close">✕</button>
+      </div>
+      <div class="pwmgr-list">
+        ${roleList.map(r => {
+          const m = TEAM_MEMBERS.find(t => t.role === r);
+          const pin = getRolePin(r);
+          return `
+            <div class="pwmgr-row" data-role="${r}">
+              <div class="pwmgr-avatar" style="background:linear-gradient(135deg, ${m?.color||'#64748b'}, ${m?.color||'#64748b'}dd)">${m?.emoji || '·'}</div>
+              <div class="pwmgr-info">
+                <div class="pwmgr-name">${m?.name || r}</div>
+                <div class="pwmgr-desc">${ROLES[r]?.subtitle || ''}</div>
+              </div>
+              <div class="pwmgr-pin-wrap">
+                <input type="password" class="pwmgr-pin" value="${pin}" maxlength="4" inputmode="numeric" pattern="[0-9]{4}" data-role="${r}">
+                <button class="pwmgr-eye" onclick="window._togglePinView('${r}')" title="Show/hide">👁</button>
+                <button class="pwmgr-save" onclick="window._savePin('${r}')" title="Save">Save</button>
+              </div>
+            </div>
+          `;
+        }).join('')}
+      </div>
+      <div class="pwmgr-footer">
+        <div class="pwmgr-help">💡 Tip: All non-admin roles default to <code>0000</code>. Change them once your team is set up. PINs sync across all devices.</div>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(modal);
+  modal.style.display = 'flex';
+}
+
+// Toggle password input visibility for a role row
+window._togglePinView = function(role){
+  const input = document.querySelector(`#pwmgr-modal .pwmgr-pin[data-role="${role}"]`);
+  if(!input) return;
+  input.type = input.type === 'password' ? 'text' : 'password';
+};
+
+// Save a role PIN from the password manager
+window._savePin = function(role){
+  const input = document.querySelector(`#pwmgr-modal .pwmgr-pin[data-role="${role}"]`);
+  if(!input) return;
+  const newPin = input.value.trim();
+  if(!/^\d{4}$/.test(newPin)){
+    if(typeof toast === 'function') toast('PIN must be exactly 4 digits', 'err');
+    return;
+  }
+  try {
+    setRolePin(role, newPin);
+    const m = TEAM_MEMBERS.find(t => t.role === role);
+    if(typeof toast === 'function') toast(`✓ PIN updated for ${m?.name || role}`, 'ok');
+    // Visual feedback on the row
+    const row = document.querySelector(`#pwmgr-modal .pwmgr-row[data-role="${role}"]`);
+    if(row){
+      row.classList.add('saved');
+      setTimeout(() => row.classList.remove('saved'), 1500);
+    }
+  } catch(e){
+    if(typeof toast === 'function') toast(e.message, 'err');
+  }
+};
+
+// Expose
+window.getRolePin = getRolePin;
+window.setRolePin = setRolePin;
+window.promptForPin = promptForPin;
+window.openPasswordManager = openPasswordManager;
+window.ensureRolePinsInitialized = ensureRolePinsInitialized;
+// ═══════════════════════════════════════════════════════════════════
+// END Role Password System
+// ═══════════════════════════════════════════════════════════════════
+
 // ── ENTRY USERS ──
 // The 6 system roles — same as the ROLES object. The user picks one at startup
 // and it determines what they can see/edit. Each maps directly to a role key.
@@ -4725,6 +5659,7 @@ const TEAM_MEMBERS = [
   { name: 'Admin',             role: 'admin',     title: 'Full access',           color: '#1e40af', emoji: '🔑' },
   { name: 'Warehouse Manager', role: 'warehouse', title: 'Receive · Place · Ship',color: '#0d9e78', emoji: '🏬' },
   { name: 'Factory',           role: 'factory',   title: 'Factory Crew',          color: '#b91c1c', emoji: '🏭' },
+  { name: 'Marriages',         role: 'marriages', title: 'Pairings Crew',         color: '#ec4899', emoji: '🔗' },
   { name: 'Truck',             role: 'transit',   title: 'Transit / Loader',      color: '#d97706', emoji: '🚛' },
   { name: 'Dispatcher',        role: 'organizer', title: 'Schedule · Coordinate', color: '#7c3aed', emoji: '📅' },
   { name: 'Viewer',            role: 'viewer',    title: 'Read-only',             color: '#64748b', emoji: '👁' },
@@ -4769,6 +5704,15 @@ function setUser(member){
   applyRoleVisibility();
   // Re-render the bottom nav for the new role's most-used pages
   try { renderBottomNav?.(); } catch(e){ console.warn('[renderBottomNav]', e); }
+  // Navigate to the role's default page so the view content is rebuilt with
+  // the new role context (banner text, card vs table rendering, etc.).
+  // Without this goV, switching from Factory→Marriages would leave the old
+  // banner text and the table layout visible until the user manually clicked
+  // a sidebar item.
+  try {
+    const defaultPage = ROLES[member.role]?.defaultPage || 'dashboard';
+    if(typeof goV === 'function') goV(defaultPage);
+  } catch(e){ console.warn('[setUser goV]', e); }
 }
 
 // Updates avatar + name displays across the UI
@@ -4820,18 +5764,23 @@ function hideWelcomeScreen(){
   document.body.style.overflow = '';
 }
 
-// Called when user clicks a card on the welcome screen
+// Called when user clicks a card on the welcome screen.
+// Now requires PIN entry before completing the sign-in.
 function pickUser(name){
   const m = TEAM_MEMBERS.find(t => t.name === name);
   if(!m) return;
-  setUser(m);
-  hideWelcomeScreen();
-  // Show personalized welcome toast
-  if(typeof toast === 'function') toast(`Welcome, ${m.name}! · ${m.title}`,'ok');
-  // Re-render dashboard if visible
-  if(typeof renderDash === 'function') renderDash();
-  // Start the first-run tour if not completed yet for this role
-  if(typeof maybeStartTour === 'function') maybeStartTour();
+  // Show PIN prompt. On success → setUser + hide. On cancel → stay on welcome.
+  promptForPin(m.role, () => {
+    setUser(m);
+    hideWelcomeScreen();
+    if(typeof toast === 'function') toast(`Welcome, ${m.name}! · ${m.title}`,'ok');
+    // Re-render dashboard if visible
+    if(typeof renderDash === 'function') renderDash();
+    // Start the first-run tour if not completed yet for this role
+    if(typeof maybeStartTour === 'function') maybeStartTour();
+  }, () => {
+    // User cancelled — do nothing, welcome screen stays open
+  });
 }
 
 // Initializes user identity at app startup. If no user is set, show welcome.
@@ -4918,6 +5867,8 @@ const BOTTOM_NAV_CONFIG = {
   warehouse: ['map', 'incoming', 'marriages', 'dispatched', 'more'],
   // Factory: their own list, then accessory pairings, what's in transit, & open requests
   factory:   ['factory', 'marriages', 'intransit', 'requests', 'more'],
+  // Marriages: focused only on pairings + tracking what's in transit
+  marriages: ['marriages', 'intransit', 'more'],
   // Truck: only really has 2 views. We add "more" so they can still get to settings/sign out.
   transit:   ['truck', 'intransit', 'more'],
   // Organizer: schedule pickups, map, marriages, dispatched
@@ -5310,23 +6261,34 @@ function canEdit(){
 function setRole(r){
   if(!ROLES[r]) return;
   if(r === currentRole){ return; }  // no-op if same
-  // Password gate — read from cfg.rolePasswords (admin can change them)
-  const stored = (cfg.rolePasswords && cfg.rolePasswords[r]) || ROLES[r].password || '0000';
-  const tryPw = prompt(`🔒 Enter password for ${ROLES[r].label}:`);
-  if(tryPw === null){ // cancelled — revert dropdown to current
-    const sel = document.querySelector('.role-sel');
-    if(sel) sel.value = currentRole;
+  // Admin bypass — admin can switch to any role without re-entering PIN
+  if(currentRole === 'admin'){
+    _completeRoleSwitch(r);
     return;
   }
-  if(tryPw !== stored){
-    toast('Wrong password','err');
+  // Otherwise use the polished PIN modal
+  promptForPin(r, () => {
+    _completeRoleSwitch(r);
+  }, () => {
+    // Cancelled — revert any role selector dropdown
     const sel = document.querySelector('.role-sel');
     if(sel) sel.value = currentRole;
-    return;
-  }
+  });
+}
+
+// Internal — does the actual role swap after PIN gate has passed
+function _completeRoleSwitch(r){
   currentRole = r;
   localStorage.setItem('aspen_role', r);
+  // Also update the currentUser object so the sidebar footer reflects new role
+  const m = TEAM_MEMBERS.find(t => t.role === r);
+  if(m){
+    currentUser = { name: m.name, role: m.role, title: m.title, color: m.color, emoji: m.emoji };
+    localStorage.setItem('aspen_user', JSON.stringify(currentUser));
+    if(typeof updateUserUI === 'function') updateUserUI();
+  }
   applyRoleVisibility();
+  try { renderBottomNav?.(); } catch(e){}
   toast(`Viewing as: ${ROLES[r].label}`,'ok');
   const safeDest = canSeePage(_curView) ? _curView : ROLES[r].defaultPage;
   if(typeof closePanel === 'function' && document.getElementById('cell-panel')) closePanel();
@@ -5351,9 +6313,17 @@ function applyRoleVisibility(){
   document.body.classList.toggle('role-admin', currentRole==='admin');
   document.body.classList.toggle('role-warehouse', currentRole==='warehouse');
   document.body.classList.toggle('role-factory', currentRole==='factory');
+  document.body.classList.toggle('role-marriages', currentRole==='marriages');
   document.body.classList.toggle('role-transit', currentRole==='transit');
   document.body.classList.toggle('role-organizer', currentRole==='organizer');
   document.body.classList.toggle('role-viewer', currentRole==='viewer');
+
+  // Swap the sidebar "Marriages" label to "Marriage Requests" for the Factory
+  // role — clarifies that these are items the Marriages crew is requesting.
+  const marLabel = document.getElementById('ni-marriages-label');
+  if(marLabel){
+    marLabel.textContent = (currentRole === 'factory') ? 'Marriage Requests' : 'Marriages';
+  }
   // Update the role label in the selector
   const ind = document.getElementById('role-indicator');
   if(ind) ind.textContent = ROLES[currentRole].label;
@@ -9823,6 +10793,8 @@ function truckLoadOne(factoryId){
   f.trackingHistory = f.trackingHistory || [];
   f.trackingHistory.push({state:'in-transit', at:toISO(), by:ROLES[currentRole].label});
   addAct(`📦 Loaded on truck: ${f.sn||f.dealer}`,'var(--accent)');
+  // Sync marriage if this is a married accessory
+  syncMarriageOnAccessoryTransit(f);
   toast(`${f.sn||f.dealer} on truck`,'ok');
   renderTruck(); renderFactory(); renderInTransit(); updBadges();
 }
@@ -10081,9 +11053,13 @@ function renderMaterials(){
         </div>
       </div>
       <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:6px">
-        ${p.items.map(m=>`<div style="background:#fff;border:1px solid var(--line);border-radius:6px;padding:7px 9px">
-          <div style="font-size:11px;font-weight:700;color:var(--text1)">${m.name}</div>
+        ${p.items.map(m=>`<div style="background:#fff;border:1px solid var(--line);border-radius:6px;padding:7px 9px;position:relative">
+          <div style="font-size:11px;font-weight:700;color:var(--text1);padding-right:42px">${m.name}</div>
           <div style="font-family:var(--mono);font-size:10px;color:var(--orange);margin-top:2px">${m.boxes||0} × ${m.perBox||0} = <strong>${m.qty}</strong></div>
+          <div style="position:absolute;top:5px;right:5px;display:flex;gap:3px">
+            <button class="btn btn-sm" style="padding:2px 6px;font-size:9px;line-height:1" onclick="openMaterialEdit(${m.id})" title="Edit">✎</button>
+            <button class="btn btn-sm btn-r" style="padding:2px 6px;font-size:9px;line-height:1" onclick="rmMaterial(${m.id})" title="Remove">✕</button>
+          </div>
         </div>`).join('')}
       </div>
     </div>`;
@@ -10102,8 +11078,10 @@ function renderMaterials(){
       <div style="font-size:10px;color:var(--text3);margin-top:2px">${fmtD(m.date)}</div>
       ${m.notes?`<div style="font-size:10px;color:var(--text2);margin-top:4px;padding-top:4px;border-top:1px solid var(--line)">${m.notes}</div>`:''}
       ${renderPhotoStrip(m, 'materials')}
-      <div style="display:flex;gap:4px;margin-top:5px">
-        <button class="btn btn-sm" style="padding:3px 8px;font-size:10px" onclick="addPhotoToMaterial(${m.id})" title="Add cloud photo (Firebase)">📷 +</button>
+      <div style="display:flex;gap:4px;margin-top:6px;padding-top:6px;border-top:1px solid var(--line);flex-wrap:wrap">
+        <button class="btn btn-sm" style="padding:4px 9px;font-size:10px" onclick="openMaterialEdit(${m.id})" title="Edit this material">✎ Edit</button>
+        <button class="btn btn-sm" style="padding:4px 9px;font-size:10px" onclick="addPhotoToMaterial(${m.id})" title="Add cloud photo">📷</button>
+        <button class="btn btn-sm btn-r" style="padding:4px 9px;font-size:10px" onclick="rmMaterial(${m.id})" title="Delete this material">Remove</button>
       </div>
     </div>`).join('');
   el.innerHTML=`<div style="padding:13px">
@@ -10117,6 +11095,216 @@ function exportMaterials(){
   materials.forEach(m=>c+=`${csvEsc(m.name)},${m.boxes||''},${m.perBox||''},${m.qty},${csvEsc(m.cat)},${csvEsc(m.pos||'')},${csvEsc(fmtD(m.date))},${csvEsc(m.palletNote||'')},${csvEsc(m.notes||'')}\n`);
   dl(c,'aspen_materials_'+toISO()+'.csv');
 }
+
+// ─── EDIT EXISTING MATERIAL ───
+// Opens a modal pre-filled with the material's current values. Saves back to
+// the same record. Standalone materials and pallet-items both use the same
+// modal — the palletNote field is shown only when the item is on a pallet.
+function openMaterialEdit(id){
+  const m = materials.find(x => x.id === id);
+  if(!m){ toast('Material not found','err'); return; }
+  if(!canEdit()){ toast('View-only mode','err'); return; }
+
+  // Build overlay so it works from any view
+  let overlay = document.getElementById('material-edit-overlay');
+  if(overlay) overlay.remove();
+  overlay = document.createElement('div');
+  overlay.id = 'material-edit-overlay';
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(15,23,42,.55);z-index:9998;display:flex;align-items:center;justify-content:center;padding:18px;backdrop-filter:blur(3px);overflow-y:auto';
+  overlay.addEventListener('click', e => { if(e.target === overlay) overlay.remove(); });
+  const panel = document.createElement('div');
+  panel.style.cssText = 'background:#fff;border-radius:14px;width:100%;max-width:640px;max-height:92vh;overflow-y:auto;box-shadow:0 24px 48px -12px rgba(0,0,0,.3);padding:18px';
+
+  const esc = s => String(s ?? '').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+  const dateForInput = m.date ? toDateStr(m.date) : '';
+  const isOnPallet = !!m.palletId;
+
+  panel.innerHTML = `<div class="det-panel">
+    <div class="dp-hd">
+      <div>
+        <div class="dp-pos">Edit Material</div>
+        <div class="dp-sub">Update item details${isOnPallet?' · Part of pallet "'+esc(m.palletNote||'pallet')+'"':''}</div>
+      </div>
+      <button class="btn btn-sm" onclick="document.getElementById('material-edit-overlay')?.remove()">✕</button>
+    </div>
+    <div class="fg" style="margin-bottom:11px">
+      <label class="fl">Item Description</label>
+      <input class="fi" id="mate-name" value="${esc(m.name)}" placeholder="e.g. Cover hardware kit">
+    </div>
+    <div class="fgrid">
+      <div class="fg">
+        <label class="fl">Category</label>
+        <select class="fsel" id="mate-cat">
+          <option value="parts"${m.cat==='parts'?' selected':''}>Spare Parts</option>
+          <option value="covers"${m.cat==='covers'?' selected':''}>Covers</option>
+          <option value="chemicals"${m.cat==='chemicals'?' selected':''}>Chemicals</option>
+          <option value="equipment"${m.cat==='equipment'?' selected':''}>Equipment</option>
+          <option value="packing"${m.cat==='packing'?' selected':''}>Packing</option>
+          <option value="other"${m.cat==='other'?' selected':''}>Other</option>
+        </select>
+      </div>
+      <div class="fg">
+        <label class="fl">Date Received</label>
+        <input class="fi" type="date" id="mate-date" value="${dateForInput}">
+      </div>
+    </div>
+    <div class="fgrid">
+      <div class="fg">
+        <label class="fl">Boxes</label>
+        <input class="fi" type="number" id="mate-boxes" value="${m.boxes||''}" min="0" placeholder="optional">
+      </div>
+      <div class="fg">
+        <label class="fl">Per Box</label>
+        <input class="fi" type="number" id="mate-perbox" value="${m.perBox||''}" min="0" placeholder="optional">
+      </div>
+      <div class="fg">
+        <label class="fl">Total Qty</label>
+        <input class="fi" type="number" id="mate-qty" value="${m.qty||1}" min="0">
+      </div>
+    </div>
+    <div class="fg" style="margin-bottom:6px;font-size:10px;color:var(--text3)">💡 If you fill Boxes × Per Box, leave Total Qty as the result (e.g. 20 × 50 = 1000).</div>
+    <div class="fg" style="margin-bottom:11px">
+      <label class="fl">Position (optional)</label>
+      <input class="fi" id="mate-pos" value="${esc(m.pos||'')}" placeholder="e.g. 12A">
+    </div>
+    <div class="fg" style="margin-bottom:11px">
+      <label class="fl">Notes</label>
+      <input class="fi" id="mate-notes" value="${esc(m.notes||'')}" placeholder="Condition, vendor, PO number...">
+    </div>
+    ${isOnPallet ? `<div class="fg" style="margin-bottom:11px">
+      <label class="fl">Pallet Label (applies to whole pallet)</label>
+      <input class="fi" id="mate-palletnote" value="${esc(m.palletNote||'')}" placeholder="Pallet description">
+    </div>` : ''}
+    <div class="faction">
+      <button class="btn btn-p" onclick="saveMaterialEdit(${m.id})">Save Changes</button>
+      <button class="btn" onclick="document.getElementById('material-edit-overlay')?.remove()">Cancel</button>
+    </div>
+  </div>`;
+  overlay.appendChild(panel);
+  document.body.appendChild(overlay);
+}
+
+function saveMaterialEdit(id){
+  const m = materials.find(x => x.id === id);
+  if(!m){ toast('Material not found','err'); return; }
+  const name = document.getElementById('mate-name').value.trim();
+  const cat = document.getElementById('mate-cat').value;
+  const date = document.getElementById('mate-date').value;
+  const boxes = parseInt(document.getElementById('mate-boxes').value) || 0;
+  const perBox = parseInt(document.getElementById('mate-perbox').value) || 0;
+  const qty = parseInt(document.getElementById('mate-qty').value) || 0;
+  const pos = document.getElementById('mate-pos').value.trim();
+  const notes = document.getElementById('mate-notes').value.trim();
+  const palletNoteEl = document.getElementById('mate-palletnote');
+  const palletNote = palletNoteEl ? palletNoteEl.value.trim() : null;
+
+  if(!name){ toast('Item description required','err'); return; }
+  if(qty < 0){ toast('Quantity cannot be negative','err'); return; }
+  // If position changed, validate the new one
+  let validatedPos = '';
+  if(pos){
+    const v = validatePos(pos);
+    if(!v.ok){ toast(v.reason, 'err'); return; }
+    validatedPos = v.pos;
+  }
+
+  snapshot('edit material');
+
+  const oldPos = m.pos || '';
+  m.name = name;
+  m.cat = cat;
+  m.date = date || m.date;
+  m.boxes = boxes || undefined;
+  m.perBox = perBox || undefined;
+  m.qty = qty;
+  m.pos = validatedPos || undefined;
+  m.notes = notes || undefined;
+  m.editedAt = toISO();
+  // If on a pallet and palletNote changed, update ALL items on that pallet
+  // so the pallet header stays consistent.
+  if(m.palletId && palletNote != null && palletNote !== (m.palletNote||'')){
+    materials.forEach(other => {
+      if(other.palletId === m.palletId) other.palletNote = palletNote;
+    });
+  }
+
+  // ── SYNC THE FLOOR MAP UNIT ──
+  // The material may have a linked unit (the visual cell on the floor map).
+  // Three cases:
+  //   1. Position added (was empty, now set) → create a new unit
+  //   2. Position changed (both old and new set) → move/update the existing unit
+  //   3. Position removed (was set, now empty) → delete the unit
+  //   4. No position both before and after → nothing to sync
+  // Also update unit's dealer/qty/notes/photo whenever the unit exists so the
+  // map tooltip stays consistent with the material data.
+  const linkedUnit = m.linkedUnitId ? units.find(u => u.id === m.linkedUnitId) : null;
+
+  if(validatedPos && !linkedUnit){
+    // Case 1: position added → create new unit
+    const newUnitId = ++nid;
+    m.linkedUnitId = newUnitId;
+    units.push({
+      id: newUnitId, linkedMatId: m.id, pos: validatedPos,
+      sn: '', dealer: name, type: 'material', entry: m.date,
+      qty, notes, photo: m.photo
+    });
+  } else if(validatedPos && linkedUnit){
+    // Case 2: update existing unit (move if pos changed, refresh other fields)
+    linkedUnit.pos = validatedPos;
+    linkedUnit.dealer = name;
+    linkedUnit.qty = qty;
+    linkedUnit.notes = notes;
+    linkedUnit.entry = m.date;
+  } else if(!validatedPos && linkedUnit){
+    // Case 3: position removed → delete the unit
+    units = units.filter(u => u.id !== m.linkedUnitId);
+    m.linkedUnitId = undefined;
+  }
+  // Case 4 implicit (no-op)
+
+  addAct(`Material edited: ${name} (qty ${qty})${oldPos!==validatedPos?` · pos ${oldPos||'—'} → ${validatedPos||'—'}`:''}`,'var(--orange)');
+  toast('Material updated','ok');
+  document.getElementById('material-edit-overlay')?.remove();
+  renderMaterials();
+  if(typeof drawMap === 'function') drawMap();
+  updBadges();
+}
+
+function rmMaterial(id){
+  const m = materials.find(x => x.id === id);
+  if(!m){ toast('Material not found','err'); return; }
+  if(!canEdit()){ toast('View-only mode','err'); return; }
+  if(!confirm(`Remove this material?\n\n${m.name} (qty ${m.qty})${m.pos?` @ ${m.pos}`:''}\n\nThis will ALSO remove it from the floor map.\nThis cannot be undone.`)) return;
+
+  snapshot('remove material');
+
+  // ── SYNC THE FLOOR MAP ──
+  // If this material has a linked unit on the map, remove it too. We use
+  // BOTH lookup paths (linkedUnitId and linkedMatId reverse) to catch any
+  // legacy records that only have one direction of the link set.
+  let removedFromMap = 0;
+  if(m.linkedUnitId){
+    const before = units.length;
+    units = units.filter(u => u.id !== m.linkedUnitId);
+    removedFromMap = before - units.length;
+  }
+  // Fallback: any unit that points back to this material id via linkedMatId
+  const before2 = units.length;
+  units = units.filter(u => u.linkedMatId !== id);
+  removedFromMap += (before2 - units.length);
+
+  materials = materials.filter(x => x.id !== id);
+
+  addAct(`Material removed: ${m.name}${removedFromMap > 0 ? ' (and cleaned from floor map)' : ''}`,'var(--orange)');
+  toast(removedFromMap > 0 ? 'Material removed from list and floor map' : 'Material removed','ok');
+  renderMaterials();
+  if(typeof drawMap === 'function') drawMap();
+  updBadges();
+}
+
+window.openMaterialEdit = openMaterialEdit;
+window.saveMaterialEdit = saveMaterialEdit;
+window.rmMaterial = rmMaterial;
 
 // ── DISPATCHED ──
 // Quick filter chip handler for Dispatched view
@@ -12755,9 +13943,12 @@ function renderFactory(){
     const holdToggleBtn = isHeld
       ? `<button class="btn btn-sm" style="background:#dcfce7;border-color:#86efac;color:#15803d" onclick="resumeFactoryItem(${f.id})">▶ Resume</button>`
       : `<button class="btn btn-sm" style="background:#f3f4f6;border-color:#d1d5db;color:#374151" onclick="holdFactoryItem(${f.id})" title="Pause this spa — exclude from aging reports and dispatch pressure">⏸ Hold</button>`;
+    const isReadyMarriedAcc = isReady && isAcc && f.marriedSn;
     const actsHtml = isReady
       ? `<div class="fct-acts" style="margin-top:8px">
-          <span style="font-size:10px;color:var(--text2);font-style:italic;padding:4px 8px">🔒 Waiting for Truck / Transit to scan QR</span>
+          ${isReadyMarriedAcc
+            ? `<button class="btn btn-sm btn-p" onclick="shipFromFactory(${f.id})" title="Complete ship — sends to warehouse, marks marriage delivered">📤 Send to WH Now</button>`
+            : `<span style="font-size:10px;color:var(--text2);font-style:italic;padding:4px 8px">🔒 Waiting for Truck / Transit to scan QR</span>`}
           <button class="btn btn-sm" style="background:#fef9c3;border-color:#f59e0b;color:#78350f" onclick="printQRLabel(${f.id}, 'factory')" title="Print QR shipping label">🏷 Label</button>
           <button class="btn btn-sm tracking-btn" onclick="openTrackingHistory('factory',${f.id})" title="View tracking history (admin only)">📜</button>
           <button class="btn btn-sm intransit-admin-only" style="background:#fef2f2;border-color:#fecaca;color:#7c2d12" onclick="adminCancelReady(${f.id})" title="Cancel ready state — back to created (admin only)">↶ Cancel Ready</button>
@@ -13918,6 +15109,9 @@ function handleQRPayload(raw, mode){
     item.trackingState = 'in-transit';
     item.trackingHistory.push({state:'in-transit', at, by});
     addAct(`📦 Loaded on truck: ${item.sn||tid} (${item.dealer||''})`,'var(--accent)');
+    // If this is a married accessory, also flip the linked marriage to delivered
+    // so the Marriages crew sees the shipment status update immediately.
+    syncMarriageOnAccessoryTransit(item);
     setScanResult('ok', item.sn||tid, 'on truck · removed from factory');
     toast(`${item.sn||'Item'} on truck — removed from factory inventory`,'ok');
   } else if(mode === 'receive'){
@@ -14132,14 +15326,24 @@ function shipFromFactory(id){
     return;
   }
   const isAcc = f.type==='accessory' || f.type==='misc';
-  // If it's already ready/in-transit, don't re-fire
+  // If it's already in-transit, don't re-fire
   if(f.trackingState === 'in-transit'){
     toast(`${f.sn||f.dealer} already on truck (in transit) — picked up by Truck / Transit`,'err');
     return;
   }
+  // If already marked ready-to-ship from a previous flow:
+  //   • Spas: still need a Truck scan to leave factory (that flow unchanged)
+  //   • Married accessories: complete the new flow — push them to in-transit
+  //     and flip the marriage to delivered. This is the recovery path for
+  //     items left in the old "waiting for truck" state.
   if(f.trackingState === 'ready-to-ship'){
-    toast(`${f.sn||f.dealer} already marked ready — waiting for Truck / Transit to pick up`,'err');
-    return;
+    const isMarriedAcc = isAcc && f.marriedSn;
+    if(!isMarriedAcc){
+      toast(`${f.sn||f.dealer} already marked ready — waiting for Truck / Transit to pick up`,'err');
+      return;
+    }
+    // fall through to the married-accessory branch below; the confirm
+    // dialog there explicitly explains the recovery action.
   }
   // Accessories: married ones now follow the SAME truck scan flow as spas (ready → in-transit → received).
   // Loose (non-married) accessories still go straight to Materials since they're not really part of a dispatch.
@@ -14154,17 +15358,40 @@ function shipFromFactory(id){
       renderFactory(); renderMaterials(); updBadges(); drawMap();
       return;
     }
-    // ── MARRIED accessory: SAME truck flow as spas ──
-    if(!confirm(`Mark "${f.dealer}" as READY for Truck pickup?\n\nThis accessory is married to S/N ${f.marriedSn}. It stays at the factory until Truck / Transit scans it. Only after the truck scans it will the warehouse see it as IN TRANSIT.`)) return;
-    snapshot('mark accessory ready-to-ship');
-    f.trackingState = 'ready-to-ship';
+    // ── MARRIED accessory: direct ship to warehouse, no truck scan needed ──
+    // Factory's "Ship to WH" is the final action. The accessory goes to
+    // in-transit immediately AND the linked marriage flips to "delivered"
+    // so Marriages crew sees it's on its way. Tracking remains visible
+    // in In Transit until it physically arrives.
+    if(!confirm(`Ship "${f.dealer}" to warehouse?\n\nThis accessory is married to S/N ${f.marriedSn}. It will:\n• Go directly to In Transit\n• Mark the marriage as Delivered\n• Show up for Receiving when it physically arrives`)) return;
+    snapshot('ship married accessory direct to wh');
+    f.trackingState = 'in-transit';
     f.trackingId = f.trackingId || makeTrackingId('ACC');
     f.trackingHistory = f.trackingHistory || [];
-    f.trackingHistory.push({state:'ready-to-ship', at:toISO(), by:ROLES[currentRole].label, note:'Married accessory marked ready for truck pickup'});
-    addAct(`📦 Ready for pickup: ${f.dealer} (married to S/N ${f.marriedSn})`,'var(--amber)');
-    toast(`${f.dealer} marked ready — Truck / Transit will scan to load`,'ok');
-    renderFactory(); updBadges();
-    if(typeof renderTruck === 'function') renderTruck();
+    f.trackingHistory.push({state:'in-transit', at:toISO(), by:ROLES[currentRole].label, note:'Shipped from factory direct to warehouse — marriage marked delivered'});
+    // Find the linked marriage and flip status to delivered
+    const linkedMarriage = marriages.find(m => m.accessoryId === f.id && m.status === 'pending');
+    if(linkedMarriage){
+      linkedMarriage.status = 'delivered';
+      linkedMarriage.deliveredDate = toISO();
+      addAct(`✈ Marriage delivered (in transit): ${f.dealer} → S/N ${f.marriedSn}`, 'var(--teal)');
+    }
+    addAct(`📦 Shipped to WH: ${f.dealer} (married to S/N ${f.marriedSn})`,'var(--teal)');
+    toast(`Shipped — Marriages crew can track it in In Transit`,'ok');
+    renderFactory();
+    if(typeof renderMarriages === 'function') renderMarriages();
+    if(typeof renderInTransit === 'function') renderInTransit();
+    updBadges();
+    // ── AUTO-PRINT LABEL ──
+    // Print the marriage label so the warehouse crew can pair the physical
+    // accessory to the right spa on arrival. Fire-and-forget — if the popup
+    // is blocked or printing fails, the ship action still succeeded.
+    if(linkedMarriage){
+      setTimeout(() => {
+        try { printMarriageLabel(linkedMarriage.id); }
+        catch(e){ console.warn('Auto-print marriage label failed:', e); }
+      }, 80);
+    }
     return;
   }
   // Spas: only flag as 'ready-to-ship'. Item stays at factory until Truck / Transit scans it.
@@ -14180,6 +15407,14 @@ function shipFromFactory(id){
   // Also refresh truck view in case admin/factory user is testing across roles in same session,
   // or the truck view is mounted in the DOM (it's a hidden view but still re-renders cleanly).
   if(typeof renderTruck === 'function') renderTruck();
+  // ── AUTO-PRINT LABEL ──
+  // Print the spa's QR label immediately so the factory worker can stick it
+  // on the spa before the truck arrives. Fire-and-forget — popup blockers
+  // or print failures won't undo the ship action.
+  setTimeout(() => {
+    try { printQRLabel(f.id, 'factory'); }
+    catch(e){ console.warn('Auto-print QR label failed:', e); }
+  }, 80);
 }
 
 function rmFromFactory(id){
@@ -14375,6 +15610,24 @@ function renderMarriages(){
   const delivered = marriages.filter(m => m.status === 'delivered');
   const completed = marriages.filter(m => m.status === 'completed');
   const splitPending = marriages.filter(m => m.status === 'split-pending');
+
+  // ── Hero banner text — role-aware ──
+  // Same view, different framing depending on who's looking. This makes the
+  // request/fulfillment flow obvious without a separate page.
+  const titleEl = document.getElementById('marriages-hero-title');
+  const descEl = document.getElementById('marriages-hero-desc');
+  if(titleEl && descEl){
+    if(currentRole === 'marriages'){
+      titleEl.innerHTML = `Marriages — your pairings <span class="help-bubble" onclick="event.stopPropagation();showHelp('marriage',this)" title="What's a marriage?">?</span>`;
+      descEl.textContent = `Each pending pairing is a request to Factory. Once Factory ships the accessory, it arrives In Transit then becomes Delivered.`;
+    } else if(currentRole === 'factory'){
+      titleEl.innerHTML = `Marriage Requests — from Marriages crew <span class="help-bubble" onclick="event.stopPropagation();showHelp('marriage',this)" title="What's a marriage?">?</span>`;
+      descEl.textContent = `Pending = items the Marriages crew is waiting on. Ship each accessory with its paired spa so it can be dispatched together.`;
+    } else {
+      titleEl.innerHTML = `Marriages — Tina + Accessory Pairings <span class="help-bubble" onclick="event.stopPropagation();showHelp('marriage',this)" title="What's a marriage?">?</span>`;
+      descEl.textContent = `A married spa CANNOT be dispatched until its accessory arrives from the factory. The dispatch button will warn you.`;
+    }
+  }
   document.getElementById('mar-stats').innerHTML = `
     <div class="sc${pending.length>0?' marriage-warning-card':''}"><div class="sc-label">${pending.length>0?'⚠ ':''}Pending</div><div class="sc-val" style="color:${pending.length>0?'var(--red)':'var(--text2)'}">${pending.length}</div><div class="sc-trend">Waiting on factory</div></div>
     <div class="sc ct"><div class="sc-corner"></div><div class="sc-label">Delivered</div><div class="sc-val">${delivered.length}</div><div class="sc-trend">At warehouse, ready to ship</div></div>
@@ -14416,6 +15669,79 @@ function renderMarriages(){
     'completed':     { color:'#6b7280', bg:'#f3f4f6', icon:'🏁', label:'COMPLETED',     rowBg:'',          urgent:false },
     'split-pending': { color:'#ffffff', bg:'#dc2626', icon:'🔴', label:'SPLIT-PENDING', rowBg:'#fef2f2',   urgent:true  },
   };
+
+  // ── CARD VIEW for Marriages role ──
+  // The Marriages crew sees their pairings as visual cards (similar to how
+  // Factory sees their factory items). Easier to scan and act on. Other roles
+  // (admin, factory, warehouse) still see the dense table view below.
+  if(currentRole === 'marriages'){
+    cont.innerHTML = `<div class="mar-cards-grid">${list.map(m => {
+      const inWH = units.some(u => u.sn === m.spaSn);
+      const sc = stCfg[m.status] || stCfg['pending'];
+      const isPending = m.status === 'pending';
+      const isDelivered = m.status === 'delivered';
+      const isSplit = m.status === 'split-pending';
+
+      // Find linked accessory's tracking info — shown when delivered/in-transit
+      let trackInfo = '';
+      if(isDelivered && m.accessoryId){
+        const acc = factory.find(f => f.id === m.accessoryId);
+        if(acc && acc.trackingState === 'in-transit'){
+          trackInfo = `<div class="mar-card-track">✈ In Transit to warehouse</div>`;
+        } else if(acc && acc.trackingState === 'received-at-wh'){
+          trackInfo = `<div class="mar-card-track" style="background:#ecfdf5;color:#065f46;border-color:#a7f3d0">✓ Received at warehouse</div>`;
+        } else if(!acc){
+          // Acc no longer in factory list — already processed
+          trackInfo = `<div class="mar-card-track" style="background:#ecfdf5;color:#065f46;border-color:#a7f3d0">✓ Received at warehouse</div>`;
+        }
+      }
+
+      // Split-pending: show extra red banner explaining the issue
+      let splitBanner = '';
+      if(isSplit){
+        const dispatchedRec = dispatched.find(d => d.sn === m.spaSn);
+        const sinceDate = dispatchedRec ? fmtD(m.splitDispatchedDate||dispatchedRec.dispatchDate) : '';
+        const dealerNow = m.splitDispatchSpaDealer || dispatchedRec?.dealer || 'dealer';
+        splitBanner = `<div class="mar-card-split">🔴 Spa already at <b>${dealerNow}</b>${sinceDate?` since ${sinceDate}`:''} — accessory still owed</div>`;
+      }
+
+      return `<div class="mar-card mar-card-${m.status}">
+        <div class="mar-card-hd">
+          <div class="mar-card-sn-wrap">
+            <div class="mar-card-sn-row">
+              <svg class="mar-card-sn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M3 11l1.5-3a2 2 0 011.8-1.1H17.7a2 2 0 011.8 1.1L21 11M3 11v6a2 2 0 002 2h14a2 2 0 002-2v-6M3 11h18M7 15.5h.01M11 15.5h6"/>
+              </svg>
+              <div>
+                <div class="mar-card-sn">${m.spaSn}</div>
+                <div class="mar-card-sn-dot">${inWH ? '<span style="color:var(--teal)">●</span> Spa at warehouse' : '<span style="color:var(--text3)">○</span> Spa not at warehouse'}</div>
+              </div>
+            </div>
+          </div>
+          <span class="mar-card-badge" style="background:${sc.bg};color:${sc.color};border-color:${sc.urgent?'var(--red)':sc.color+'33'}">${sc.icon} ${sc.label}</span>
+        </div>
+        ${splitBanner}
+        <div class="mar-card-body">
+          <div class="mar-card-row"><span class="mar-card-lbl">Dealer</span><span class="mar-card-val">${m.spaDealer || '<em style="color:var(--text3);font-weight:400">— not set —</em>'}</span></div>
+          <div class="mar-card-row"><span class="mar-card-lbl">Accessory</span><span class="mar-card-val mar-card-acc">${m.accessoryName}${(m.accessoryQty||1) > 1 ? ` <small style="color:var(--text3);font-weight:600">× ${m.accessoryQty}</small>` : ''}</span></div>
+          ${m.notes ? `<div class="mar-card-row"><span class="mar-card-lbl">Notes</span><span class="mar-card-val mar-card-notes">${m.notes}</span></div>` : ''}
+          <div class="mar-card-row mar-card-meta"><span class="mar-card-lbl">Created</span><span>${fmtD(m.created)}${m.deliveredDate ? ` · delivered ${fmtD(m.deliveredDate)}` : ''}</span></div>
+        </div>
+        ${trackInfo}
+        <div class="mar-card-acts">
+          ${isPending ? `<button class="btn btn-sm mar-btn-primary" onclick="shipMarriageFromMarriages(${m.id})" title="Send the accessory to the warehouse — marks marriage as Delivered">📤 Send to WH</button>` : ''}
+          ${isSplit ? `<button class="btn btn-sm" style="background:#fef9c3;border-color:#f59e0b;color:#78350f" onclick="goV('requests')" title="View follow-up Factory Request">📋 Follow-up</button>` : ''}
+          <button class="btn btn-sm" onclick="printMarriageLabel(${m.id})" title="Print physical label">🏷 Label</button>
+          ${m.status !== 'completed' ? `<button class="btn btn-sm" onclick="openMarriageEdit(${m.id})" title="Edit this marriage">✎ Edit</button>` : ''}
+          ${isDelivered ? `<button class="btn btn-sm" onclick="goV('intransit')" title="Track shipment to warehouse">🚚 Track</button>` : ''}
+          ${m.status !== 'completed' ? `<button class="btn btn-sm btn-r" onclick="rmMarriage(${m.id})">Remove</button>` : ''}
+        </div>
+      </div>`;
+    }).join('')}</div>`;
+    return;
+  }
+
+  // ── TABLE VIEW for admin/factory/warehouse/other roles ──
   cont.innerHTML = `<div class="tw"><table>
     <thead><tr>
       <th>Status</th>
@@ -14452,6 +15778,8 @@ function renderMarriages(){
         <td style="text-align:right;white-space:nowrap">
           ${m.status==='pending'?`<button class="btn btn-sm btn-g" onclick="markMarriageDelivered(${m.id})">Mark delivered</button>`:''}
           ${m.status==='split-pending'?`<button class="btn btn-sm" style="background:#fef9c3;border-color:#f59e0b;color:#78350f" onclick="goV('requests')" title="View the auto-created Factory Request to ship this accessory">📋 Open follow-up</button>`:''}
+          ${m.status!=='completed'?`<button class="btn btn-sm" onclick="printMarriageLabel(${m.id})" title="Print physical label for this pairing">🖨 Label</button>`:''}
+          ${m.status!=='completed'?`<button class="btn btn-sm" onclick="openMarriageEdit(${m.id})" title="Edit this marriage">✎ Edit</button>`:''}
           ${m.status!=='completed'?`<button class="btn btn-sm btn-r" onclick="rmMarriage(${m.id})">Remove</button>`:''}
         </td>
       </tr>`;
@@ -14630,6 +15958,406 @@ function rmMarriage(mid){
   toast('Marriage removed','ok');
   renderMarriages(); renderFactory(); drawMap(); updBadges();
 }
+
+// ─── EDIT EXISTING MARRIAGE ───
+// Opens a modal pre-filled with the marriage's current values. Saves back to
+// the same record. Also propagates accessory name/qty/notes changes to the
+// linked factory accessory record so both views stay consistent.
+function openMarriageEdit(mid){
+  const m = marriages.find(x => x.id === mid);
+  if(!m){ toast('Marriage not found','err'); return; }
+  if(m.status === 'completed'){ toast('Completed marriages cannot be edited','err'); return; }
+
+  // Use overlay so it works from any view (including Factory's marriage requests view)
+  let overlay = document.getElementById('marriage-edit-overlay');
+  if(overlay) overlay.remove();
+  overlay = document.createElement('div');
+  overlay.id = 'marriage-edit-overlay';
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(15,23,42,.55);z-index:9998;display:flex;align-items:center;justify-content:center;padding:18px;backdrop-filter:blur(3px);overflow-y:auto';
+  overlay.addEventListener('click', e => { if(e.target === overlay) overlay.remove(); });
+  const panel = document.createElement('div');
+  panel.style.cssText = 'background:#fff;border-radius:14px;width:100%;max-width:640px;max-height:92vh;overflow-y:auto;box-shadow:0 24px 48px -12px rgba(0,0,0,.3);padding:18px';
+
+  // Pre-escape values for safe injection into the HTML
+  const esc = s => String(s ?? '').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+
+  panel.innerHTML = `<div class="det-panel">
+    <div class="dp-hd">
+      <div>
+        <div class="dp-pos">Edit Marriage</div>
+        <div class="dp-sub">Update accessory, dealer, qty, or notes · Status: <b style="color:${m.status==='pending'?'var(--red)':'var(--teal)'}">${m.status}</b></div>
+      </div>
+      <button class="btn btn-sm" onclick="document.getElementById('marriage-edit-overlay')?.remove()">✕</button>
+    </div>
+    <div class="fgrid">
+      <div class="fg">
+        <label class="fl">Spa Serial No.</label>
+        <input class="fi" id="me-sn" value="${esc(m.spaSn)}" placeholder="e.g. 30781">
+      </div>
+      <div class="fg">
+        <label class="fl">Dealer</label>
+        <input class="fi" id="me-dealer" value="${esc(m.spaDealer)}" placeholder="Dealer name">
+      </div>
+    </div>
+    <div class="fgrid">
+      <div class="fg">
+        <label class="fl">Accessory Name</label>
+        <input class="fi" id="me-name" value="${esc(m.accessoryName)}" placeholder="e.g. Extra Cabinet Door — Mahogany">
+      </div>
+      <div class="fg">
+        <label class="fl">Quantity</label>
+        <input class="fi" type="number" id="me-qty" value="${m.accessoryQty||1}" min="1">
+      </div>
+    </div>
+    <div class="fg" style="margin-bottom:11px">
+      <label class="fl">Notes</label>
+      <input class="fi" id="me-notes" value="${esc(m.notes)}" placeholder="PO number, special instructions...">
+    </div>
+    <div class="faction">
+      <button class="btn btn-p" onclick="saveMarriageEdit(${m.id})">Save Changes</button>
+      <button class="btn" onclick="document.getElementById('marriage-edit-overlay')?.remove()">Cancel</button>
+    </div>
+  </div>`;
+  overlay.appendChild(panel);
+  document.body.appendChild(overlay);
+}
+
+function saveMarriageEdit(mid){
+  const m = marriages.find(x => x.id === mid);
+  if(!m){ toast('Marriage not found','err'); return; }
+  const sn = document.getElementById('me-sn').value.trim();
+  const dealer = document.getElementById('me-dealer').value.trim();
+  const name = document.getElementById('me-name').value.trim();
+  const qty = parseInt(document.getElementById('me-qty').value) || 1;
+  const notes = document.getElementById('me-notes').value.trim();
+
+  if(!sn){ toast('Spa S/N required','err'); return; }
+  if(!name){ toast('Accessory name required','err'); return; }
+
+  snapshot('edit marriage');
+  m.spaSn = sn;
+  m.spaDealer = dealer;
+  m.accessoryName = name;
+  m.accessoryQty = qty;
+  m.notes = notes;
+  m.editedAt = toISO();
+
+  // Propagate changes to the linked factory accessory record so both views show
+  // the same data. The accessory record stores dealer = accessoryName by convention.
+  const acc = factory.find(f => f.id === m.accessoryId);
+  if(acc){
+    acc.dealer = name;
+    acc.qty = qty;
+    if(notes) acc.notes = notes;
+  }
+
+  addAct(`Marriage edited: ${name} → S/N ${sn}`, 'var(--red)');
+  toast('Marriage updated','ok');
+  document.getElementById('marriage-edit-overlay')?.remove();
+  renderMarriages();
+  if(typeof renderFactory === 'function') renderFactory();
+  if(typeof drawMap === 'function') drawMap();
+  updBadges();
+}
+
+// ─── PRINT MARRIAGE LABEL ───
+// Prints a physical label for this marriage to attach to the accessory at the
+// factory. The QR encodes the marriage ID + spa S/N so when warehouse scans the
+// arriving accessory, it can auto-link back to its pairing.
+async function printMarriageLabel(mid){
+  const m = marriages.find(x => x.id === mid);
+  if(!m){ toast('Marriage not found','err'); return; }
+
+  // Load QR generator (same library used by printQRLabel)
+  try { await loadQRGenLib(); }
+  catch(e){
+    toast('Could not load QR generator — check internet','err');
+    return;
+  }
+  if(typeof qrcode === 'undefined'){
+    toast('QR generator unavailable','err');
+    return;
+  }
+  // QR payload: marriage routing info. Scanning at warehouse can auto-resolve.
+  const payload = JSON.stringify({
+    type: 'marriage',
+    mid: m.id,
+    sn: m.spaSn,
+    acc: m.accessoryName,
+    dealer: m.spaDealer || ''
+  });
+  const qr = qrcode(0, 'M');
+  qr.addData(payload);
+  qr.make();
+  const qrSvg = qr.createSvgTag({cellSize: 6, margin: 1});
+
+  const createdDate = new Date(m.created).toLocaleDateString('en-US', { month:'long', day:'numeric', year:'numeric' });
+  const printedDate = new Date().toLocaleDateString('en-US', { month:'long', day:'numeric', year:'numeric' });
+
+  // Use same logo as factory labels
+  const logo = (typeof ASPEN_LOGO_B64 !== 'undefined') ? ASPEN_LOGO_B64 : '';
+
+  // Escape values so HTML stays safe even if dealer/accessory has weird chars
+  const esc = s => String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+
+  const w = window.open('', '_blank');
+  const html = `<!DOCTYPE html><html><head><title>Marriage Label · S/N ${esc(m.spaSn)}</title>
+    <style>
+      @page { size: letter portrait; margin: 0.5in; }
+      *, *::before, *::after { box-sizing: border-box; }
+      html, body { margin: 0; padding: 0; }
+      body { font-family: Georgia, 'Times New Roman', serif; color: #1a1a1a; background: #fff; }
+      .label {
+        width: 7.5in;
+        min-height: 6in;
+        margin: 0 auto;
+        padding: 0.2in 0.25in;
+        border: 3px solid #1a1a1a;
+        border-radius: 12px;
+        page-break-inside: avoid;
+        display: flex;
+        flex-direction: column;
+      }
+      .top-bar {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        border-bottom: 2px solid #1a1a1a;
+        padding-bottom: 10px;
+        margin-bottom: 14px;
+      }
+      .logo-img { height: 0.7in; max-width: 3in; }
+      .ribbon {
+        background: #be123c;
+        color: #fff;
+        font-family: ui-sans-serif, system-ui, sans-serif;
+        font-weight: 700;
+        font-size: 18px;
+        letter-spacing: 2.5px;
+        padding: 8px 18px;
+        border-radius: 6px;
+        text-transform: uppercase;
+      }
+      .mid {
+        display: grid;
+        grid-template-columns: 1fr 1.8in;
+        gap: 22px;
+        flex: 1;
+        align-items: stretch;
+        min-height: 0;
+      }
+      .fields { display: flex; flex-direction: column; gap: 6px; }
+      .field { font-family: Georgia, serif; }
+      .field-label {
+        font-size: 14px;
+        color: #6b4226;
+        letter-spacing: 0.5px;
+        text-transform: uppercase;
+        font-weight: 600;
+        margin-bottom: 0;
+      }
+      .field-value {
+        font-size: 38px;
+        font-weight: 700;
+        color: #1a1a1a;
+        padding: 0 6px 6px 6px;
+        border-bottom: 2.2px solid #1a1a1a;
+        line-height: 1.05;
+      }
+      .field-value.muted { font-weight: 400; font-size: 22px; color: #475569; border-bottom-style: dashed; border-bottom-width: 1.5px; }
+      .field-value.small { font-size: 26px; }
+      .qr-col {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: flex-start;
+        gap: 6px;
+        padding-top: 4px;
+      }
+      .qr-box { padding: 6px; border: 2.5px solid #1a1a1a; border-radius: 8px; background: #fff; }
+      .qr-box svg { display: block; width: 1.55in; height: 1.55in; }
+      .qr-cap { font-family: ui-monospace, 'Courier New', monospace; font-size: 11px; color: #475569; letter-spacing: 0.8px; font-weight: 700; }
+      .qr-mid { font-family: ui-monospace, monospace; font-size: 10px; color: #94a3b8; }
+      .footer {
+        margin-top: 14px;
+        padding-top: 10px;
+        border-top: 1px dashed #94a3b8;
+        display: flex;
+        justify-content: space-between;
+        font-size: 11px;
+        color: #475569;
+        font-family: ui-sans-serif, system-ui, sans-serif;
+      }
+      .note-box {
+        background: #fef9c3;
+        border-left: 5px solid #f59e0b;
+        padding: 9px 12px;
+        margin-top: 12px;
+        border-radius: 4px;
+        font-size: 14px;
+        font-family: ui-sans-serif, system-ui, sans-serif;
+      }
+      .note-box-label { font-weight: 700; color: #78350f; font-size: 11px; text-transform: uppercase; letter-spacing: 0.7px; margin-bottom: 3px; }
+      .controls {
+        position: fixed;
+        top: 10px;
+        right: 10px;
+        z-index: 9999;
+        display: flex;
+        gap: 8px;
+        font-family: ui-sans-serif, system-ui, sans-serif;
+      }
+      .controls button {
+        background: #2563eb;
+        color: #fff;
+        border: none;
+        padding: 8px 14px;
+        border-radius: 6px;
+        cursor: pointer;
+        font-size: 13px;
+        font-weight: 600;
+      }
+      .controls button:hover { background: #1d4ed8; }
+      @media print { .controls { display: none; } }
+    </style>
+  </head><body>
+    <div class="controls">
+      <button onclick="window.print()">🖨 Print</button>
+      <button onclick="window.close()" style="background:#475569">Close</button>
+    </div>
+    <div class="label">
+      <div class="top-bar">
+        ${logo ? `<img class="logo-img" src="${logo}" alt="Aspen Spas">` : '<div style="font-weight:800;font-size:24px">ASPEN SPAS</div>'}
+        <div class="ribbon">Marriage · Pairing</div>
+      </div>
+      <div class="mid">
+        <div class="fields">
+          <div class="field">
+            <div class="field-label">Spa Serial No.</div>
+            <div class="field-value">${esc(m.spaSn)}</div>
+          </div>
+          <div class="field">
+            <div class="field-label">Dealer</div>
+            <div class="field-value small">${esc(m.spaDealer) || '<span style="color:#cbd5e1;font-style:italic;font-weight:400">— not set —</span>'}</div>
+          </div>
+          <div class="field">
+            <div class="field-label">Accessory${(m.accessoryQty||1) > 1 ? ` · Qty ${m.accessoryQty}` : ''}</div>
+            <div class="field-value small">${esc(m.accessoryName)}</div>
+          </div>
+          <div class="field">
+            <div class="field-label">Status / Created</div>
+            <div class="field-value muted">${esc(m.status.toUpperCase())} · ${createdDate}</div>
+          </div>
+        </div>
+        <div class="qr-col">
+          <div class="qr-box">${qrSvg}</div>
+          <div class="qr-cap">SCAN TO LINK</div>
+          <div class="qr-mid">MAR-${m.id}</div>
+        </div>
+      </div>
+      ${m.notes ? `<div class="note-box">
+        <div class="note-box-label">Notes for Factory</div>
+        <div>${esc(m.notes)}</div>
+      </div>` : ''}
+      <div class="footer">
+        <div>Printed: ${printedDate}</div>
+        <div>aspenservices · Marriage Pairing Label</div>
+      </div>
+    </div>
+    <script>
+      // Auto-open print dialog on load
+      setTimeout(() => window.print(), 400);
+    <\/script>
+  </body></html>`;
+  w.document.write(html);
+  w.document.close();
+}
+
+window.openMarriageEdit = openMarriageEdit;
+window.saveMarriageEdit = saveMarriageEdit;
+window.printMarriageLabel = printMarriageLabel;
+
+// ─── CENTRALIZED MARRIAGE SYNC ───
+// Single source of truth: whenever a married accessory's tracking state advances
+// to 'in-transit' (no matter who triggered it — Factory, Marriages, or Truck
+// scanning the QR), the linked marriage must flip from pending → delivered.
+// Before this helper existed, only shipFromFactory did the flip, so items that
+// went through truckLoadOne or handleQRPayload left the marriage stuck on pending.
+//
+// Returns true if a marriage was updated. Safe to call multiple times — no-op
+// if marriage is already delivered/completed or no matching marriage exists.
+function syncMarriageOnAccessoryTransit(acc){
+  if(!acc) return false;
+  const isAcc = acc.type === 'accessory' || acc.type === 'misc';
+  if(!isAcc || !acc.marriedSn) return false;
+  const m = marriages.find(x => x.accessoryId === acc.id && x.status === 'pending');
+  if(!m) return false;
+  m.status = 'delivered';
+  m.deliveredDate = toISO();
+  addAct(`✈ Marriage auto-delivered (in transit): ${acc.dealer} → S/N ${acc.marriedSn}`, 'var(--teal)');
+  // Render hooks — best-effort, all guarded
+  try { if(typeof renderMarriages === 'function') renderMarriages(); } catch(e){}
+  try { if(typeof updBadges === 'function') updBadges(); } catch(e){}
+  return true;
+}
+window.syncMarriageOnAccessoryTransit = syncMarriageOnAccessoryTransit;
+
+// ─── SEND TO WAREHOUSE (from Marriages role) ───
+// Lets the Marriages crew push a pairing through the ship flow themselves —
+// useful when Factory hasn't acted yet but the accessory is ready. Does the
+// same thing Factory's "Ship to WH" does for a married accessory: flips the
+// linked accessory to in-transit and marks the marriage as delivered.
+function shipMarriageFromMarriages(mid){
+  const m = marriages.find(x => x.id === mid);
+  if(!m){ toast('Marriage not found','err'); return; }
+  if(m.status !== 'pending'){
+    toast(`Marriage already ${m.status} — nothing to send`,'err');
+    return;
+  }
+  const acc = factory.find(f => f.id === m.accessoryId);
+  if(!acc){
+    // Edge case: the accessory record is gone but the marriage is still
+    // pending. We can still flip the marriage to delivered for tracking.
+    if(!confirm(`The linked factory accessory for S/N ${m.spaSn} no longer exists in factory inventory. Mark this marriage as Delivered anyway?`)) return;
+    snapshot('marriage shipped from marriages (no factory record)');
+    m.status = 'delivered';
+    m.deliveredDate = toISO();
+    addAct(`✈ Marriage marked delivered (Marriages crew): ${m.accessoryName} → S/N ${m.spaSn}`,'var(--teal)');
+    toast(`Marriage marked delivered`,'ok');
+    renderMarriages();
+    updBadges();
+    // Auto-print so the physical paperwork is ready even in the recovery flow.
+    setTimeout(() => {
+      try { printMarriageLabel(m.id); }
+      catch(e){ console.warn('Auto-print marriage label failed:', e); }
+    }, 80);
+    return;
+  }
+
+  if(!confirm(`Send "${m.accessoryName}" to warehouse for S/N ${m.spaSn}?\n\nThis will:\n• Mark the accessory as In Transit (skip truck scan)\n• Flip the marriage status to Delivered\n• Make it visible in your In Transit view`)) return;
+
+  snapshot('marriage shipped from marriages');
+  acc.trackingState = 'in-transit';
+  acc.trackingId = acc.trackingId || makeTrackingId('ACC');
+  acc.trackingHistory = acc.trackingHistory || [];
+  acc.trackingHistory.push({state:'in-transit', at:toISO(), by:ROLES[currentRole].label, note:'Sent to warehouse by Marriages crew'});
+  m.status = 'delivered';
+  m.deliveredDate = toISO();
+  addAct(`✈ Marriage shipped by Marriages crew: ${m.accessoryName} → S/N ${m.spaSn}`,'var(--teal)');
+  toast(`Sent to warehouse — track in In Transit`,'ok');
+  renderMarriages();
+  if(typeof renderFactory === 'function') renderFactory();
+  if(typeof renderInTransit === 'function') renderInTransit();
+  updBadges();
+  // ── AUTO-PRINT LABEL ──
+  // Same pattern as the Factory side: fire-and-forget so the crew gets the
+  // physical label without needing to click an extra button.
+  setTimeout(() => {
+    try { printMarriageLabel(m.id); }
+    catch(e){ console.warn('Auto-print marriage label failed:', e); }
+  }, 80);
+}
+window.shipMarriageFromMarriages = shipMarriageFromMarriages;
 
 // ═══════════════════════════════════════════════════════
 // COVER INVENTORY — render, add, edit, remove
@@ -16350,6 +18078,55 @@ async function wipeInventoryData(){
 // ── BOOT ──
 loadState();
 migrateUnitsToStacks();   // assign stack/level to legacy units
+// Ensure all roles have a PIN entry — must run after loadState so cfg exists
+try { ensureRolePinsInitialized(); } catch(e){ console.warn('[pins]', e); }
+// One-shot migration: any marriage that is still "pending" but whose linked
+// factory accessory is already in-transit or received-at-wh should auto-flip
+// to "delivered". This fixes data left over from versions before the
+// centralized syncMarriageOnAccessoryTransit hook existed.
+try {
+  let fixedCount = 0;
+  marriages.forEach(m => {
+    if(m.status !== 'pending' || !m.accessoryId) return;
+    const acc = factory.find(f => f.id === m.accessoryId);
+    if(acc && (acc.trackingState === 'in-transit' || acc.trackingState === 'received-at-wh' || acc.trackingState === 'received-at-warehouse')){
+      m.status = 'delivered';
+      m.deliveredDate = m.deliveredDate || toISO();
+      fixedCount++;
+    } else if(!acc){
+      // The factory accessory was already consumed (e.g. received) but marriage
+      // was never updated. If the marriage has any tracking signal (delivery
+      // date in trackingHistory), use that; otherwise assume delivered now.
+      m.status = 'delivered';
+      m.deliveredDate = m.deliveredDate || toISO();
+      fixedCount++;
+    }
+  });
+  if(fixedCount > 0){
+    console.log(`[migration] Auto-fixed ${fixedCount} marriage(s) stuck on pending while accessory was in-transit`);
+  }
+} catch(e){ console.warn('[marriage migration]', e); }
+
+// One-shot migration: clean up orphan material-units left on the floor map
+// from versions where rmMaterial didn't remove the linked unit. A unit is
+// orphan if its type === 'material' AND its linkedMatId points to a material
+// that no longer exists in materials[]. These show up as ghost cells on the
+// floor map (e.g. a "kdslfbkabsd · MATERIAL" cell that's already been
+// deleted from the Materials view).
+try {
+  const before = units.length;
+  units = units.filter(u => {
+    if(u.type !== 'material') return true;        // not a material — keep
+    if(!u.linkedMatId) return true;               // legacy material-unit with no link — keep
+    const exists = materials.some(m => m.id === u.linkedMatId);
+    return exists;                                 // keep only if the material still exists
+  });
+  const cleaned = before - units.length;
+  if(cleaned > 0){
+    console.log(`[migration] Removed ${cleaned} orphan material-unit(s) from the floor map`);
+  }
+} catch(e){ console.warn('[orphan unit migration]', e); }
+
 saveState();              // persist migration result
 document.getElementById('live-date').textContent=new Date().toLocaleDateString('en-US',{month:'short',day:'numeric'});
 document.getElementById('mat-date').value=toISO();
