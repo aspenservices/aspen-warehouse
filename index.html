@@ -3328,7 +3328,7 @@ body.dark-mode .mar-card-track {
       <div class="role-current"><span id="role-indicator">Admin</span></div>
     </div>
   </div>
-  <div class="sb-foot"><div class="sb-ver">v3.81 · <span id="live-date"></span></div></div>
+  <div class="sb-foot"><div class="sb-ver">v3.85 · <span id="live-date"></span></div></div>
 </nav>
 
 <!-- MAIN -->
@@ -4469,8 +4469,13 @@ async function fbSignIn(){
   }
 }
 async function fbSignOut(){
-  if(_fbAuth) await _fbAuth.signOut();
-  toast('Signed out', 'ok');
+  try {
+    if(_fbAuth) await _fbAuth.signOut();
+    toast('Signed out', 'ok');
+  } catch(e){
+    console.warn('[signOut]', e);
+    toast('Sign-out failed — try reloading', 'err');
+  }
 }
 
 // Push current localStorage state to Firebase (snapshot + latest + shared realtime)
@@ -4744,6 +4749,20 @@ function fbApplyRemoteState(restored, sourceTimestamp){
     } catch(e){
       console.warn('[remote apply] direct localStorage write failed:', e.message);
     }
+    // ── RUN INTEGRITY CHECKS AFTER CLOUD MERGE ──
+    // If the cloud state had inconsistencies (e.g. a marriage stuck on pending
+    // while its accessory was already in-transit), boot-time fixes wouldn't
+    // help — they ran before this snapshot arrived. Re-run them every time we
+    // accept a remote update so cloud-borne inconsistencies get repaired too.
+    // The function is idempotent — running it on already-clean data is a no-op.
+    try {
+      if(typeof runIntegrityChecks === 'function'){
+        const findings = runIntegrityChecks();
+        if(findings.length){
+          console.log('[post-merge] repaired', findings.length, 'inconsistency(ies):', findings.join('; '));
+        }
+      }
+    } catch(e){ console.warn('[remote apply] integrity check failed:', e); }
     // ── RERENDER WITHIN the flag-protected block ──
     // Render functions (updBadges, drawMap, renderFactory, etc.) call saveState
     // as a safety net. With _fbApplyingRemote=true, saveState early-returns —
@@ -4957,7 +4976,14 @@ async function openAdminUsersModal(){
 async function refreshAdminUsersList(){
   const wrap = document.getElementById('admin-users-list');
   if(!wrap) return;
-  const users = await fbListAuthorizedUsers();
+  let users;
+  try {
+    users = await fbListAuthorizedUsers();
+  } catch(e){
+    console.warn('[admin-users]', e);
+    wrap.innerHTML = `<div style="text-align:center;color:var(--red);font-size:12px;padding:32px">Could not load users — check your connection.</div>`;
+    return;
+  }
   if(!users.length){
     wrap.innerHTML = `<div style="text-align:center;color:var(--text3);font-size:12px;padding:32px">No authorized users yet. Add the first one above.</div>`;
     return;
@@ -5368,6 +5394,45 @@ Object.defineProperty(window, 'currentRole', { get(){ return currentRole; }, con
 // Admin behavior: admin is the only role allowed to view/edit ALL PINs. Other
 // roles can only change their own PIN (from Settings) after logging in.
 // ═══════════════════════════════════════════════════════════════════
+
+// ═══════════════════════════════════════════════════════════════════
+// DISPLAY HELPERS — single source of truth for how items are labeled
+// ───────────────────────────────────────────────────────────────────
+// Goal: NO render path should ever show "(no S/N)" for a real, recognizable
+// item. We pick the most informative identifier in this order:
+//   1. The item's own S/N (spas, units, dispatched, incoming)
+//   2. For married accessories: "🔗 for {marriedSn}" (the spa they ship with)
+//   3. For loose accessories: the dealer name
+//   4. For materials: the material name
+//   5. Last resort: "(no S/N)"
+//
+// displayItemId returns a STRING containing inline HTML — use it inside
+// template literals that already escape user input. Item names and S/Ns
+// are pre-escaped here.
+// ═══════════════════════════════════════════════════════════════════
+function displayItemId(item, opts){
+  if(!item) return '(unknown)';
+  const o = opts || {};
+  const sub = o.subFontSize || '12px';   // size of the "for" prefix
+  const esc = (s) => (typeof escapeHTML === 'function') ? escapeHTML(String(s)) : String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  // 1. Own S/N (spas + extras + any item with an explicit sn)
+  if(item.sn) return esc(item.sn);
+  // 2. Married accessory → spa S/N it travels with
+  const isAcc = item.type === 'accessory' || item.type === 'misc';
+  if(isAcc && item.marriedSn){
+    return `<span style="font-size:${sub};color:var(--text2);font-weight:600;letter-spacing:0">🔗 for</span> ${esc(item.marriedSn)}`;
+  }
+  // 3. Loose accessory → dealer name (no S/N to show)
+  if(isAcc && item.dealer) return esc(item.dealer);
+  // 4. Material → name
+  if(item.type === 'material' && item.dealer) return esc(item.dealer);
+  if(item.name && !item.sn) return esc(item.name);
+  // 5. Final fallback
+  return '(no S/N)';
+}
+// Expose so it can be called from inline onclick handlers and elsewhere.
+window.displayItemId = displayItemId;
+
 
 const DEFAULT_ROLE_PINS = {
   admin:     '2804',
@@ -6648,7 +6713,17 @@ let recTab = 'pending';     // pending|received
 const tl = t => ({hot:'Hot Tub',swim:'Swim Spa',extra:'Extra/Stock',misc:'Misc/Other',material:'Material',accessory:'Accessory'}[t]||t);
 const _esc_el = document.createElement('div');
 function escapeHTML(s){ if(s==null) return ''; _esc_el.textContent=String(s); return _esc_el.innerHTML; }
-const toISO = () => new Date().toISOString().slice(0,10);
+// Returns today's date in the user's LOCAL timezone as YYYY-MM-DD.
+// Previously used UTC which caused records logged after ~6pm Central Time to
+// show tomorrow's date (UTC was already past midnight). We pad to ensure
+// month/day always have leading zeros so the string sorts lexically.
+const toISO = () => {
+  const d = new Date();
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+};
 window.toISO = toISO;
 const fmtD = d => { try{ return new Date((d||toISO())+'T12:00:00').toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}); }catch{return d||'—';} };
 const typeColor = t => ({hot:'var(--accent)',swim:'var(--teal)',extra:'var(--purple)',misc:'var(--amber)',material:'var(--orange)',accessory:'var(--orange)'}[t]||'var(--text3)');
@@ -9656,7 +9731,7 @@ function renderIncoming(){
       <div style="display:flex;align-items:start;justify-content:space-between;gap:12px;flex-wrap:wrap">
         <div style="flex:1 1 auto;min-width:0">
           <div style="display:flex;align-items:baseline;gap:11px;flex-wrap:wrap;margin-bottom:4px">
-            <span style="font-size:24px;font-weight:800;font-family:ui-monospace,SFMono-Regular,monospace;letter-spacing:.02em">${it.sn||'(no S/N)'}</span>
+            <span style="font-size:24px;font-weight:800;font-family:ui-monospace,SFMono-Regular,monospace;letter-spacing:.02em">${displayItemId(it, {subFontSize:'14px'})}</span>
             ${statusBadge}
           </div>
           <div style="font-size:13px;color:var(--text2);line-height:1.4">
@@ -9819,7 +9894,9 @@ function openRejectModal({title, subtitle, onConfirm}){
 
 // Remove an incoming entry — also removes its queue twin
 function rmFromIncoming(id){
+  if(!canEdit()){ toast('View-only mode','err'); return; }
   if(!confirm('Remove this incoming entry?')) return;
+  snapshot('remove from incoming');
   const it = incoming.find(i => i.id === id);
   if(it){
     // Cleanup orphan pending covers + credit back paired cover
@@ -10459,13 +10536,7 @@ function openTrackingHistory(source, id){
     <div class="th-hd">
       <div>
         <div style="font-size:10px;letter-spacing:.1em;color:var(--text3);text-transform:uppercase;margin-bottom:6px;font-weight:700">Tracking History</div>
-        <div style="font-size:20px;font-weight:800;font-family:ui-monospace,monospace;letter-spacing:.01em">${typeIcon} ${
-          item.sn
-            ? item.sn
-            : (((item.type === 'accessory' || item.type === 'misc') && item.marriedSn)
-                ? `<span style="font-size:13px;color:var(--text2);font-weight:600">🔗 for</span> ${item.marriedSn}`
-                : '(no S/N)')
-        }</div>
+        <div style="font-size:20px;font-weight:800;font-family:ui-monospace,monospace;letter-spacing:.01em">${typeIcon} ${displayItemId(item, {subFontSize:'13px'})}</div>
         <div style="font-size:12px;color:var(--text2);margin-top:4px"><strong>${item.dealer||'—'}</strong> · ${typeLabel} · ${sourceLabel}</div>
         ${item.trackingId ? `<div style="font-size:10px;color:var(--text3);margin-top:4px;font-family:ui-monospace,monospace">TID: ${item.trackingId}</div>` : ''}
       </div>
@@ -10597,7 +10668,7 @@ function renderInTransit(){
         <line x1="14" y1="78" x2="86" y2="78" stroke="#94a3b8" stroke-width="1" stroke-dasharray="4,3"/>
         <text x="44" y="58" text-anchor="middle" font-size="8" font-weight="700" fill="#1e40af">EMPTY</text>
       </svg>
-      <div style="font-size:13px;font-weight:600;color:var(--text2);margin-bottom:4px">No spas in transit</div>
+      <div style="font-size:13px;font-weight:600;color:var(--text2);margin-bottom:4px">No items in transit</div>
       <div style="font-size:11px;color:var(--text3);max-width:340px;margin:0 auto;line-height:1.5">Items appear here when the Transit/Loader role scans a QR with "Scan to Load on Truck". Quiet road today!</div>
     </div>`;
     return;
@@ -10642,13 +10713,7 @@ function renderInTransit(){
       <div style="display:flex;align-items:start;justify-content:space-between;gap:12px;flex-wrap:wrap">
         <div style="flex:1 1 auto;min-width:0">
           <div style="display:flex;align-items:baseline;gap:11px;flex-wrap:wrap;margin-bottom:5px">
-            <span style="font-size:23px;font-weight:800;font-family:ui-monospace,SFMono-Regular,monospace;letter-spacing:.02em" title="${item.sn ? 'S/N '+item.sn : (item.marriedSn ? 'Accessory paired with spa S/N '+item.marriedSn : 'No serial number')}">${
-              item.sn
-                ? item.sn
-                : (((item.type === 'accessory' || item.type === 'misc') && item.marriedSn)
-                    ? `<span style="font-size:14px;color:var(--text2);font-weight:600;letter-spacing:0">🔗 for</span> ${item.marriedSn}`
-                    : '(no S/N)')
-            }</span>
+            <span style="font-size:23px;font-weight:800;font-family:ui-monospace,SFMono-Regular,monospace;letter-spacing:.02em" title="${item.sn ? 'S/N '+item.sn : (item.marriedSn ? 'Accessory paired with spa S/N '+item.marriedSn : 'No serial number')}">${displayItemId(item, {subFontSize:'14px'})}</span>
             <span style="background:${directionColor};color:#fff;padding:3px 11px;border-radius:11px;font-size:10px;font-weight:700;letter-spacing:.06em">${directionLabel}</span>
             ${stalledBadge}
           </div>
@@ -10781,13 +10846,31 @@ function renderTruck(){
     return lastTransit.at.startsWith(todayStr);
   });
 
-  // Subtitles
-  if(readySub) readySub.textContent = ready.length === 0
-    ? 'Nothing ready yet — Factory will mark spas ready'
-    : `${ready.length} spa${ready.length>1?'s':''} marked ready by Factory · waiting for truck pickup`;
-  if(loadedSub) loadedSub.textContent = loadedToday.length === 0
-    ? 'No scans today yet'
-    : `${loadedToday.length} spa${loadedToday.length>1?'s':''} loaded on truck today`;
+  // Subtitles — split by type for accuracy (a single accessory is NOT "1 spa")
+  if(readySub){
+    if(ready.length === 0){
+      readySub.textContent = 'Nothing ready yet — Factory will mark items ready';
+    } else {
+      const rs = ready.filter(f => f.type !== 'accessory' && f.type !== 'misc').length;
+      const ra = ready.length - rs;
+      const parts = [];
+      if(rs) parts.push(`${rs} spa${rs>1?'s':''}`);
+      if(ra) parts.push(`${ra} accessor${ra>1?'ies':'y'}`);
+      readySub.textContent = `${parts.join(' + ')} marked ready by Factory · waiting for truck pickup`;
+    }
+  }
+  if(loadedSub){
+    if(loadedToday.length === 0){
+      loadedSub.textContent = 'No scans today yet';
+    } else {
+      const ls = loadedToday.filter(f => f.type !== 'accessory' && f.type !== 'misc').length;
+      const la = loadedToday.length - ls;
+      const parts = [];
+      if(ls) parts.push(`${ls} spa${ls>1?'s':''}`);
+      if(la) parts.push(`${la} accessor${la>1?'ies':'y'}`);
+      loadedSub.textContent = `${parts.join(' + ')} loaded on truck today`;
+    }
+  }
 
   // Ready list — tap-friendly cards with prominent scan-load button per item
   if(ready.length === 0){
@@ -10825,18 +10908,22 @@ function renderTruck(){
 
   // Loaded today list — compact green confirmation cards
   if(loadedToday.length === 0){
-    loadedCards.innerHTML = `<div style="padding:24px 14px;text-align:center;color:var(--text3);font-size:12px">Once you scan a spa, it'll show up here.</div>`;
+    loadedCards.innerHTML = `<div style="padding:24px 14px;text-align:center;color:var(--text3);font-size:12px">Once you scan an item, it'll show up here.</div>`;
   } else {
     loadedCards.innerHTML = loadedToday.map(f => {
-      const typeIcon = {hot:'🛁', swim:'🏊', extra:'📦'}[f.type] || '📦';
-      const typeLabel = {hot:'Hot Tub', swim:'Swim Spa', extra:'Extra/Stock'}[f.type] || f.type;
+      const isAcc = f.type === 'accessory' || f.type === 'misc';
+      const typeIcon = isAcc ? '🔧' : ({hot:'🛁', swim:'🏊', extra:'📦'}[f.type] || '📦');
+      const typeLabel = isAcc ? 'Accessory' : ({hot:'Hot Tub', swim:'Swim Spa', extra:'Extra/Stock'}[f.type] || f.type);
       const lastTransit = (f.trackingHistory||[]).filter(h => h.state === 'in-transit').slice(-1)[0];
       const loadedAt = lastTransit ? fmtTrackingTime(lastTransit.at) : '—';
+      // Identifier: own S/N for spas, "for {marriedSn}" for married accessories,
+      // dealer name fallback for loose accessories so the row never reads "(no S/N)".
+      const idLabel = displayItemId(f, {subFontSize:'11px'});
       return `<div style="background:#ecfdf5;border:1px solid #6ee7b7;border-radius:9px;padding:10px 14px;margin:8px 14px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
         <span style="font-size:18px;color:#065f46">✓</span>
         <div style="flex:1 1 auto;min-width:0">
           <div style="display:flex;align-items:baseline;gap:8px;flex-wrap:wrap">
-            <span style="font-size:18px;font-weight:700;font-family:ui-monospace,monospace">${f.sn||'(no S/N)'}</span>
+            <span style="font-size:18px;font-weight:700;font-family:ui-monospace,monospace">${idLabel}</span>
             <span style="font-size:12px;color:var(--text2)">${typeIcon} ${f.dealer||'—'} · ${typeLabel}</span>
           </div>
           <div style="font-size:10.5px;color:#047857">Loaded ${loadedAt}</div>
@@ -11259,6 +11346,7 @@ function openMaterialEdit(id){
 }
 
 function saveMaterialEdit(id){
+  if(!canEdit()){ toast('View-only mode','err'); return; }
   const m = materials.find(x => x.id === id);
   if(!m){ toast('Material not found','err'); return; }
   const name = document.getElementById('mate-name').value.trim();
@@ -15124,35 +15212,81 @@ function handleQRPayload(raw, mode){
   // Marriage labels encode {type:"marriage", mid, sn, acc, dealer}. They don't
   // carry a tracking ID — instead they identify the marriage by its id. Resolve
   // the marriage → its linked factory accessory → let the normal flow handle it
-  // as if the operator had scanned the accessory's own tracking ID. This is the
-  // common Warehouse-receive case for the auto-printed marriage labels.
+  // as if the operator had scanned the accessory's own tracking ID.
+  //
+  // Robustness: even if marriage.accessoryId got stale (e.g. the accessory was
+  // recreated), we fall back to matching factory items by spaSn + accessoryName.
+  // The QR carries enough info to find the right factory accessory.
   let found = null;
   if(parsedType === 'marriage' && parsedMid != null){
     const m = marriages.find(x => x.id === parsedMid);
-    if(m){
-      const acc = factory.find(f => f.id === m.accessoryId);
-      if(acc){
-        found = { item: acc, source: 'factory' };
-        // Make sure downstream logging shows something useful even if the acc has no tid
-        if(!acc.trackingId) tid = `MID-${parsedMid}`;
-        else tid = acc.trackingId;
-      } else if(m.status === 'delivered' || m.status === 'completed'){
-        // Accessory already removed from factory[] (already received) — confirm + bail
-        setScanResult('ok', `for S/N ${m.spaSn}`, `marriage already ${m.status} — accessory previously received`);
-        toast(`Marriage for S/N ${m.spaSn} already ${m.status}`,'ok');
-        if(_qrScanState) _qrScanState.scanning = true;
-        return;
-      } else {
-        setScanResult('err', `for S/N ${m.spaSn}`, 'accessory not found in factory');
-        toast(`Accessory for marriage ${parsedMid} not in factory inventory`,'err');
+    const parsedSpaSn = parsedSn || (m && m.spaSn) || '';
+    const parsedAcc   = '';  // accessory name (parsed.acc) used only for matching below
+    let parsedAccName = '';
+    try { const p = JSON.parse(raw||''); if(p.acc) parsedAccName = String(p.acc); } catch(e){}
+
+    // Strategy 1: marriage.accessoryId (preferred — fast and exact)
+    let acc = m ? factory.find(f => f.id === m.accessoryId) : null;
+    // Strategy 2: factory accessory matched by marriedSn + dealer/name
+    // This catches cases where accessoryId got stale or the marriage record
+    // was rebuilt but the physical accessory still exists in factory.
+    if(!acc && parsedSpaSn){
+      acc = factory.find(f =>
+        (f.type === 'accessory' || f.type === 'misc') &&
+        String(f.marriedSn) === String(parsedSpaSn) &&
+        (!parsedAccName || (f.dealer||'').toLowerCase().includes(parsedAccName.toLowerCase()) || parsedAccName.toLowerCase().includes((f.dealer||'').toLowerCase()))
+      );
+    }
+    // Strategy 3: any accessory married to this spa, regardless of name match
+    if(!acc && parsedSpaSn){
+      acc = factory.find(f =>
+        (f.type === 'accessory' || f.type === 'misc') &&
+        String(f.marriedSn) === String(parsedSpaSn)
+      );
+    }
+
+    if(acc){
+      found = { item: acc, source: 'factory' };
+      tid = acc.trackingId || `MID-${parsedMid}`;
+    } else if(m && (m.status === 'delivered' || m.status === 'completed')){
+      // No factory accessory found, but the marriage already says delivered.
+      // Most likely the accessory was already received and moved out of factory[].
+      setScanResult('ok', `for S/N ${m.spaSn}`, `marriage already ${m.status} — accessory previously received`);
+      toast(`Marriage for S/N ${m.spaSn} already ${m.status}`,'ok');
+      if(_qrScanState) _qrScanState.scanning = true;
+      return;
+    } else if(m){
+      // Marriage exists, pending, but accessory is gone — inconsistent state.
+      // Mark the marriage as delivered anyway so the operator can move on.
+      snapshot('marriage receive (no factory record)');
+      m.status = 'delivered';
+      m.deliveredDate = toISO();
+      addAct(`📬 Marriage delivered (no factory record found): ${m.accessoryName} for S/N ${m.spaSn}`,'var(--teal)');
+      setScanResult('ok', `for S/N ${m.spaSn}`, 'marriage marked delivered (accessory was not in factory)');
+      toast(`Marriage delivered for S/N ${m.spaSn}`,'ok');
+      if(typeof renderMarriages === 'function') renderMarriages();
+      updBadges();
+      if(_qrScanState) _qrScanState.scanning = true;
+      return;
+    } else {
+      // Marriage id doesn't exist locally — likely the local data is stale.
+      // Even so, try to find the accessory by sn alone as a last resort.
+      if(parsedSpaSn){
+        const fallbackAcc = factory.find(f =>
+          (f.type === 'accessory' || f.type === 'misc') &&
+          String(f.marriedSn) === String(parsedSpaSn)
+        );
+        if(fallbackAcc){
+          found = { item: fallbackAcc, source: 'factory' };
+          tid = fallbackAcc.trackingId || `MID-${parsedMid}`;
+        }
+      }
+      if(!found){
+        setScanResult('err', `marriage ${parsedMid}`, 'marriage record not in local data — try syncing');
+        toast(`Marriage ${parsedMid} not found — wait for sync or refresh`,'err');
         if(_qrScanState) _qrScanState.scanning = true;
         return;
       }
-    } else {
-      setScanResult('err', `marriage ${parsedMid}`, 'marriage record not found');
-      toast(`Marriage ${parsedMid} not in system`,'err');
-      if(_qrScanState) _qrScanState.scanning = true;
-      return;
     }
   }
 
@@ -15540,12 +15674,15 @@ function shipFromFactory(id){
 }
 
 function rmFromFactory(id){
+  if(!canEdit()){ toast('View-only mode','err'); return; }
   const f = factory.find(x=>x.id===id); if(!f) return;
   if(!confirm(`Remove "${f.sn||f.dealer}" from factory?`)) return;
   snapshot('remove from factory');
   // Also remove orphaned marriages
+  const wasMarried = marriages.some(m => m.accessoryId === id && m.status === 'pending');
   marriages = marriages.filter(m => !(m.accessoryId === id && m.status === 'pending'));
   factory = factory.filter(x => x.id !== id);
+  addAct(`🗑 Removed from factory: ${f.sn||f.dealer}${wasMarried ? ' (+ orphaned marriages)' : ''}`, 'var(--red)');
   toast('Removed','ok');
   renderFactory(); renderMarriages(); updBadges(); drawMap();
 }
@@ -16070,6 +16207,7 @@ function addMarriage(){
 }
 
 function rmMarriage(mid){
+  if(!canEdit()){ toast('View-only mode','err'); return; }
   const m = marriages.find(x => x.id === mid); if(!m) return;
   if(!confirm(`Remove this marriage?\n\nSpa: S/N ${m.spaSn}\nAccessory: ${m.accessoryName}\n\nThe accessory will remain in the factory list (unmarried).`)) return;
   snapshot('remove marriage');
@@ -16077,6 +16215,7 @@ function rmMarriage(mid){
   const acc = factory.find(f => f.id === m.accessoryId);
   if(acc) acc.marriedSn = null;
   marriages = marriages.filter(x => x.id !== mid);
+  addAct(`🗑 Marriage removed: ${m.accessoryName} ↔ S/N ${m.spaSn}`, 'var(--red)');
   toast('Marriage removed','ok');
   renderMarriages(); renderFactory(); drawMap(); updBadges();
 }
@@ -16768,10 +16907,12 @@ function adjustCoverQty(id, delta){
 }
 
 function rmCover(id){
+  if(!canEdit()){ toast('View-only mode','err'); return; }
   const c = coverInventory.find(x => x.id === id); if(!c) return;
   if(!confirm(`Remove "${c.color}" from cover inventory?\n\nCurrent qty: ${c.qty}\n\nThis only removes the inventory row — any spas already assigned this cover keep their record.`)) return;
   snapshot('remove cover row');
   coverInventory = coverInventory.filter(x => x.id !== id);
+  addAct(`🗑 Removed cover row: ${c.color}${c.model?' ('+c.model+')':''} — was qty ${c.qty}`, 'var(--red)');
   toast('Cover row removed','ok');
   renderCoverInventory(); updBadges();
 }
@@ -18202,52 +18343,163 @@ loadState();
 migrateUnitsToStacks();   // assign stack/level to legacy units
 // Ensure all roles have a PIN entry — must run after loadState so cfg exists
 try { ensureRolePinsInitialized(); } catch(e){ console.warn('[pins]', e); }
-// One-shot migration: any marriage that is still "pending" but whose linked
-// factory accessory is already in-transit or received-at-wh should auto-flip
-// to "delivered". This fixes data left over from versions before the
-// centralized syncMarriageOnAccessoryTransit hook existed.
-try {
-  let fixedCount = 0;
-  marriages.forEach(m => {
-    if(m.status !== 'pending' || !m.accessoryId) return;
-    const acc = factory.find(f => f.id === m.accessoryId);
-    if(acc && (acc.trackingState === 'in-transit' || acc.trackingState === 'received-at-wh' || acc.trackingState === 'received-at-warehouse')){
-      m.status = 'delivered';
-      m.deliveredDate = m.deliveredDate || toISO();
-      fixedCount++;
-    } else if(!acc){
-      // The factory accessory was already consumed (e.g. received) but marriage
-      // was never updated. If the marriage has any tracking signal (delivery
-      // date in trackingHistory), use that; otherwise assume delivered now.
-      m.status = 'delivered';
-      m.deliveredDate = m.deliveredDate || toISO();
-      fixedCount++;
-    }
-  });
-  if(fixedCount > 0){
-    console.log(`[migration] Auto-fixed ${fixedCount} marriage(s) stuck on pending while accessory was in-transit`);
-  }
-} catch(e){ console.warn('[marriage migration]', e); }
+// ═══════════════════════════════════════════════════════════════════
+// DATA INTEGRITY CHECKS — repair inconsistent state
+// ───────────────────────────────────────────────────────────────────
+// Each check is independent (wrapped in try/catch) so a failure in one
+// can't block the rest. Called from boot AND from fbApplyRemoteState
+// (so cloud-borne inconsistencies get repaired too).
+//
+// Returns the array of human-readable findings strings.
+// ═══════════════════════════════════════════════════════════════════
+function runIntegrityChecks(){
+  const findings = [];
 
-// One-shot migration: clean up orphan material-units left on the floor map
-// from versions where rmMaterial didn't remove the linked unit. A unit is
-// orphan if its type === 'material' AND its linkedMatId points to a material
-// that no longer exists in materials[]. These show up as ghost cells on the
-// floor map (e.g. a "kdslfbkabsd · MATERIAL" cell that's already been
-// deleted from the Materials view).
-try {
-  const before = units.length;
-  units = units.filter(u => {
-    if(u.type !== 'material') return true;        // not a material — keep
-    if(!u.linkedMatId) return true;               // legacy material-unit with no link — keep
-    const exists = materials.some(m => m.id === u.linkedMatId);
-    return exists;                                 // keep only if the material still exists
-  });
-  const cleaned = before - units.length;
-  if(cleaned > 0){
-    console.log(`[migration] Removed ${cleaned} orphan material-unit(s) from the floor map`);
-  }
-} catch(e){ console.warn('[orphan unit migration]', e); }
+  // ─── Check 1: Marriages stuck on 'pending' while accessory is in-transit/received ───
+  try {
+    let fixed = 0;
+    marriages.forEach(m => {
+      if(m.status !== 'pending' || !m.accessoryId) return;
+      const acc = factory.find(f => f.id === m.accessoryId);
+      if(acc && (acc.trackingState === 'in-transit' || acc.trackingState === 'received-at-wh' || acc.trackingState === 'received-at-warehouse')){
+        m.status = 'delivered';
+        m.deliveredDate = m.deliveredDate || toISO();
+        fixed++;
+      } else if(!acc){
+        // Factory accessory gone — assume already received and update marriage
+        m.status = 'delivered';
+        m.deliveredDate = m.deliveredDate || toISO();
+        fixed++;
+      }
+    });
+    if(fixed > 0) findings.push(`Auto-flipped ${fixed} marriage(s) from pending → delivered (accessory already in transit or received)`);
+  } catch(e){ console.warn('[check 1]', e); }
+
+  // ─── Check 2: Orphan material-units on floor map ───
+  try {
+    const before = units.length;
+    units = units.filter(u => {
+      if(u.type !== 'material') return true;
+      if(!u.linkedMatId) return true;
+      return materials.some(m => m.id === u.linkedMatId);
+    });
+    const cleaned = before - units.length;
+    if(cleaned > 0) findings.push(`Removed ${cleaned} orphan material-unit(s) from the floor map`);
+  } catch(e){ console.warn('[check 2]', e); }
+
+  // ─── Check 3: Materials with linkedUnitId pointing nowhere ───
+  try {
+    let cleaned = 0;
+    materials.forEach(m => {
+      if(m.linkedUnitId && !units.some(u => u.id === m.linkedUnitId)){
+        delete m.linkedUnitId;
+        cleaned++;
+      }
+    });
+    if(cleaned > 0) findings.push(`Cleared ${cleaned} stale linkedUnitId reference(s) on materials`);
+  } catch(e){ console.warn('[check 3]', e); }
+
+  // ─── Check 4: Factory items without a trackingState ───
+  try {
+    let fixed = 0;
+    factory.forEach(f => {
+      if(!f.trackingState){
+        f.trackingState = 'created';
+        fixed++;
+      }
+    });
+    if(fixed > 0) findings.push(`Set default trackingState='created' on ${fixed} factory item(s) that were missing it`);
+  } catch(e){ console.warn('[check 4]', e); }
+
+  // ─── Check 5: Duplicate IDs across critical arrays + advance nid ───
+  try {
+    const seen = new Map();
+    const dupes = [];
+    const check = (arr, name) => arr.forEach(item => {
+      if(!item || item.id == null) return;
+      const k = `${name}:${item.id}`;
+      if(seen.has(k)) dupes.push(`${name} duplicate id ${item.id}`);
+      seen.set(k, true);
+    });
+    check(factory, 'factory');
+    check(units, 'units');
+    check(dispatched, 'dispatched');
+    check(incoming, 'incoming');
+    check(materials, 'materials');
+    check(marriages, 'marriages');
+    if(dupes.length) findings.push(`⚠ Duplicate IDs detected (manual review needed): ${dupes.slice(0, 5).join(', ')}${dupes.length > 5 ? ' …':''}`);
+    // Advance nid past the highest seen id so new items get fresh IDs
+    let maxId = 0;
+    [factory, units, dispatched, incoming, materials, marriages].forEach(arr => arr.forEach(x => { if(x && typeof x.id === 'number' && x.id > maxId) maxId = x.id; }));
+    if(maxId >= nid){
+      nid = maxId + 1;
+      findings.push(`Advanced nid counter to ${nid} (past highest seen id ${maxId})`);
+    }
+  } catch(e){ console.warn('[check 5]', e); }
+
+  // ─── Check 6: Stale activity log entries (>3 months old) ───
+  try {
+    if(Array.isArray(activity) && activity.length > 500){
+      const threshold = Date.now() - (90 * 24 * 60 * 60 * 1000);
+      const before = activity.length;
+      activity = activity.filter(a => {
+        const t = a.at ? new Date(a.at).getTime() : 0;
+        return t === 0 || t >= threshold;
+      });
+      const trimmed = before - activity.length;
+      if(trimmed > 0) findings.push(`Trimmed ${trimmed} activity log entries older than 90 days (kept ${activity.length})`);
+    }
+  } catch(e){ console.warn('[check 6]', e); }
+
+  // ─── Check 7: Factory in-transit items missing tracking history ───
+  try {
+    let fixed = 0;
+    factory.forEach(f => {
+      if(f.trackingState !== 'in-transit') return;
+      f.trackingHistory = f.trackingHistory || [];
+      const hasTransit = f.trackingHistory.some(h => h.state === 'in-transit');
+      if(!hasTransit){
+        f.trackingHistory.push({state:'in-transit', at: toISO(), by:'system', note:'Backfilled by integrity check'});
+        fixed++;
+      }
+    });
+    if(fixed > 0) findings.push(`Backfilled missing trackingHistory on ${fixed} in-transit item(s)`);
+  } catch(e){ console.warn('[check 7]', e); }
+
+  // ─── Check 8: cfg.rolePasswordsUpdatedAt object must exist ───
+  try {
+    if(!cfg.rolePasswordsUpdatedAt || typeof cfg.rolePasswordsUpdatedAt !== 'object'){
+      cfg.rolePasswordsUpdatedAt = {};
+      findings.push(`Initialized cfg.rolePasswordsUpdatedAt (was missing)`);
+    }
+  } catch(e){ console.warn('[check 8]', e); }
+
+  // ─── Check 9: Marriages with no spaSn (truly orphaned) ───
+  try {
+    const before = marriages.length;
+    marriages = marriages.filter(m => m && m.spaSn);
+    const dropped = before - marriages.length;
+    if(dropped > 0) findings.push(`Dropped ${dropped} marriage record(s) with no spa S/N (truly orphaned)`);
+  } catch(e){ console.warn('[check 9]', e); }
+
+  return findings;
+}
+window.runIntegrityChecks = runIntegrityChecks;
+
+// Run at boot — repairs anything inconsistent in the loaded state
+const _bootFindings = runIntegrityChecks();
+if(_bootFindings.length){
+  console.log('═══ BOOT INTEGRITY CHECKS ═══');
+  _bootFindings.forEach(f => console.log(' •', f));
+  console.log('══════════════════════════════');
+  try {
+    if(typeof addAct === 'function'){
+      addAct(`🔧 Boot integrity check: ${_bootFindings.length} item${_bootFindings.length>1?'s':''} repaired`, 'var(--text3)');
+    }
+  } catch(e){}
+} else {
+  console.log('[boot] integrity checks passed — no issues found');
+}
 
 saveState();              // persist migration result
 document.getElementById('live-date').textContent=new Date().toLocaleDateString('en-US',{month:'short',day:'numeric'});
