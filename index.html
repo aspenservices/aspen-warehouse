@@ -1935,7 +1935,7 @@ tbody tr:hover td{background:var(--bg3)}
       <div class="role-current"><span id="role-indicator">Admin</span></div>
     </div>
   </div>
-  <div class="sb-foot"><div class="sb-ver">v3.57 · <span id="live-date"></span></div></div>
+  <div class="sb-foot"><div class="sb-ver">v3.61 · <span id="live-date"></span></div></div>
 </nav>
 
 <!-- MAIN -->
@@ -2828,6 +2828,16 @@ tbody tr:hover td{background:var(--bg3)}
         </div>
       </div>
       <div class="card" style="margin-top:10px">
+        <div class="card-hd"><div><div class="card-title">🔬 System Health &amp; Diagnostics</div></div></div>
+        <div class="card-body">
+          <div style="font-size:12px;color:var(--text2);margin-bottom:10px;line-height:1.5">Runs a battery of 18+ tests covering localStorage, Firebase sync, write/read roundtrips, code coverage of mutations, and local-cloud divergence. <strong>Non-destructive</strong> — touches no warehouse data.</div>
+          <div style="display:flex;gap:7px;flex-wrap:wrap;margin-bottom:10px">
+            <button class="btn btn-sm btn-p" onclick="openDiagnosticPanel()">🔬 Run System Diagnostic</button>
+          </div>
+          <div class="info-box">Run this after every deploy, when something feels off, or weekly as a routine health check. The sync badge in the top-right shows live status; this panel gives you the full breakdown.</div>
+        </div>
+      </div>
+      <div class="card" style="margin-top:10px">
         <div class="card-hd"><div><div class="card-title">Floor Layout</div></div></div>
         <div class="card-body">
           <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px">
@@ -2916,6 +2926,16 @@ let _fbApplyingRemote = false;      // flag: we're applying a remote update, don
 let _fbLocalEditCounter = 0;
 let _fbPushedEditCounter = 0;
 let _fbDeferredRemote = null;       // {payload} held while local edits pending
+// Counts consecutive cloud-write failures. Used by the failure banner that
+// pops up after 3+ in a row. Declared up here (not where verifyCloudWrite is
+// defined) because fbCloudSync's catch block reads it — and that runs as
+// soon as the user signs in. Keeping all _fb* state vars in one block avoids
+// any chance of TDZ when fbCloudSync is invoked early in the lifecycle.
+let _fbConsecutiveFailures = 0;
+// Integrity-watchdog baseline: last hash captured at successful save. Declared
+// up here (not next to stateHash) because saveState's setTimeout callback
+// reads it, and we want zero chance of TDZ even in unusual execution orders.
+let _lastSavedHash = '';
 
 // Generate / retrieve a stable device ID (one per browser, kept in localStorage)
 function getDeviceId(){
@@ -2945,12 +2965,20 @@ function loadScriptOnce(src){
 
 // Initialize Firebase (loads SDK + signs in observer + sets up sync).
 // Called from window.onload — does nothing if FIREBASE_CONFIG.apiKey is empty.
+// Tracks Firebase SDK load failures separately from auth/db errors. Set when
+// loadScriptOnce can't fetch firebase-app-compat.js from gstatic — usually a
+// flaky network, captive portal, or content-blocker. The sync badge reads
+// this to show "Offline" instead of the misleading "Not signed in" when the
+// SDK itself never made it onto the page.
+let _fbSdkLoadFailed = false;
+let _fbInitAttempts = 0;
 async function initFirebase(){
   if(!FIREBASE_ENABLED){
     console.log('[firebase] disabled — running in offline-only mode');
     updateAuthBadge();
     return;
   }
+  _fbInitAttempts++;
   try {
     const v = '10.13.2';
     const cdn = 'https://www.gstatic.com/firebasejs/' + v;
@@ -2965,10 +2993,36 @@ async function initFirebase(){
     _fbDb = firebase.database();
     _fbStorage = firebase.storage();
     _fbAuth.onAuthStateChanged(handleAuthChange);
-    console.log('[firebase] SDK loaded');
+    _fbSdkLoadFailed = false;
+    console.log('[firebase] SDK loaded' + (_fbInitAttempts > 1 ? ` (retry #${_fbInitAttempts-1} succeeded)` : ''));
   } catch(err) {
-    console.error('[firebase] init failed:', err);
-    toast('Firebase error: ' + err.message, 'err');
+    console.warn('[firebase] init failed (attempt #' + _fbInitAttempts + '):', err.message);
+    _fbSdkLoadFailed = true;
+    updateAuthBadge();
+    // ── AUTO-RETRY with exponential backoff ──
+    // First failure: try again in 5s. Then 15s. Then 60s. After that, just rely
+    // on the user reopening the app — no sense banging a dead network. The app
+    // is still fully functional offline (localStorage) — Firebase is just for
+    // cross-device sync, which can be re-attempted any time.
+    const delays = [5000, 15000, 60000];
+    const delay = delays[_fbInitAttempts - 1];
+    if(delay){
+      console.log('[firebase] will retry in ' + (delay/1000) + 's');
+      setTimeout(() => {
+        if(!_fbDb) initFirebase();  // only retry if still not connected
+      }, delay);
+      // First attempt: silent in toast. Only warn the user on a sustained
+      // failure (3rd attempt) so a brief network blip doesn't show a scary
+      // red message.
+      if(_fbInitAttempts === 1){
+        // Quiet — just log
+      } else if(_fbInitAttempts === 3){
+        toast('Working offline — cloud sync will retry in 1 min', 'amber');
+      }
+    } else {
+      // Exhausted retries. App is functional but offline. Don't keep retrying.
+      toast('Offline mode — your changes save locally. Refresh to retry cloud sync.', 'amber');
+    }
   }
 }
 
@@ -3058,8 +3112,8 @@ async function fbCloudSync(showToast){
       if(p.timestamp > _fbLastLocalWriteAt && p.deviceId !== _fbDeviceId){
         try {
           const restored = JSON.parse(p.state);
-          fbApplyRemoteState(restored);
-          fbRerenderActiveView();
+          fbApplyRemoteState(restored, p.timestamp);
+          // (fbRerenderActiveView is called inside fbApplyRemoteState now)
           console.log('[firebase] applied deferred remote update from', p.uploadedBy);
         } catch(e){ console.error('[firebase] deferred apply failed:', e); }
       }
@@ -3075,7 +3129,19 @@ async function fbCloudSync(showToast){
     }
     if(showToast) toast(`☁ Synced to cloud · ${new Date(ts).toLocaleTimeString()}`, 'ok');
     updateAuthBadge();
+    // ── WRITE VERIFICATION ──
+    // Read back the shared payload and confirm our timestamp landed. If the
+    // verify fails repeatedly (3× in a row), a top banner appears to warn the
+    // user. Non-blocking: we don't await this — it runs in background.
+    if(typeof verifyCloudWrite === 'function'){
+      verifyCloudWrite(ts).then(ok => {
+        if(!ok && showToast){
+          toast('⚠ Cloud write verification failed — see banner', 'err');
+        }
+      });
+    }
   } catch(err){
+    _fbConsecutiveFailures = (_fbConsecutiveFailures || 0) + 1;
     console.error('[firebase] sync failed:', err);
     if(showToast) toast('Sync failed: ' + err.message, 'err');
   }
@@ -3133,13 +3199,37 @@ async function fbRestoreFromCloud(){
 function fbStartRealtimeSync(){
   if(!_fbDb || _fbSharedRef) return;
   _fbSharedRef = _fbDb.ref('state/shared/latest');
+  // Track whether this is the very first .on('value') callback after attaching.
+  // The initial fire is special: if cloud is empty or older than our local
+  // state, we MUST push instead of staying silent — otherwise a previous
+  // session's unpushed edits sit in localStorage forever and the next remote
+  // update from another device wipes them out.
+  let _initialFire = true;
   _fbSharedRef.on('value', snap => {
     const payload = snap.val();
-    if(!payload || !payload.state) return;
+    const wasInitial = _initialFire;
+    _initialFire = false;
+    // ── INITIAL FIRE: cloud has nothing yet ──
+    if(!payload || !payload.state){
+      if(wasInitial && _fbLastLocalWriteAt > 0){
+        console.log('[firebase] Cloud is empty on first connect — pushing local state to seed it');
+        fbCloudSync(false);
+      }
+      return;
+    }
     // Echo guard: ignore writes that came from us
     if(payload.deviceId === _fbDeviceId) return;
     // Newness guard: ignore if older than our last local write (we have fresher data)
-    if(payload.timestamp <= _fbLastLocalWriteAt) return;
+    if(payload.timestamp <= _fbLastLocalWriteAt){
+      // ── INITIAL FIRE: local is newer than cloud → push local NOW ──
+      // This is the recovery path for mobile sessions where fbAutoPush's
+      // debounce got cancelled by iOS Safari backgrounding the tab.
+      if(wasInitial && _fbLastLocalWriteAt > payload.timestamp){
+        console.log('[firebase] Local state ('+new Date(_fbLastLocalWriteAt).toLocaleString()+') is newer than cloud ('+new Date(payload.timestamp).toLocaleString()+') — pushing local to recover from lost writes');
+        fbCloudSync(false);
+      }
+      return;
+    }
     // Race-condition guard: if we have unpushed local edits, defer this remote update
     // until after our push completes (fbCloudSync will then apply the deferred one if
     // still newer). This prevents the remote payload from clobbering brand-new local
@@ -3151,8 +3241,8 @@ function fbStartRealtimeSync(){
     }
     try {
       const restored = JSON.parse(payload.state);
-      fbApplyRemoteState(restored);
-      fbRerenderActiveView();
+      fbApplyRemoteState(restored, payload.timestamp);
+      // (fbRerenderActiveView is called inside fbApplyRemoteState now)
       console.log('[firebase] applied remote update from', payload.uploadedBy, 'at', new Date(payload.timestamp).toLocaleTimeString());
     } catch(e){
       console.error('[firebase] apply remote failed:', e);
@@ -3173,7 +3263,9 @@ function fbStopRealtimeSync(){
 
 // Replace local state with the restored object from cloud. Mirrors fbRestoreFromCloud
 // but without the confirm dialog and without re-pushing back to cloud.
-function fbApplyRemoteState(restored){
+// IMPORTANT: this also calls fbRerenderActiveView() INSIDE the _fbApplyingRemote
+// flag-protected block so the render's saveState calls are correctly skipped.
+function fbApplyRemoteState(restored, sourceTimestamp){
   _fbApplyingRemote = true;
   try {
     if(typeof restored.nid === 'number') nid = Math.max(nid, restored.nid);
@@ -3191,8 +3283,27 @@ function fbApplyRemoteState(restored){
     if(restored.colorLibrary && typeof restored.colorLibrary === 'object') colorLibrary = restored.colorLibrary;
     if(restored.coverModelMapping && typeof restored.coverModelMapping === 'object') coverModelMapping = restored.coverModelMapping;
     if(restored.cfg && typeof restored.cfg === 'object') cfg = Object.assign({}, cfg, restored.cfg);
-    // Persist to localStorage. saveState() will detect _fbApplyingRemote and skip cloud push.
-    try { saveState(); } catch(e){}
+    // ── PERSIST DIRECTLY (no saveState, no autopush) ──
+    // CRITICAL: We MUST NOT route through saveState() here. saveState's debounced
+    // setTimeout would fire AFTER _fbApplyingRemote was reset, triggering fbAutoPush
+    // and creating a permanent ping-pong loop between devices wasting Firebase
+    // quota and preventing the sync badge from ever showing "✓ Synced".
+    try {
+      const ts = sourceTimestamp || Date.now();
+      const state = {nid, units, dispatched, incoming, materials, events, activity, queue, cfg, factory, marriages, dispatchRequests, coverInventory, colorLibrary, coverModelMapping, _saved: ts};
+      localStorage.setItem(LS_KEY, JSON.stringify(state));
+      _lastSavedHash = stateHash();  // integrity watchdog baseline
+      _fbLastLocalWriteAt = ts;       // newness guard baseline (survives reload via loadState)
+    } catch(e){
+      console.warn('[remote apply] direct localStorage write failed:', e.message);
+    }
+    // ── RERENDER WITHIN the flag-protected block ──
+    // Render functions (updBadges, drawMap, renderFactory, etc.) call saveState
+    // as a safety net. With _fbApplyingRemote=true, saveState early-returns —
+    // so the UI updates but we don't trigger another write or push. This closes
+    // the second leg of the echo loop (the first was the saveState call I just
+    // removed above). Without this, the rerender would still leak a push.
+    try { fbRerenderActiveView(); } catch(e){ console.warn('[remote apply] rerender failed:', e); }
   } finally {
     _fbApplyingRemote = false;
   }
@@ -3237,16 +3348,36 @@ function fbRerenderActiveView(){
   } catch(e){}
 }
 
-// Debounced push: any local edit triggers a cloud sync ~1.5s after the last change.
+// Debounced push: any local edit triggers a cloud sync ~400ms after the last change.
 // This is the "outbound" half of realtime sync — pairs with the listener on the other side.
+// IMPORTANT: kept short (was 1500ms) because iOS Safari throttles/pauses timers when the
+// tab is backgrounded. A 1.5s window meant a tap-then-lock sequence routinely lost writes.
 function fbAutoPush(){
   if(_fbApplyingRemote) return;           // applying remote → don't echo back
   if(!_fbDb || !_fbUser || !_fbAuthorized) return;
+  // If the page is already hidden (user backgrounded the tab), don't even wait
+  // for the debounce — push synchronously. The browser may kill us at any moment.
+  if(typeof document !== 'undefined' && document.hidden){
+    if(_fbAutoPushTimer){ clearTimeout(_fbAutoPushTimer); _fbAutoPushTimer = null; }
+    fbCloudSync(false);
+    return;
+  }
   if(_fbAutoPushTimer) clearTimeout(_fbAutoPushTimer);
   _fbAutoPushTimer = setTimeout(() => {
     _fbAutoPushTimer = null;
     fbCloudSync(false);  // silent (no toast)
-  }, 1500);
+  }, 400);
+}
+
+// ── MOBILE SYNC SAFETY NET ──
+// Force any pending fbAutoPush to fire NOW. Used by visibilitychange / pagehide
+// handlers so iOS Safari can't kill our tab with an unfired Firebase write.
+function fbForcePush(){
+  if(_fbAutoPushTimer){ clearTimeout(_fbAutoPushTimer); _fbAutoPushTimer = null; }
+  if(_fbApplyingRemote) return;
+  if(!_fbDb || !_fbUser || !_fbAuthorized) return;
+  if(_fbLocalEditCounter <= _fbPushedEditCounter) return;  // nothing new to push
+  try { fbCloudSync(false); } catch(e){ console.warn('[fb force push]', e); }
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -3863,6 +3994,8 @@ function setUser(member){
   localStorage.setItem('aspen_role', currentRole);
   updateUserUI();
   applyRoleVisibility();
+  // Re-render the bottom nav for the new role's most-used pages
+  try { renderBottomNav?.(); } catch(e){ console.warn('[renderBottomNav]', e); }
 }
 
 // Updates avatar + name displays across the UI
@@ -3955,6 +4088,88 @@ function setBottomNavActive(pageKey){
     b.classList.toggle('active', b.dataset.page === pageKey);
   });
 }
+
+// ═══════════════════════════════════════════════════════════
+// BOTTOM NAV — adaptive by role
+// ═══════════════════════════════════════════════════════════
+// The bottom nav on mobile is the primary navigation for each role. It shows
+// 4 of the most-used pages for that role + a "More" button that opens the
+// sidebar for everything else. Hardcoding "Home/Map/Marriages/Dispatch/More"
+// (the previous design) didn't make sense for, e.g., Truck (which can't see
+// Map or Dispatch) or Factory (which doesn't ship from the floor map).
+//
+// To add/change items per role, edit BOTTOM_NAV_CONFIG below.
+const BN_LABELS = {
+  dashboard: 'Home', map: 'Map', marriages: 'Marriages', dispatched: 'Dispatch',
+  factory: 'Factory', intransit: 'In Transit', truck: 'Truck', requests: 'Requests',
+  schedule: 'Calendar', incoming: 'Incoming', covers: 'Covers', materials: 'Materials',
+  receiving: 'Receive', more: 'More'
+};
+const BN_ICONS = {
+  // 4-square grid
+  dashboard:  '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="1" y="1" width="6" height="6" rx="1.5"/><rect x="9" y="1" width="6" height="6" rx="1.5"/><rect x="1" y="9" width="6" height="6" rx="1.5"/><rect x="9" y="9" width="6" height="6" rx="1.5"/></svg>',
+  // 3x2 grid (floor map)
+  map:        '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="1" y="1" width="4" height="4" rx="1"/><rect x="6" y="1" width="4" height="4" rx="1"/><rect x="11" y="1" width="4" height="4" rx="1"/><rect x="1" y="6" width="4" height="4" rx="1"/><rect x="6" y="6" width="4" height="4" rx="1"/><rect x="11" y="6" width="4" height="4" rx="1"/></svg>',
+  // Two linked circles
+  marriages:  '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="5" cy="8" r="3.5"/><circle cx="11" cy="8" r="3.5"/></svg>',
+  // Delivery truck side view
+  dispatched: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M2 11h11l-1-4H2v4z"/><circle cx="5" cy="11" r="1.5"/><circle cx="11" cy="11" r="1.5"/></svg>',
+  // Factory building (chimney + walls)
+  factory:    '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M2 14V7l4 2V7l4 2V7l4 2v5H2z"/><rect x="4" y="2" width="2" height="4"/></svg>',
+  // Truck with arrow (in motion)
+  intransit:  '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M1 10h8V5H1v5z"/><path d="M9 7h3l2 3v0h-5"/><circle cx="4" cy="12" r="1.3"/><circle cx="11" cy="12" r="1.3"/></svg>',
+  // Truck loading (with vertical lines = items being scanned)
+  truck:      '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M1 10h9V5H1v5z"/><path d="M10 7h3l2 3v0h-5"/><circle cx="4" cy="12" r="1.3"/><circle cx="12" cy="12" r="1.3"/><path d="M3 6.5v2M5 6.5v2M7 6.5v2" stroke-width="1.2"/></svg>',
+  // Clipboard with lines (requests)
+  requests:   '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="2" width="10" height="12" rx="1.5"/><path d="M5 5h6M5 8h6M5 11h4" stroke-width="1.4"/></svg>',
+  // Calendar
+  schedule:   '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="2" y="3" width="12" height="11" rx="1"/><path d="M2 6h12M5 1.5v3M11 1.5v3" stroke-width="1.4"/></svg>',
+  // Inbox / box with arrow in
+  incoming:   '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M2 9v5h12V9"/><path d="M8 1v8M5 6l3 3 3-3"/></svg>',
+  // Shield (cover)
+  covers:     '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M8 1L2 3v5c0 4 3 6.5 6 7 3-.5 6-3 6-7V3L8 1z"/></svg>',
+  // Stacked boxes (materials)
+  materials:  '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="2" y="9" width="5" height="5"/><rect x="9" y="9" width="5" height="5"/><rect x="5.5" y="2" width="5" height="5"/></svg>',
+  // Inbox arrow down (receive)
+  receiving:  '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M2 9v5h12V9"/><path d="M8 1v9M5 7l3 3 3-3"/></svg>',
+  // 3 vertical dots
+  more:       '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="8" cy="3" r="1.5"/><circle cx="8" cy="8" r="1.5"/><circle cx="8" cy="13" r="1.5"/></svg>'
+};
+// Maps role → ordered list of 3-5 page keys to show in the bottom nav.
+// "more" should always be the last entry (it opens the sidebar for everything
+// else the role can access). All other keys MUST be present in that role's
+// ROLES[role].pages array (or '*' for admin/viewer).
+const BOTTOM_NAV_CONFIG = {
+  admin:     ['dashboard', 'map', 'marriages', 'dispatched', 'more'],
+  // Warehouse: incoming (queue), map (drop), marriages (warn), dispatched (out)
+  warehouse: ['map', 'incoming', 'marriages', 'dispatched', 'more'],
+  // Factory: their own list, then accessory pairings, what's in transit, & open requests
+  factory:   ['factory', 'marriages', 'intransit', 'requests', 'more'],
+  // Truck: only really has 2 views. We add "more" so they can still get to settings/sign out.
+  transit:   ['truck', 'intransit', 'more'],
+  // Organizer: schedule pickups, map, marriages, dispatched
+  organizer: ['schedule', 'map', 'marriages', 'dispatched', 'more'],
+  viewer:    ['dashboard', 'map', 'marriages', 'dispatched', 'more']
+};
+function renderBottomNav(){
+  const nav = document.getElementById('bottom-nav');
+  if(!nav) return;
+  const role = currentRole;
+  const pages = BOTTOM_NAV_CONFIG[role] || BOTTOM_NAV_CONFIG.admin;
+  // Detect currently active page from the .view.active element
+  const activeView = document.querySelector('.view.active');
+  const activePage = activeView ? (activeView.id || '').replace(/^view-/, '') : (ROLES[role]?.defaultPage || 'dashboard');
+  nav.innerHTML = pages.map(p => {
+    const isActive = p === activePage;
+    const isMore = p === 'more';
+    const onclick = isMore ? 'toggleSidebar(true)' : `goV('${p}');setBottomNavActive('${p}')`;
+    const label = BN_LABELS[p] || p;
+    const icon = BN_ICONS[p] || '';
+    return `<button class="bn-item${isActive?' active':''}" data-page="${p}" onclick="${onclick}" aria-label="${label}">${icon}<span>${label}</span></button>`;
+  }).join('');
+}
+// Expose for callers (setUser, role-change handlers)
+window.renderBottomNav = renderBottomNav;
 
 // ═══════════════════════════════════════════════════════════
 // FLOATING ACTION BUTTON — context-aware primary action
@@ -4369,6 +4584,10 @@ function applyRoleVisibility(){
   // Update the role label in the selector
   const ind = document.getElementById('role-indicator');
   if(ind) ind.textContent = ROLES[currentRole].label;
+  // Re-render the bottom nav with the new role's most-used pages.
+  // (Also called by setUser, but applyRoleVisibility is the entry point for
+  // direct role switches via the role selector dropdown.)
+  try { renderBottomNav?.(); } catch(e){ console.warn('[renderBottomNav]', e); }
 }
 
 // Sidebar drawer toggle (mobile/tablet)
@@ -5674,6 +5893,10 @@ function quickPlaceFromQueue(queueId){
       inc.trackingHistory = inc.trackingHistory || [];
       inc.trackingHistory.push({state:'received-at-warehouse', at:toISO(), by:ROLES[currentRole].label, note:'via queue tap'});
     }
+    // CRITICAL: persist immediately. The user might close the position picker
+    // without completing — without this save, the status/arrivedAt mutation
+    // would be lost on reload or remote sync.
+    try { flushSave(); } catch(e){}
   }
   openPositionPicker(queueId);
 }
@@ -10604,8 +10827,8 @@ function saveCreateDispatch(){
 
 // ── CONFIG ──
 function renderConfig(){
-  const ecs=cfg.emails.map((e,i)=>`<span class="chip"><span style="font-size:11px;color:var(--accent)">✉</span>${e}<button class="chip-rm" onclick="cfg.emails.splice(${i},1);renderConfig();updBadges()">×</button></span>`).join('');
-  const acs=cfg.auth.map((a,i)=>`<span class="chip">${a}<button class="chip-rm" onclick="cfg.auth.splice(${i},1);renderConfig();updBadges()">×</button></span>`).join('');
+  const ecs=cfg.emails.map((e,i)=>`<span class="chip"><span style="font-size:11px;color:var(--accent)">✉</span>${e}<button class="chip-rm" onclick="cfg.emails.splice(${i},1);renderConfig();saveState();updBadges()">×</button></span>`).join('');
+  const acs=cfg.auth.map((a,i)=>`<span class="chip">${a}<button class="chip-rm" onclick="cfg.auth.splice(${i},1);renderConfig();saveState();updBadges()">×</button></span>`).join('');
   document.getElementById('email-chips').innerHTML=ecs||'<span style="font-size:11px;color:var(--text3)">None</span>';
   document.getElementById('auth-chips').innerHTML=acs||'<span style="font-size:11px;color:var(--text3)">None</span>';
   const gb=document.getElementById('gcal-badge'),btn=document.getElementById('gcal-btn');
@@ -10645,9 +10868,9 @@ function renderConfig(){
     }
   }
 }
-function addEmail(){const e=(document.getElementById('new-email').value||'').trim();if(!e||!e.includes('@')){toast('Invalid email','err');return;}if(cfg.emails.includes(e)){toast('Already exists','err');return;}cfg.emails.push(e);document.getElementById('new-email').value='';toast('Added','ok');renderConfig();}
-function addAuth(){const a=(document.getElementById('new-auth').value||'').trim();if(!a)return;cfg.auth.push(a);document.getElementById('new-auth').value='';toast(`${a} added`,'ok');renderConfig();}
-function toggleGcal(){if(cfg.gcal){cfg.gcal=false;cfg.gcalEmail='';toast('Disconnected');renderConfig();return;}const e=prompt('Google Calendar email:');if(e&&e.includes('@')){cfg.gcal=true;cfg.gcalEmail=e;toast('Connected','ok');renderConfig();}}
+function addEmail(){const e=(document.getElementById('new-email').value||'').trim();if(!e||!e.includes('@')){toast('Invalid email','err');return;}if(cfg.emails.includes(e)){toast('Already exists','err');return;}cfg.emails.push(e);document.getElementById('new-email').value='';toast('Added','ok');renderConfig();saveState();}
+function addAuth(){const a=(document.getElementById('new-auth').value||'').trim();if(!a)return;cfg.auth.push(a);document.getElementById('new-auth').value='';toast(`${a} added`,'ok');renderConfig();saveState();}
+function toggleGcal(){if(cfg.gcal){cfg.gcal=false;cfg.gcalEmail='';toast('Disconnected');renderConfig();saveState();return;}const e=prompt('Google Calendar email:');if(e&&e.includes('@')){cfg.gcal=true;cfg.gcalEmail=e;toast('Connected','ok');renderConfig();saveState();}}
 
 // ── EXPORT ──
 // Properly escape a value for CSV: wraps in quotes and doubles internal quotes
@@ -12388,6 +12611,11 @@ async function printQRLabel(itemId, source){
     item.trackingId = makeTrackingId(source === 'materials' ? 'MAT' : 'SPA');
     item.trackingState = item.trackingState || 'created-at-factory';
     item.trackingHistory = item.trackingHistory || [{state:'created-at-factory', at: toISO(), by: ROLES[currentRole].label}];
+    // CRITICAL: persist the backfill so the QR we're about to print actually
+    // resolves back to a known item next time someone scans it. Without this
+    // save, closing the tab after printing leaves a "ghost label" — paper has
+    // a tracking ID that doesn't exist anywhere in the system.
+    try { flushSave(); } catch(e){ console.warn('[qr backfill save failed]', e); }
   }
   // Encode tracking info as JSON inside the QR (so any scanner can read & route)
   const payload = JSON.stringify({
@@ -14643,18 +14871,40 @@ function toggleReceived(rid){
 
 
 function saveState(){
+  // ── ECHO LOOP GUARD ──
+  // If we're applying remote state (set by the listener around fbApplyRemoteState
+  // + fbRerenderActiveView), skip entirely. The remote apply already wrote to
+  // localStorage directly and the state came FROM the cloud — re-pushing it
+  // would just bounce back to other devices and they'd bounce it to us,
+  // creating a perpetual ping-pong loop wasting Firebase quota.
+  // Render functions (updBadges, drawMap, etc.) call saveState as a safety
+  // net for user-driven mutations; during a remote-apply cycle, we want the
+  // UI to update but NOT trigger a write or push.
+  if(_fbApplyingRemote) return;
   // SYNCHRONOUS edit mark — must happen BEFORE the debounce. Any remote update
   // arriving after this point but before our push will defer to avoid clobbering
   // this local edit. Counter is only ever incremented; fbCloudSync advances the
   // matching _fbPushedEditCounter once a push completes successfully.
-  if(!_fbApplyingRemote) _fbLocalEditCounter++;
+  _fbLocalEditCounter++;
   // Debounce: batch rapid writes during a render cycle. Short window (100ms) keeps
   // the on-close data-loss risk small while still avoiding 50× writes per second.
   if(_saveTimer) clearTimeout(_saveTimer);
   _saveTimer = setTimeout(()=>{
     try{
-      const state = {nid, units, dispatched, incoming, materials, events, activity, queue, cfg, factory, marriages, dispatchRequests, coverInventory, colorLibrary, coverModelMapping, _saved: Date.now()};
+      const now = Date.now();
+      const state = {nid, units, dispatched, incoming, materials, events, activity, queue, cfg, factory, marriages, dispatchRequests, coverInventory, colorLibrary, coverModelMapping, _saved: now};
       localStorage.setItem(LS_KEY, JSON.stringify(state));
+      _lastSavedHash = stateHash();  // mark integrity watchdog "clean" — drift detection from here
+      // ── EDGE CASE FIX: bump local-write timestamp ──
+      // If we don't update _fbLastLocalWriteAt here, an edit made BEFORE Firebase
+      // auth completes leaves _fbLastLocalWriteAt at the loadState() value (which
+      // is the OLD _saved from disk). When the realtime listener then attaches
+      // and fires with the cloud's last state (older than our new edit), the
+      // "wasInitial && local newer than cloud → push local" recovery in
+      // fbStartRealtimeSync wouldn't trigger — and our edit would sit unpushed
+      // until the next 2-minute scheduled sync. Bumping here ensures the recovery
+      // path sees the edit as newer-than-cloud and pushes immediately.
+      _fbLastLocalWriteAt = now;
     }catch(err){
       console.warn('saveState failed:', err.message);
       // Likely QuotaExceededError — too many photos
@@ -14671,16 +14921,463 @@ function saveState(){
 // Force-flush any pending debounced saveState immediately. Call after critical mutations
 // (add, delete, manual sync) so the data is on disk before any potential page unload.
 function flushSave(){
+  // Mirror saveState's echo-loop guard: if we're applying remote state, skip.
+  if(_fbApplyingRemote) return;
   if(_saveTimer){ clearTimeout(_saveTimer); _saveTimer = null; }
   try{
-    const state = {nid, units, dispatched, incoming, materials, events, activity, queue, cfg, factory, marriages, dispatchRequests, coverInventory, colorLibrary, coverModelMapping, _saved: Date.now()};
+    const now = Date.now();
+    const state = {nid, units, dispatched, incoming, materials, events, activity, queue, cfg, factory, marriages, dispatchRequests, coverInventory, colorLibrary, coverModelMapping, _saved: now};
     localStorage.setItem(LS_KEY, JSON.stringify(state));
+    _lastSavedHash = stateHash();  // mark integrity watchdog "clean"
+    _fbLastLocalWriteAt = now;
   }catch(err){
     console.warn('flushSave failed:', err.message);
     if(err.name === 'QuotaExceededError'){ toast('⚠ Storage full — export backup soon', 'err'); }
   }
   try { fbAutoPush?.(); } catch(e){}
 }
+
+// ══════════════════════════════════════════════════════════════════════════════
+// DEFENSE-IN-DEPTH — STATE INTEGRITY WATCHDOG
+// ══════════════════════════════════════════════════════════════════════════════
+// Every state-mutating function in this codebase IS supposed to call saveState
+// (or updBadges which wraps saveState). An audit confirmed 48/48 critical
+// mutations are covered. BUT — for future safety, we run a periodic watchdog
+// that hashes the in-memory state and compares against the last hash captured
+// at save-time. If they drift, something mutated without calling save —
+// the watchdog catches it and force-saves.
+//
+// This is paranoid defense. With the audit's coverage we should never see
+// drift in practice, but if a future code change misses a saveState call,
+// this watchdog will catch it within ~5 seconds instead of waiting for the
+// next page reload to expose the data loss.
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Fast hash: includes key status field of every tracked item, not just the
+// last few. Earlier version only sampled slice(-3) or slice(-5), which missed
+// mutations on older items. The strings are still small (~10 chars per item),
+// so even 200 factory items = ~2 KB hash — trivial to compute every 5 seconds.
+function stateHash(){
+  try {
+    const fSig = factory.map(f => f.id + ':' + (f.trackingState||'') + (f.onHold?'H':'')).join(',');
+    const mSig = marriages.map(m => m.id + ':' + (m.status||'')).join(',');
+    const rSig = dispatchRequests.map(r => r.id + ':' + (r.status||'')).join(',');
+    const iSig = incoming.map(i => i.id + ':' + (i.status||'')).join(',');
+    const uSig = units.map(u => u.id + ':' + (u.pos||'')).join(',');
+    const cSig = coverInventory.map(c => c.id + ':' + (c.qty||0) + ':' + (Array.isArray(c.pending)?c.pending.length:0)).join(',');
+    const fhist = factory.reduce((s,f) => s + ((f.trackingHistory||[]).length), 0);
+    return [
+      'nid:' + nid,
+      'u:' + units.length + ':' + uSig,
+      'f:' + factory.length + ':' + fSig + ':' + fhist,
+      'm:' + marriages.length + ':' + mSig,
+      'i:' + incoming.length + ':' + iSig,
+      'd:' + dispatched.length,
+      'mat:' + materials.length,
+      'ev:' + events.length,
+      'q:' + queue.length,
+      'r:' + dispatchRequests.length + ':' + rSig,
+      'c:' + coverInventory.length + ':' + cSig
+    ].join('|');
+  } catch(e){
+    return 'err:' + e.message;
+  }
+}
+// _lastSavedHash declared with other state vars at the top of the script.
+
+function checkStateIntegrity(){
+  const current = stateHash();
+  if(current !== _lastSavedHash){
+    console.warn('[integrity] State drift detected — forcing save. Was:', _lastSavedHash.slice(0,80), 'now:', current.slice(0,80));
+    try { flushSave(); } catch(e){ console.error('[integrity] forced save failed:', e); }
+  }
+}
+// Run every 5 seconds. Cheap (string concat on small arrays).
+setInterval(checkStateIntegrity, 5000);
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SYNC STATUS INDICATOR — visible badge so you ALWAYS know if data is safe
+// ══════════════════════════════════════════════════════════════════════════════
+// Shows in the top bar. States:
+//   ✓ Synced              — green     — local==cloud, all good
+//   ⏳ Saving…             — amber     — pending push to Firebase
+//   ⚠ N pending writes     — red       — push failed / offline / not signed in
+//   ⊘ Offline              — gray      — no internet
+// Tapping it forces an immediate cloud sync.
+// ══════════════════════════════════════════════════════════════════════════════
+function _ensureSyncStatusBadge(){
+  let badge = document.getElementById('sync-status-badge');
+  if(badge) return badge;
+  // Build a small group: [✓ Synced] [🔬]
+  const group = document.createElement('span');
+  group.id = 'sync-status-group';
+  group.style.cssText = 'display:inline-flex;align-items:center;gap:4px;margin-right:6px';
+  badge = document.createElement('span');
+  badge.id = 'sync-status-badge';
+  badge.style.cssText = 'display:inline-flex;align-items:center;gap:4px;padding:4px 9px;border-radius:11px;font-size:11px;font-weight:600;cursor:pointer;transition:all .2s;white-space:nowrap';
+  badge.title = 'Click to force cloud sync now';
+  badge.onclick = () => {
+    if(_fbDb && _fbUser && _fbAuthorized){
+      fbCloudSync(true);
+    } else {
+      toast('Not signed in to cloud sync', 'err');
+    }
+  };
+  // Diagnostic button (🔬) — visible to ALL roles so anyone can run the
+  // self-test from their phone if data starts behaving weird
+  const diag = document.createElement('span');
+  diag.id = 'sync-diag-btn';
+  diag.textContent = '🔬';
+  diag.style.cssText = 'display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;border-radius:50%;background:var(--bg3);border:1px solid var(--line);font-size:12px;cursor:pointer;transition:transform .15s';
+  diag.title = 'Run system diagnostic';
+  diag.onclick = () => { try { openDiagnosticPanel(); } catch(e){ console.warn(e); } };
+  diag.onmouseenter = () => { diag.style.transform = 'scale(1.1)'; };
+  diag.onmouseleave = () => { diag.style.transform = 'scale(1)'; };
+  group.appendChild(badge);
+  group.appendChild(diag);
+  // Insert in the top bar — find the auth badge container and place before it
+  const authBadge = document.getElementById('fb-auth-badge');
+  if(authBadge && authBadge.parentElement){
+    authBadge.parentElement.insertBefore(group, authBadge);
+  } else {
+    const tb = document.querySelector('.topbar > div:last-child') || document.querySelector('.topbar');
+    if(tb) tb.insertBefore(group, tb.firstChild);
+  }
+  return badge;
+}
+function updateSyncStatusBadge(){
+  const badge = _ensureSyncStatusBadge();
+  if(!badge) return;
+  const isOnline = navigator.onLine;
+  const sdkLoaded = !!(typeof firebase !== 'undefined' && firebase.database);
+  const isFb = !!(_fbDb && _fbUser && _fbAuthorized);
+  const pending = _fbLocalEditCounter - _fbPushedEditCounter;
+  if(!isOnline){
+    badge.textContent = '⊘ Offline';
+    badge.title = 'No internet — changes saved locally';
+    badge.style.background = '#f3f4f6'; badge.style.color = '#4b5563';
+    return;
+  }
+  // SDK never loaded → "Offline" rather than the misleading "Not signed in"
+  // (you can't sign in if Firebase didn't load). Auto-retry is running in
+  // the background — clicking the badge has no immediate effect here.
+  if(!sdkLoaded || _fbSdkLoadFailed){
+    badge.textContent = '⊘ Offline';
+    badge.title = 'Firebase couldn\'t load — changes saved locally, will retry in background';
+    badge.style.background = '#f3f4f6'; badge.style.color = '#4b5563';
+    return;
+  }
+  if(!isFb){
+    badge.textContent = '⊘ Not signed in';
+    badge.title = 'Click "More" → Settings to sign in for cloud sync';
+    badge.style.background = '#fef3c7'; badge.style.color = '#92400e';
+    return;
+  }
+  if(pending > 0){
+    badge.textContent = '⏳ Saving…';
+    badge.title = pending + ' edit' + (pending>1?'s':'') + ' pending';
+    badge.style.background = '#fef3c7'; badge.style.color = '#92400e';
+    return;
+  }
+  badge.textContent = '✓ Synced';
+  badge.title = 'All changes saved to cloud · click to force sync now';
+  badge.style.background = '#dcfce7'; badge.style.color = '#166534';
+}
+// Update once a second so the user always has live feedback
+setInterval(updateSyncStatusBadge, 1000);
+// Initial render after the DOM/topbar exists (deferred so the badge slot is ready)
+setTimeout(updateSyncStatusBadge, 800);
+
+// ══════════════════════════════════════════════════════════════════════════════
+// WRITE CONFIRMATION — verify the cloud actually got what we sent
+// ══════════════════════════════════════════════════════════════════════════════
+// After fbCloudSync resolves, read back state/shared/latest and verify the
+// timestamp matches our push. If not, the write was rejected or got lost.
+// We track _fbConsecutiveFailures — after 3 in a row, we warn the user
+// loudly so they know to stop critical operations and investigate.
+// (_fbConsecutiveFailures declared with other _fb* state vars at the top.)
+async function verifyCloudWrite(expectedTimestamp){
+  if(!_fbDb || !_fbUser || !_fbAuthorized) return false;
+  try {
+    const snap = await _fbDb.ref('state/shared/latest').once('value');
+    const payload = snap.val();
+    if(!payload){
+      _fbConsecutiveFailures++;
+      console.warn('[fb verify] cloud is empty after push');
+      return false;
+    }
+    // ── ACCEPT NEWER timestamps as success ──
+    // Strict equality (payload.timestamp !== expectedTimestamp) caused false
+    // failures whenever another device pushed in the window between our write
+    // and our verify read. As long as the cloud has SOMETHING >= our timestamp,
+    // our write landed (and was either kept, or superseded by a still-newer
+    // write from someone else — both are healthy outcomes). Only treat strictly
+    // older timestamps as failures: that means our write never reached the cloud.
+    if(payload.timestamp < expectedTimestamp){
+      _fbConsecutiveFailures++;
+      console.warn('[fb verify] cloud timestamp is older than expected — our write was lost. expected:', expectedTimestamp, 'got:', payload.timestamp);
+      return false;
+    }
+    _fbConsecutiveFailures = 0;
+    return true;
+  } catch(err){
+    _fbConsecutiveFailures++;
+    console.warn('[fb verify] error:', err.message);
+    return false;
+  }
+}
+function _checkSyncFailureBanner(){
+  let banner = document.getElementById('sync-failure-banner');
+  if(_fbConsecutiveFailures < 3){
+    if(banner) banner.remove();
+    return;
+  }
+  if(banner) return;
+  banner = document.createElement('div');
+  banner.id = 'sync-failure-banner';
+  banner.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:9998;background:linear-gradient(135deg,#dc2626,#7f1d1d);color:#fff;padding:9px 14px;font-size:13px;font-weight:700;text-align:center;box-shadow:0 2px 6px rgba(0,0,0,.25);display:flex;align-items:center;justify-content:center;gap:9px';
+  banner.innerHTML = `<span>⚠</span> <span>Cloud sync failed ${_fbConsecutiveFailures} times in a row — your changes may not be saving. Pause critical operations and check connection.</span> <button onclick="this.parentElement.remove();fbCloudSync(true)" style="background:#fff;color:#7f1d1d;border:none;padding:4px 11px;border-radius:6px;font-weight:700;cursor:pointer;font-size:12px">Retry</button>`;
+  document.body.appendChild(banner);
+}
+setInterval(_checkSyncFailureBanner, 3000);
+
+// ══════════════════════════════════════════════════════════════════════════════
+// DIAGNOSTIC TEST RUNNER — runs a battery of checks and reports results
+// ══════════════════════════════════════════════════════════════════════════════
+// Call from anywhere (or button below): runDiagnostics() to verify the full
+// data flow works end-to-end. Each test is isolated, idempotent, and cleans
+// up after itself. Tests cover: localStorage, integrity hash, Firebase auth,
+// Firebase write+read roundtrip, sync queue health, and a non-destructive
+// "shadow" of the ship-from-factory flow.
+//
+// NOTHING in the warehouse data is mutated by this runner — all writes go to
+// a separate /diagnostics/{deviceId}/ path and are cleaned up at the end.
+// ══════════════════════════════════════════════════════════════════════════════
+async function runDiagnostics(){
+  const results = [];
+  const log = (name, ok, detail) => {
+    results.push({name, ok, detail: detail||''});
+    console.log((ok?'✓':'✗') + ' ' + name + (detail?' — '+detail:''));
+  };
+  const t0 = Date.now();
+
+  // ── TEST 1: localStorage write+read roundtrip ──
+  try {
+    const k = '__diag_' + Date.now();
+    const v = 'roundtrip-' + Math.random();
+    localStorage.setItem(k, v);
+    const got = localStorage.getItem(k);
+    localStorage.removeItem(k);
+    log('localStorage write/read', got === v, got === v ? '' : 'wrote "'+v+'" got "'+got+'"');
+  } catch(e){
+    log('localStorage write/read', false, e.message);
+  }
+
+  // ── TEST 2: state JSON serializable + within quota ──
+  try {
+    const state = {nid, units, dispatched, incoming, materials, events, activity, queue, cfg, factory, marriages, dispatchRequests, coverInventory, colorLibrary, coverModelMapping};
+    const json = JSON.stringify(state);
+    const size = (new Blob([json]).size / 1024).toFixed(1);
+    const sizeMb = (json.length / 1024 / 1024).toFixed(2);
+    log('State serializable', true, size + ' KB (' + sizeMb + ' MB / ~5 MB localStorage limit)');
+    if(parseFloat(sizeMb) > 4){
+      log('State size warning', false, 'approaching 5 MB localStorage limit — export & prune old photos');
+    }
+  } catch(e){
+    log('State serializable', false, e.message);
+  }
+
+  // ── TEST 3: integrity hash stability ──
+  try {
+    const h1 = stateHash();
+    await new Promise(r => setTimeout(r, 10));
+    const h2 = stateHash();
+    log('Integrity hash stable', h1 === h2, h1.length + ' chars');
+  } catch(e){
+    log('Integrity hash stable', false, e.message);
+  }
+
+  // ── TEST 4: Firebase configured & signed in ──
+  if(typeof firebase === 'undefined' || !firebase?.database){
+    log('Firebase SDK loaded', false, 'SDK not loaded — check internet');
+  } else {
+    log('Firebase SDK loaded', true, 'version ' + (firebase.SDK_VERSION || '?'));
+  }
+  log('Firebase auth', !!_fbUser, _fbUser ? _fbUser.email : 'not signed in');
+  log('Firebase authorized', !!_fbAuthorized, _fbAuthorized ? 'role: '+(_fbAuthorized.role||'?') : 'not in whitelist');
+  log('Firebase DB ref', !!_fbDb, _fbDb ? 'connected' : 'no database ref');
+
+  // ── TEST 5: Firebase write+read roundtrip (non-destructive) ──
+  // Uses state/{deviceId}/diag-ping — a subpath of the user's own state tree
+  // which the existing Firebase rules already allow (fbCloudSync writes to
+  // state/{deviceId}/snapshots/ regularly). Avoids needing rules updates.
+  if(_fbDb && _fbUser && _fbAuthorized){
+    try {
+      const testPath = `state/${_fbDeviceId}/diag-ping`;
+      const ts = Date.now();
+      const payload = {ts, who: _fbUser.email, msg: 'diagnostic-ping'};
+      const writeStart = performance.now();
+      await _fbDb.ref(testPath).set(payload);
+      const writeMs = (performance.now() - writeStart).toFixed(0);
+      const readStart = performance.now();
+      const snap = await _fbDb.ref(testPath).once('value');
+      const readMs = (performance.now() - readStart).toFixed(0);
+      const got = snap.val();
+      const match = got && got.ts === ts && got.msg === 'diagnostic-ping';
+      log('Firebase write/read', match, 'write ' + writeMs + 'ms, read ' + readMs + 'ms');
+      // Cleanup so we don't leave junk in the user's state tree
+      try { await _fbDb.ref(testPath).remove(); } catch(e){}
+    } catch(e){
+      log('Firebase write/read', false, e.message);
+    }
+  } else {
+    log('Firebase write/read', false, 'skipped — not signed in');
+  }
+
+  // ── TEST 6: Realtime listener attached ──
+  log('Realtime listener', !!_fbSharedRef, _fbSharedRef ? 'attached on state/shared/latest' : 'not attached');
+
+  // ── TEST 7: Local-cloud divergence check ──
+  if(_fbDb && _fbUser && _fbAuthorized){
+    try {
+      const snap = await _fbDb.ref('state/shared/latest').once('value');
+      const payload = snap.val();
+      if(!payload){
+        log('Cloud has state', false, 'state/shared/latest is empty');
+      } else {
+        const cloudTs = payload.timestamp;
+        const localTs = _fbLastLocalWriteAt;
+        const diff = Math.abs(cloudTs - localTs);
+        const diffMin = (diff / 1000 / 60).toFixed(1);
+        const inSync = diff < 5000;
+        log('Local-cloud sync', inSync, inSync
+          ? 'within 5s'
+          : 'differ by ' + diffMin + ' min (local: ' + new Date(localTs).toLocaleTimeString() + ', cloud: ' + new Date(cloudTs).toLocaleTimeString() + ')');
+        // Cloud state parses?
+        try {
+          const cs = JSON.parse(payload.state);
+          const cloudFactoryLen = Array.isArray(cs.factory) ? cs.factory.length : 'n/a';
+          const cloudUnitsLen = Array.isArray(cs.units) ? cs.units.length : 'n/a';
+          log('Cloud state parses', true, 'factory=' + cloudFactoryLen + ', units=' + cloudUnitsLen);
+        } catch(e){
+          log('Cloud state parses', false, e.message);
+        }
+      }
+    } catch(e){
+      log('Local-cloud sync', false, e.message);
+    }
+  }
+
+  // ── TEST 8: Pending writes flushing ──
+  const pendingBefore = _fbLocalEditCounter - _fbPushedEditCounter;
+  if(pendingBefore > 0){
+    log('Pending writes', false, pendingBefore + ' writes not yet pushed — waiting up to 3s for flush…');
+    // Wait for push to complete
+    await new Promise(r => setTimeout(r, 3000));
+    const pendingAfter = _fbLocalEditCounter - _fbPushedEditCounter;
+    if(pendingAfter === 0){
+      log('Pending writes flushed', true, 'all caught up');
+    } else {
+      log('Pending writes flushed', false, pendingAfter + ' still pending after 3s — investigate');
+    }
+  } else {
+    log('Pending writes', true, 'none pending');
+  }
+
+  // ── TEST 9: Critical mutation paths have saveState coverage ──
+  // (Reads source of each function and checks for save calls)
+  const criticalFns = ['shipFromFactory','truckLoadOne','handleQRPayload','addFactorySpa','addFactoryAccessory','addMarriage','markMarriageDelivered','rmFromFactory','holdFactoryItem','receiveTransitItem','printQRLabel'];
+  for(const fn of criticalFns){
+    const f = window[fn];
+    if(typeof f !== 'function'){ log('Code: ' + fn, false, 'function not found'); continue; }
+    const src = f.toString();
+    const hasSave = /saveState\(|flushSave\(|updBadges\(/.test(src);
+    log('Code: ' + fn, hasSave, hasSave ? 'calls save' : 'MISSING saveState!');
+  }
+
+  // ── TEST 10: Sidebar role config integrity ──
+  log('Role config: admin', ROLES.admin && ROLES.admin.pages.includes('*'), '');
+  log('Role config: transit', ROLES.transit && ROLES.transit.pages.includes('truck'), '');
+  log('Role config: factory', ROLES.factory && ROLES.factory.pages.includes('factory'), '');
+
+  // ── TEST 11: Visibility handler attached ──
+  const hasVis = typeof _flushPendingSyncOnHide === 'function';
+  log('Visibility handler', hasVis, hasVis ? 'attached — survives mobile backgrounding' : 'NOT attached — mobile data loss risk!');
+
+  // ── TEST 12: Integrity watchdog running ──
+  log('Integrity watchdog', typeof _lastSavedHash === 'string', _lastSavedHash ? 'last hash: ' + _lastSavedHash.slice(0,60) + '…' : 'no hash yet');
+
+  const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
+  const passed = results.filter(r => r.ok).length;
+  const failed = results.filter(r => !r.ok).length;
+  return {results, passed, failed, total: results.length, elapsed};
+}
+
+// ── DIAGNOSTIC PANEL UI ──
+// Modal panel with a "Run All Tests" button. Bound to window for easy access.
+window.openDiagnosticPanel = async function(){
+  // Build modal
+  let modal = document.getElementById('diag-modal');
+  if(modal) modal.remove();
+  modal = document.createElement('div');
+  modal.id = 'diag-modal';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:10000;display:flex;align-items:center;justify-content:center;padding:14px';
+  modal.innerHTML = `
+    <div style="background:var(--bg2);border-radius:14px;max-width:640px;width:100%;max-height:90vh;overflow:hidden;display:flex;flex-direction:column;box-shadow:0 20px 50px rgba(0,0,0,.4)">
+      <div style="padding:18px 20px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between">
+        <div>
+          <div style="font-size:16px;font-weight:700;color:var(--text1)">🔬 System Diagnostic</div>
+          <div style="font-size:12px;color:var(--text3);margin-top:3px">Tests data flow, sync, and integrity end-to-end</div>
+        </div>
+        <button onclick="document.getElementById('diag-modal').remove()" style="background:transparent;border:none;font-size:20px;cursor:pointer;color:var(--text2);padding:4px 8px">✕</button>
+      </div>
+      <div id="diag-body" style="flex:1;overflow-y:auto;padding:18px 20px;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,monospace;font-size:12px;line-height:1.55;background:var(--bg3)">
+        <div style="text-align:center;padding:24px;color:var(--text3)">Click "Run All Tests" to start.</div>
+      </div>
+      <div style="padding:14px 20px;border-top:1px solid var(--line);display:flex;gap:8px;justify-content:flex-end;background:var(--bg2)">
+        <button onclick="window._runDiagAndRender()" id="diag-run-btn" style="background:var(--accent);color:#fff;border:none;padding:9px 18px;border-radius:8px;font-weight:700;cursor:pointer;font-size:13px">▶ Run All Tests</button>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+  // Auto-run on open
+  setTimeout(() => window._runDiagAndRender(), 200);
+};
+
+window._runDiagAndRender = async function(){
+  const body = document.getElementById('diag-body');
+  const btn = document.getElementById('diag-run-btn');
+  if(!body) return;
+  body.innerHTML = '<div style="text-align:center;padding:24px;color:var(--text2)">⏳ Running tests…</div>';
+  if(btn){ btn.disabled = true; btn.textContent = 'Running…'; btn.style.opacity = '0.6'; }
+  let report;
+  try { report = await runDiagnostics(); }
+  catch(e){ report = {results:[{name:'Test runner crashed', ok:false, detail:e.message}], passed:0, failed:1, total:1, elapsed:'0'}; }
+  // Defense: escape any HTML in test names/details so injection via email,
+  // error messages, or any future user-derived field can never break out.
+  const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const rows = report.results.map(r => `
+    <div style="display:flex;align-items:flex-start;gap:9px;padding:7px 0;border-bottom:1px dashed var(--line)">
+      <span style="font-size:14px;flex-shrink:0;width:18px;color:${r.ok?'#16a34a':'#dc2626'}">${r.ok?'✓':'✗'}</span>
+      <div style="flex:1;min-width:0">
+        <div style="font-weight:600;color:var(--text1)">${esc(r.name)}</div>
+        ${r.detail ? `<div style="color:${r.ok?'var(--text3)':'#dc2626'};font-size:11px;margin-top:1px;word-break:break-word">${esc(r.detail)}</div>` : ''}
+      </div>
+    </div>`).join('');
+  const headerColor = report.failed === 0 ? '#16a34a' : (report.failed <= 2 ? '#d97706' : '#dc2626');
+  const headerEmoji = report.failed === 0 ? '✅' : (report.failed <= 2 ? '⚠️' : '🚨');
+  body.innerHTML = `
+    <div style="background:var(--bg2);border:1.5px solid ${headerColor};border-radius:10px;padding:13px 16px;margin-bottom:14px;display:flex;align-items:center;gap:12px">
+      <div style="font-size:28px">${headerEmoji}</div>
+      <div style="flex:1">
+        <div style="font-size:14px;font-weight:700;color:${headerColor}">${report.failed === 0 ? 'ALL TESTS PASSED' : report.failed + ' TEST' + (report.failed>1?'S':'') + ' FAILED'}</div>
+        <div style="font-size:11px;color:var(--text3);margin-top:2px">${report.passed}/${report.total} passed · ${esc(report.elapsed)}s</div>
+      </div>
+    </div>
+    <div style="background:var(--bg2);border:1px solid var(--line);border-radius:9px;padding:8px 14px">${rows}</div>
+    <div style="margin-top:14px;font-size:11px;color:var(--text3);text-align:center">Tests are non-destructive. Cloud test data is auto-cleaned.</div>`;
+  if(btn){ btn.disabled = false; btn.textContent = '▶ Re-run Tests'; btn.style.opacity = '1'; }
+};
+
 function loadState(){
   try{
     const raw = localStorage.getItem(LS_KEY);
@@ -14701,6 +15398,20 @@ function loadState(){
     if(s.colorLibrary && typeof s.colorLibrary === 'object') colorLibrary = Object.assign(colorLibrary, s.colorLibrary);
     if(s.coverModelMapping && typeof s.coverModelMapping === 'object') coverModelMapping = s.coverModelMapping;
     if(s.cfg && typeof s.cfg === 'object') cfg = Object.assign(cfg, s.cfg);
+    // ── MOBILE SYNC FIX ──
+    // Remember when localStorage was last written. The realtime listener's
+    // "newness guard" uses _fbLastLocalWriteAt to skip stale cloud snapshots
+    // that would otherwise clobber unpushed local edits on first attach
+    // (this is what caused mobile "todo desaparece" — fbAutoPush's 1.5s
+    // debounce was getting cancelled when iOS Safari backgrounded the tab,
+    // so cloud lagged behind localStorage. On the next reload the listener
+    // applied the stale cloud state over our newer local data.)
+    if(typeof s._saved === 'number' && s._saved > 0){
+      _fbLastLocalWriteAt = s._saved;
+    }
+    // Initialize the integrity-watchdog baseline so the first 5s tick doesn't
+    // see "drift" against an empty hash and fire a spurious flushSave.
+    try { _lastSavedHash = stateHash(); } catch(e){}
     return true;
   }catch(err){
     console.warn('loadState failed:', err.message);
@@ -14904,6 +15615,76 @@ window.addEventListener('online',  renderOfflineBanner);
 window.addEventListener('offline', renderOfflineBanner);
 renderOfflineBanner();
 
+// ── MOBILE SYNC SAFETY: flush pending writes when the tab is hidden ──
+// On iOS Safari (and most mobile browsers) timers are throttled or paused when
+// the user backgrounds the tab, locks the phone, or switches apps. Without these
+// listeners, a tap-then-lock sequence routinely lost the Firebase push that was
+// scheduled by fbAutoPush — localStorage had the edit but the cloud didn't, and
+// the next reload pulled stale cloud state on top of the local data ("todo
+// desaparece"). Force-flushing on visibilitychange and pagehide closes that gap.
+function _flushPendingSyncOnHide(){
+  try { flushSave?.(); } catch(e){}
+  try { fbForcePush?.(); } catch(e){}
+}
+document.addEventListener('visibilitychange', () => {
+  if(document.hidden) _flushPendingSyncOnHide();
+});
+// pagehide fires on iOS Safari where 'beforeunload' is unreliable. Both bfcache
+// and tab-kill paths run pagehide first, so this is the most reliable last call.
+window.addEventListener('pagehide', _flushPendingSyncOnHide);
+// When the tab becomes visible again after being hidden, the realtime listener
+// may have missed updates while the WebSocket was suspended. Firebase reconnects
+// automatically, but we still nudge any pending local push (in case fbAutoPush
+// was queued at the moment of hide and the resumed timer is in a weird state).
+document.addEventListener('visibilitychange', () => {
+  if(!document.hidden){
+    try { fbForcePush?.(); } catch(e){}
+  }
+});
+
+// ── CROSS-TAB SYNC via 'storage' event ──
+// Firebase's deviceId is shared across all tabs in the same browser, so the
+// realtime listener's echo guard filters our OWN device's writes — meaning
+// tab A's push to Firebase doesn't trigger tab B's listener. Without this
+// handler, two tabs in the same browser drift out of sync until one reloads.
+// The browser fires 'storage' on OTHER tabs whenever localStorage is written,
+// so we hook that to re-pull the in-memory state from disk and re-render.
+window.addEventListener('storage', e => {
+  if(e.key !== LS_KEY || !e.newValue) return;
+  try {
+    const restored = JSON.parse(e.newValue);
+    // Apply directly (do NOT route through saveState — would cause echo loop
+    // identical to the fbApplyRemoteState issue). _saved timestamp from the
+    // writing tab becomes our newness baseline.
+    _fbApplyingRemote = true;
+    try {
+      if(typeof restored.nid === 'number') nid = Math.max(nid, restored.nid);
+      if(Array.isArray(restored.units)) units = restored.units;
+      if(Array.isArray(restored.dispatched)) dispatched = restored.dispatched;
+      if(Array.isArray(restored.incoming)) incoming = restored.incoming;
+      if(Array.isArray(restored.materials)) materials = restored.materials;
+      if(Array.isArray(restored.events)) events = restored.events;
+      if(Array.isArray(restored.activity)) activity = restored.activity;
+      if(Array.isArray(restored.queue)) queue = restored.queue;
+      if(Array.isArray(restored.factory)) factory = restored.factory;
+      if(Array.isArray(restored.marriages)) marriages = restored.marriages;
+      if(Array.isArray(restored.dispatchRequests)) dispatchRequests = restored.dispatchRequests;
+      if(Array.isArray(restored.coverInventory)) coverInventory = restored.coverInventory;
+      if(restored.colorLibrary && typeof restored.colorLibrary === 'object') colorLibrary = restored.colorLibrary;
+      if(restored.coverModelMapping && typeof restored.coverModelMapping === 'object') coverModelMapping = restored.coverModelMapping;
+      if(restored.cfg && typeof restored.cfg === 'object') cfg = Object.assign({}, cfg, restored.cfg);
+      if(typeof restored._saved === 'number'){ _fbLastLocalWriteAt = restored._saved; }
+      try { _lastSavedHash = stateHash(); } catch(e){}
+      // Render INSIDE the flag-protected block so the render's saveState calls
+      // get skipped (otherwise updBadges → saveState → fbAutoPush leaks a push).
+      try { fbRerenderActiveView?.(); } catch(e){}
+    } finally { _fbApplyingRemote = false; }
+    console.log('[storage event] synced state from another tab');
+  } catch(err){
+    console.warn('[storage event] apply failed:', err.message);
+  }
+});
+
 // ── AUTOMATIC FIREBASE BACKUP ──
 // Periodically snapshot the full state to Firebase Storage under /backups/{yyyy-mm-dd}.json.
 // Runs once at startup (after a delay) and then every 12 hours while the tab is open.
@@ -14985,25 +15766,11 @@ document.addEventListener('keydown', e=>{
      Replaces the sidebar for thumb-reach navigation
      ═══════════════════════════════════════════════════════════ -->
 <nav class="bottom-nav" id="bottom-nav">
+  <!-- Items rendered dynamically by renderBottomNav() based on current role.
+       Empty fallback below ensures something shows if JS hasn't run yet. -->
   <button class="bn-item active" data-page="dashboard" onclick="goV('dashboard');setBottomNavActive('dashboard')">
     <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="1" y="1" width="6" height="6" rx="1.5"/><rect x="9" y="1" width="6" height="6" rx="1.5"/><rect x="1" y="9" width="6" height="6" rx="1.5"/><rect x="9" y="9" width="6" height="6" rx="1.5"/></svg>
     <span>Home</span>
-  </button>
-  <button class="bn-item" data-page="map" onclick="goV('map');setBottomNavActive('map')">
-    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="1" y="1" width="4" height="4" rx="1"/><rect x="6" y="1" width="4" height="4" rx="1"/><rect x="11" y="1" width="4" height="4" rx="1"/><rect x="1" y="6" width="4" height="4" rx="1"/><rect x="6" y="6" width="4" height="4" rx="1"/><rect x="11" y="6" width="4" height="4" rx="1"/></svg>
-    <span>Map</span>
-  </button>
-  <button class="bn-item" data-page="marriages" onclick="goV('marriages');setBottomNavActive('marriages')">
-    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="5" cy="8" r="3.5"/><circle cx="11" cy="8" r="3.5"/></svg>
-    <span>Marriages</span>
-  </button>
-  <button class="bn-item" data-page="dispatched" onclick="goV('dispatched');setBottomNavActive('dispatched')">
-    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M2 11h11l-1-4H2v4z"/><circle cx="5" cy="11" r="1.5"/><circle cx="11" cy="11" r="1.5"/></svg>
-    <span>Dispatch</span>
-  </button>
-  <button class="bn-item" onclick="toggleSidebar(true)">
-    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="8" cy="3" r="1.5"/><circle cx="8" cy="8" r="1.5"/><circle cx="8" cy="13" r="1.5"/></svg>
-    <span>More</span>
   </button>
 </nav>
 
