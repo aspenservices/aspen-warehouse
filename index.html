@@ -3328,7 +3328,7 @@ body.dark-mode .mar-card-track {
       <div class="role-current"><span id="role-indicator">Admin</span></div>
     </div>
   </div>
-  <div class="sb-foot"><div class="sb-ver">v3.77 · <span id="live-date"></span></div></div>
+  <div class="sb-foot"><div class="sb-ver">v3.78 · <span id="live-date"></span></div></div>
 </nav>
 
 <!-- MAIN -->
@@ -3775,7 +3775,7 @@ body.dark-mode .mar-card-track {
         <div style="width:42px;height:42px;border-radius:50%;background:#fff;display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:22px">🚚</div>
         <div style="flex:1 1 260px">
           <div style="font-size:14px;font-weight:700;color:#78350f">In Transit · Loaded on Truck</div>
-          <div style="font-size:11px;color:#92400e;margin-top:2px">Spas scanned by Transit/Loader and currently moving from factory to warehouse. Read-only for all roles — only Admin can modify.</div>
+          <div style="font-size:11px;color:#92400e;margin-top:2px">Spas and accessories scanned by Transit/Loader and currently moving from factory to warehouse. Read-only for all roles — only Admin can modify.</div>
         </div>
         <div style="display:flex;gap:6px" id="intransit-admin-actions">
           <!-- Admin-only action buttons appear here via CSS gating + render -->
@@ -3885,7 +3885,7 @@ body.dark-mode .mar-card-track {
   <div class="card">
     <div class="card-hd">
       <div>
-        <div class="card-title">Spas in Transit</div>
+        <div class="card-title">Items in Transit</div>
         <div class="card-sub" id="intransit-summary">Loaded on truck, awaiting receipt at warehouse</div>
       </div>
     </div>
@@ -6971,7 +6971,7 @@ const PAGES = {
   marriages:['Marriages','Spa + accessory pairings — must ship together'],
   covers:['Cover Inventory','Spa covers in warehouse storage · auto-decrements when assigned to a spa'],
   incoming:['Incoming Spas','Units arriving to warehouse'],
-  intransit:['In Transit','Spas loaded on truck · waiting at warehouse'],
+  intransit:['In Transit','Spas & accessories loaded on truck · waiting at warehouse'],
   truck:['Loading Bay','Ready to load · scan QR to put on truck'],
   materials:['Materials','Receive & log supplies with photo'],
   dispatched:['Dispatch Log','Units picked up by dealers'],
@@ -10524,9 +10524,19 @@ function renderInTransit(){
   }
 
   if(summary){
-    summary.textContent = items.length === 0
-      ? 'No spas currently in transit'
-      : `${items.length} spa${items.length>1?'s':''} loaded on truck, awaiting receipt at warehouse`;
+    if(items.length === 0){
+      summary.textContent = 'No items currently in transit';
+    } else {
+      // Same type-split logic as the Factory Warehouse stats card — show
+      // spas and accessories separately so we never imply a phantom spa
+      // when the only in-transit item is a married accessory.
+      const spasCount = items.filter(i => i.type !== 'accessory' && i.type !== 'misc').length;
+      const accsCount = items.length - spasCount;
+      const parts = [];
+      if(spasCount) parts.push(`${spasCount} spa${spasCount > 1 ? 's' : ''}`);
+      if(accsCount) parts.push(`${accsCount} accessor${accsCount > 1 ? 'ies' : 'y'}`);
+      summary.textContent = `${parts.join(' + ')} loaded on truck, awaiting receipt at warehouse`;
+    }
   }
 
   // Admin-only bulk actions
