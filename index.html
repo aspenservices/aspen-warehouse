@@ -5,6 +5,17 @@
 <!-- viewport-fit=cover enables CSS env(safe-area-inset-*) so the topbar can
      pad around the iPhone notch / Dynamic Island. -->
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<!-- ════════════════════════════════════════════════════════════════════
+     CACHE-BUSTING HEADERS — defeat iOS Safari's aggressive HTML caching
+     ────────────────────────────────────────────────────────────────────
+     Without these, when a new version is deployed, iPhones can stay
+     stuck on the OLD version for hours/days, which made fixed bugs
+     appear "unfixed" on mobile. These force the browser to re-check
+     for a new index.html on every load.
+     ════════════════════════════════════════════════════════════════════ -->
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
 <!-- iOS web-app meta tags: lets the user "Add to Home Screen" and get a
      fullscreen icon. apple-mobile-web-app-status-bar-style=black-translucent
      puts the status bar over our blurred topbar (matches iOS native apps). -->
@@ -3328,7 +3339,7 @@ body.dark-mode .mar-card-track {
       <div class="role-current"><span id="role-indicator">Admin</span></div>
     </div>
   </div>
-  <div class="sb-foot"><div class="sb-ver">v3.85 · <span id="live-date"></span></div></div>
+  <div class="sb-foot"><div class="sb-ver">v3.86 · <span id="live-date"></span></div></div>
 </nav>
 
 <!-- MAIN -->
@@ -4255,6 +4266,10 @@ body.dark-mode .mar-card-track {
           <button class="btn" onclick="openAdminRolePinsModal()" style="justify-content:flex-start;padding:11px 14px;font-weight:700">
             🔢 Change Role Switch PINs
           </button>
+          <button class="btn" onclick="pushVersionToFirebase()" style="justify-content:flex-start;padding:11px 14px;font-weight:700;background:#1e3a8a;border-color:#1e3a8a;color:#fff">
+            🔄 Announce New Version to All Devices
+          </button>
+          <div style="font-size:10.5px;color:#1e40af;margin-top:-2px;line-height:1.4;padding-left:8px">After deploying a new version, click this to notify all other devices. They'll show an "Update available" banner and reload to the latest code.</div>
           <div style="border-top:1px dashed #fca5a5;padding-top:10px;margin-top:4px">
             <button class="btn btn-r" onclick="wipeInventoryData()" style="width:100%;justify-content:flex-start;padding:11px 14px;font-weight:700;background:#dc2626;border-color:#dc2626;color:#fff">
               🗑 Wipe All Inventory · Start Fresh Count
@@ -4365,6 +4380,97 @@ function loadScriptOnce(src){
 // SDK itself never made it onto the page.
 let _fbSdkLoadFailed = false;
 let _fbInitAttempts = 0;
+
+// ══════════════════════════════════════════════════════════════════
+// APP VERSION + AUTO-UPDATE SYSTEM
+// ──────────────────────────────────────────────────────────────────
+// THE PROBLEM THIS SOLVES:
+// iOS Safari aggressively caches HTML/JS. When Alberto deploys a new
+// version, his Mac might pick it up quickly, but his iPhone can stay
+// stuck on an OLD version for HOURS or DAYS — even after "refresh".
+// That's why bugs that ARE fixed on Mac still appear on iPhone.
+//
+// HOW IT WORKS:
+// 1. APP_VERSION below is the version this device is running.
+// 2. On every deploy, we write the new version string to Firebase
+//    (path: /app_version/current). When this device boots, it reads
+//    that value and compares.
+// 3. If remote > local, we show a banner: "New version available —
+//    tap to update". Tapping reloads the page bypassing cache.
+// 4. The check repeats every 5 minutes so stale tabs eventually catch up.
+//
+// MAINTENANCE:
+// Every time you bump the footer version, write the new value to:
+//   /app_version/current  (in Firebase console, manually, OR call
+//   pushVersionToFirebase() from the Admin console at deploy time)
+// ══════════════════════════════════════════════════════════════════
+const APP_VERSION = 'v3.86';
+window.APP_VERSION = APP_VERSION;
+
+let _updateBannerShown = false;
+let _versionCheckTimer = null;
+
+// Listen for version changes on Firebase. As soon as another device
+// (the deployer's machine) writes a newer version, we get notified
+// and show the banner immediately.
+function startVersionWatcher(){
+  if(!_fbDb) return;
+  try {
+    _fbDb.ref('app_version/current').on('value', (snap) => {
+      const remoteVer = snap.val();
+      if(!remoteVer || typeof remoteVer !== 'string') return;
+      if(remoteVer !== APP_VERSION && !_updateBannerShown){
+        console.log('[update] Remote version is', remoteVer, '— local is', APP_VERSION);
+        showUpdateBanner(remoteVer);
+      }
+    });
+  } catch(e){ console.warn('[version watcher]', e); }
+}
+window.startVersionWatcher = startVersionWatcher;
+
+// Push the current local version to Firebase. Call this from the
+// deployer's browser console AFTER you've git-pushed a new index.html.
+// Other devices will see the update banner within seconds.
+function pushVersionToFirebase(){
+  if(!_fbDb){ alert('Firebase not connected — cannot push version'); return; }
+  _fbDb.ref('app_version/current').set(APP_VERSION).then(() => {
+    alert(`✓ Version ${APP_VERSION} announced to all devices. They'll see an update banner.`);
+  }).catch(e => alert('Failed: ' + e.message));
+}
+window.pushVersionToFirebase = pushVersionToFirebase;
+
+function showUpdateBanner(newVer){
+  if(_updateBannerShown) return;
+  _updateBannerShown = true;
+  // Remove any existing banner
+  document.getElementById('update-banner')?.remove();
+  const banner = document.createElement('div');
+  banner.id = 'update-banner';
+  banner.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:999999;background:linear-gradient(135deg,#1e3a8a,#3b82f6);color:#fff;padding:14px 18px;text-align:center;font-size:14px;font-weight:600;box-shadow:0 4px 16px rgba(0,0,0,.3);cursor:pointer;animation:slideDown .3s ease-out';
+  banner.innerHTML = `
+    <div style="display:flex;align-items:center;justify-content:center;gap:12px;flex-wrap:wrap">
+      <span style="font-size:18px">🔄</span>
+      <span>Nueva versión disponible: <strong>${newVer}</strong> (estás en ${APP_VERSION})</span>
+      <button style="background:#fff;color:#1e3a8a;border:none;border-radius:7px;padding:7px 16px;font-size:13px;font-weight:800;cursor:pointer">Actualizar ahora</button>
+    </div>
+  `;
+  banner.onclick = () => {
+    // Hard reload bypassing cache. The query string is a final cache-bust
+    // in case the browser ignores reload(true).
+    const url = new URL(location.href);
+    url.searchParams.set('v', Date.now());
+    location.replace(url.toString());
+  };
+  document.body.appendChild(banner);
+  // Also inject a keyframe for the slide-in animation
+  if(!document.getElementById('update-banner-anim')){
+    const style = document.createElement('style');
+    style.id = 'update-banner-anim';
+    style.textContent = '@keyframes slideDown{from{transform:translateY(-100%)}to{transform:translateY(0)}}';
+    document.head.appendChild(style);
+  }
+}
+
 async function initFirebase(){
   if(!FIREBASE_ENABLED){
     console.log('[firebase] disabled — running in offline-only mode');
@@ -4449,6 +4555,8 @@ async function handleAuthChange(user){
     }
     // Start realtime cross-device sync — listens for remote state changes
     fbStartRealtimeSync();
+    // Start auto-update watcher — listens for new version announcements
+    startVersionWatcher();
     updateAuthBadge();
   } catch(err){
     console.error('[firebase] whitelist check failed:', err);
@@ -15208,86 +15316,157 @@ function handleQRPayload(raw, mode){
   } catch(e){ /* not JSON, treat as plain TID */ }
   if(!tid){ toast('No tracking ID detected','err'); return; }
 
-  // ── MARRIAGE LABEL SHORTCUT ──
-  // Marriage labels encode {type:"marriage", mid, sn, acc, dealer}. They don't
-  // carry a tracking ID — instead they identify the marriage by its id. Resolve
-  // the marriage → its linked factory accessory → let the normal flow handle it
-  // as if the operator had scanned the accessory's own tracking ID.
+  // ══════════════════════════════════════════════════════════════════
+  // MARRIAGE LABEL — UNIVERSAL HANDLER (receive mode only)
+  // ──────────────────────────────────────────────────────────────────
+  // Marriage labels encode {type:"marriage", mid, sn, acc, dealer}. They
+  // are SELF-SUFFICIENT — the QR carries everything we need to complete
+  // the receive operation. So this handler MUST always succeed in receive
+  // mode, regardless of the local data state:
   //
-  // Robustness: even if marriage.accessoryId got stale (e.g. the accessory was
-  // recreated), we fall back to matching factory items by spaSn + accessoryName.
-  // The QR carries enough info to find the right factory accessory.
+  //   • If marriage exists + acc in factory → normal receive
+  //   • If marriage exists + acc gone → just flip marriage to delivered
+  //   • If marriage doesn't exist locally → CREATE it from the QR payload
+  //     and mark delivered (data may not have synced yet, or this is a
+  //     completely fresh device that printed the label elsewhere)
+  //   • If everything is already delivered → idempotent success message
+  //
+  // We also detect WHERE the spa is (warehouse units, incoming, factory)
+  // and surface that in the success message so the operator knows what
+  // to do next physically.
+  //
+  // For other modes (load, dispatch, factory-receive), we fall through to
+  // the normal handler — marriage labels aren't expected in those flows.
+  // ══════════════════════════════════════════════════════════════════
   let found = null;
-  if(parsedType === 'marriage' && parsedMid != null){
-    const m = marriages.find(x => x.id === parsedMid);
-    const parsedSpaSn = parsedSn || (m && m.spaSn) || '';
-    const parsedAcc   = '';  // accessory name (parsed.acc) used only for matching below
+  if(parsedType === 'marriage' && parsedMid != null && mode === 'receive'){
+    // Re-parse the raw QR to grab the accessory name + dealer
     let parsedAccName = '';
-    try { const p = JSON.parse(raw||''); if(p.acc) parsedAccName = String(p.acc); } catch(e){}
+    let parsedDealer  = '';
+    try {
+      const p = JSON.parse(raw||'');
+      if(p.acc)    parsedAccName = String(p.acc);
+      if(p.dealer) parsedDealer  = String(p.dealer);
+    } catch(e){}
 
-    // Strategy 1: marriage.accessoryId (preferred — fast and exact)
-    let acc = m ? factory.find(f => f.id === m.accessoryId) : null;
-    // Strategy 2: factory accessory matched by marriedSn + dealer/name
-    // This catches cases where accessoryId got stale or the marriage record
-    // was rebuilt but the physical accessory still exists in factory.
+    const parsedSpaSn = parsedSn || '';
+
+    // Verbose logging — helps debug sync issues when something looks wrong
+    console.log('[marriage scan]', {
+      mid: parsedMid,
+      sn: parsedSpaSn,
+      acc: parsedAccName,
+      dealer: parsedDealer,
+      device: getDeviceId?.() || 'unknown',
+      appVersion: APP_VERSION
+    });
+
+    let m = marriages.find(x => x.id === parsedMid);
+    const marriageWasLocallyKnown = !!m;
+
+    // ── STEP 1: ensure a marriage record exists for this mid ──
+    // If the local data doesn't have it (stale device, fresh install, etc.)
+    // we CREATE it from the QR payload. The whole point of the QR is to
+    // be self-sufficient — scanning it should always work.
+    if(!m){
+      m = {
+        id: parsedMid,
+        spaSn: parsedSpaSn,
+        accessoryName: parsedAccName || 'Unknown accessory',
+        accessoryDealer: parsedDealer || '',
+        accessoryId: null,           // will be filled below if we find it in factory
+        status: 'pending',           // will become 'delivered' below
+        createdAt: toISO(),
+        createdBy: 'recovered from QR scan',
+        deliveredDate: null
+      };
+      marriages.unshift(m);
+      addAct(`🔄 Recovered marriage record from QR scan: ${m.accessoryName} for S/N ${m.spaSn}`, 'var(--accent)');
+      console.log('[marriage scan] Marriage', parsedMid, 'was NOT in local data — created locally from QR payload');
+    } else {
+      console.log('[marriage scan] Marriage', parsedMid, 'found in local data, status =', m.status);
+    }
+
+    // ── STEP 2: find the factory accessory (try all 3 strategies) ──
+    let acc = m.accessoryId ? factory.find(f => f.id === m.accessoryId) : null;
+    if(acc) console.log('[marriage scan] Found accessory via Strategy 1 (accessoryId):', acc.id);
     if(!acc && parsedSpaSn){
+      // Match by spa S/N + accessory name (case-insensitive contains)
       acc = factory.find(f =>
         (f.type === 'accessory' || f.type === 'misc') &&
         String(f.marriedSn) === String(parsedSpaSn) &&
-        (!parsedAccName || (f.dealer||'').toLowerCase().includes(parsedAccName.toLowerCase()) || parsedAccName.toLowerCase().includes((f.dealer||'').toLowerCase()))
+        (!parsedAccName ||
+         (f.dealer||'').toLowerCase().includes(parsedAccName.toLowerCase()) ||
+         parsedAccName.toLowerCase().includes((f.dealer||'').toLowerCase()))
       );
+      if(acc) console.log('[marriage scan] Found accessory via Strategy 2 (sn+name match):', acc.id);
     }
-    // Strategy 3: any accessory married to this spa, regardless of name match
     if(!acc && parsedSpaSn){
+      // Last resort: any accessory married to this spa
       acc = factory.find(f =>
         (f.type === 'accessory' || f.type === 'misc') &&
         String(f.marriedSn) === String(parsedSpaSn)
       );
+      if(acc) console.log('[marriage scan] Found accessory via Strategy 3 (sn-only match):', acc.id);
     }
+    if(!acc) console.log('[marriage scan] No factory accessory found — already received or in cloud-only state');
+
+    // ── STEP 2b: also detect where the SPA is physically ──
+    // This gives the operator context: "the spa is at warehouse" or "spa
+    // not arrived yet". Helps them understand the state of the world.
+    let spaLocation = 'unknown';
+    if(parsedSpaSn){
+      if(units.some(u => String(u.sn) === String(parsedSpaSn))) spaLocation = 'at warehouse (placed on floor)';
+      else if(incoming.some(i => String(i.sn) === String(parsedSpaSn))) spaLocation = 'at warehouse (incoming, not placed)';
+      else if(factory.some(f => String(f.sn) === String(parsedSpaSn))) spaLocation = 'still at factory';
+      else if(dispatched.some(d => String(d.sn) === String(parsedSpaSn))) spaLocation = 'already dispatched';
+    }
+    console.log('[marriage scan] Spa', parsedSpaSn, 'is', spaLocation);
+
+    // ── STEP 3: do the receive operation ──
+    // The outcome depends on what we found, but it is ALWAYS a success
+    // from the user's perspective — the physical accessory is at the
+    // warehouse, that's the truth we record.
+    const wasAlreadyDelivered = (m.status === 'delivered' || m.status === 'completed');
 
     if(acc){
-      found = { item: acc, source: 'factory' };
-      tid = acc.trackingId || `MID-${parsedMid}`;
-    } else if(m && (m.status === 'delivered' || m.status === 'completed')){
-      // No factory accessory found, but the marriage already says delivered.
-      // Most likely the accessory was already received and moved out of factory[].
-      setScanResult('ok', `for S/N ${m.spaSn}`, `marriage already ${m.status} — accessory previously received`);
-      toast(`Marriage for S/N ${m.spaSn} already ${m.status}`,'ok');
-      if(_qrScanState) _qrScanState.scanning = true;
-      return;
-    } else if(m){
-      // Marriage exists, pending, but accessory is gone — inconsistent state.
-      // Mark the marriage as delivered anyway so the operator can move on.
+      // Best case: the accessory is in factory and we receive it now
+      snapshot('marriage receive (from QR scan)');
+      factory = factory.filter(f => f.id !== acc.id);
+      m.accessoryId = m.accessoryId || acc.id;
+      m.status = 'delivered';
+      m.deliveredDate = m.deliveredDate || toISO();
+      addAct(`📬 Received married accessory: ${parsedAccName || acc.dealer} for S/N ${m.spaSn}`, 'var(--teal)');
+      setScanResult('ok', `for S/N ${m.spaSn}`, `received: ${parsedAccName || acc.dealer || 'accessory'} · spa ${spaLocation}`);
+      toast(`✓ Received accessory for S/N ${m.spaSn}`,'ok');
+    } else if(wasAlreadyDelivered){
+      // Idempotent success — already received in a previous scan
+      setScanResult('ok', `for S/N ${m.spaSn}`, `already received earlier · spa ${spaLocation}`);
+      toast(`✓ Already received: accessory for S/N ${m.spaSn}`,'ok');
+    } else {
+      // Marriage exists (or we just created it), accessory not in factory,
+      // but marriage isn't delivered yet. Mark it delivered.
       snapshot('marriage receive (no factory record)');
       m.status = 'delivered';
-      m.deliveredDate = toISO();
-      addAct(`📬 Marriage delivered (no factory record found): ${m.accessoryName} for S/N ${m.spaSn}`,'var(--teal)');
-      setScanResult('ok', `for S/N ${m.spaSn}`, 'marriage marked delivered (accessory was not in factory)');
-      toast(`Marriage delivered for S/N ${m.spaSn}`,'ok');
-      if(typeof renderMarriages === 'function') renderMarriages();
-      updBadges();
-      if(_qrScanState) _qrScanState.scanning = true;
-      return;
-    } else {
-      // Marriage id doesn't exist locally — likely the local data is stale.
-      // Even so, try to find the accessory by sn alone as a last resort.
-      if(parsedSpaSn){
-        const fallbackAcc = factory.find(f =>
-          (f.type === 'accessory' || f.type === 'misc') &&
-          String(f.marriedSn) === String(parsedSpaSn)
-        );
-        if(fallbackAcc){
-          found = { item: fallbackAcc, source: 'factory' };
-          tid = fallbackAcc.trackingId || `MID-${parsedMid}`;
-        }
-      }
-      if(!found){
-        setScanResult('err', `marriage ${parsedMid}`, 'marriage record not in local data — try syncing');
-        toast(`Marriage ${parsedMid} not found — wait for sync or refresh`,'err');
-        if(_qrScanState) _qrScanState.scanning = true;
-        return;
-      }
+      m.deliveredDate = m.deliveredDate || toISO();
+      const recoveredNote = marriageWasLocallyKnown ? '' : ' (recovered from QR — was missing locally)';
+      addAct(`📬 Marriage delivered${recoveredNote}: ${m.accessoryName} for S/N ${m.spaSn}`, 'var(--teal)');
+      setScanResult('ok', `for S/N ${m.spaSn}`, `marked delivered · spa ${spaLocation}${recoveredNote}`);
+      toast(`✓ Marriage delivered for S/N ${m.spaSn}`,'ok');
     }
+
+    // Refresh all relevant views and resume scanning for the next item
+    try { if(typeof renderMarriages === 'function') renderMarriages(); } catch(e){}
+    try { if(typeof renderFactory === 'function') renderFactory(); } catch(e){}
+    try { if(typeof renderInTransit === 'function') renderInTransit(); } catch(e){}
+    try { if(typeof renderIncoming === 'function') renderIncoming(); } catch(e){}
+    try { if(typeof drawMap === 'function') drawMap(); } catch(e){}
+    updBadges();
+    saveState();  // persist + push to Firebase
+    if(_qrScanState) {
+      setTimeout(() => { if(_qrScanState) _qrScanState.scanning = true; }, 1400);
+    }
+    return;
   }
 
   // Find the item: first by tracking ID, then by S/N as fallback for items that were
