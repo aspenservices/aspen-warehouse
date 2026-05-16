@@ -3328,7 +3328,7 @@ body.dark-mode .mar-card-track {
       <div class="role-current"><span id="role-indicator">Admin</span></div>
     </div>
   </div>
-  <div class="sb-foot"><div class="sb-ver">v3.74 · <span id="live-date"></span></div></div>
+  <div class="sb-foot"><div class="sb-ver">v3.75 · <span id="live-date"></span></div></div>
 </nav>
 
 <!-- MAIN -->
@@ -5421,9 +5421,10 @@ function ensureRolePinsInitialized(){
 
 // ── PIN MODAL ──
 // Shows a 4-digit numeric input. Calls onSuccess() when correct PIN entered,
-// onCancel() if user closes. Locks for 2s after 3 wrong attempts.
+// onCancel() if user closes. Locks for 1.5s after 5 wrong attempts.
 let _pinAttempts = 0;
 let _pinLockedUntil = 0;
+let _forgotTapCount = 0;       // # times the "?" has been tapped this session
 function promptForPin(role, onSuccess, onCancel){
   const r = ROLES[role];
   if(!r) { if(onCancel) onCancel(); return; }
@@ -5490,18 +5491,19 @@ function promptForPin(role, onSuccess, onCancel){
     }
     if(value === correctPin){
       _pinAttempts = 0;
+      _forgotTapCount = 0;
       cleanup();
       if(onSuccess) onSuccess();
     } else {
       _pinAttempts++;
       value = '';
       renderDots();
-      if(_pinAttempts >= 3){
-        _pinLockedUntil = Date.now() + 4000;
-        setError('Locked 4s — try again');
+      if(_pinAttempts >= 5){
+        _pinLockedUntil = Date.now() + 1500;
+        setError('Locked 1.5s — tap ? if forgot');
         _pinAttempts = 0;
       } else {
-        setError(`Incorrect PIN (${3 - _pinAttempts} ${3 - _pinAttempts === 1 ? 'try' : 'tries'} left)`);
+        setError(`Incorrect (${5 - _pinAttempts} left) — tap ? if forgot`);
       }
     }
   }
@@ -5538,7 +5540,32 @@ function promptForPin(role, onSuccess, onCancel){
     if(btn.dataset.digit) addDigit(btn.dataset.digit);
     else if(btn.dataset.action === 'back') backspace();
     else if(btn.dataset.action === 'forgot'){
-      setError('Ask your admin for the PIN');
+      _forgotTapCount++;
+      if(_forgotTapCount === 1){
+        // First tap: show the factory defaults as a hint
+        setError(`Default PINs: Admin = 2804 · All others = 0000. Tap ? again to RESET all PINs to defaults.`);
+      } else {
+        // Second tap: offer emergency reset
+        if(confirm('🔓 EMERGENCY RESET\n\nReset ALL role PINs to factory defaults?\n\n• Admin → 2804\n• Warehouse / Factory / Marriages / Transit / Organizer / Viewer → 0000\n\nThis bypasses the locked-out state and overwrites any custom PINs you set. Use only if everyone has forgotten their PIN.\n\nProceed?')){
+          try {
+            if(!window.cfg) window.cfg = {};
+            cfg.rolePasswords = { ...DEFAULT_ROLE_PINS };
+            _pinAttempts = 0;
+            _pinLockedUntil = 0;
+            _forgotTapCount = 0;
+            if(typeof saveState === 'function') saveState();
+            if(typeof fbAutoPush === 'function') fbAutoPush();
+            setError('✓ Reset done — admin=2804, others=0000. Enter PIN now.');
+            if(typeof toast === 'function') toast('PINs reset to defaults', 'ok');
+            if(typeof addAct === 'function') addAct('🔓 Emergency reset: all role PINs restored to factory defaults', 'var(--red)');
+          } catch(e){
+            console.error('PIN reset failed:', e);
+            setError('Reset failed — try a hard reload');
+          }
+        } else {
+          _forgotTapCount = 0;  // reset so the next tap shows the hint again
+        }
+      }
     }
   });
 
