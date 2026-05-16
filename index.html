@@ -3328,7 +3328,7 @@ body.dark-mode .mar-card-track {
       <div class="role-current"><span id="role-indicator">Admin</span></div>
     </div>
   </div>
-  <div class="sb-foot"><div class="sb-ver">v3.75 · <span id="live-date"></span></div></div>
+  <div class="sb-foot"><div class="sb-ver">v3.77 · <span id="live-date"></span></div></div>
 </nav>
 
 <!-- MAIN -->
@@ -4658,6 +4658,34 @@ function fbStopRealtimeSync(){
 // but without the confirm dialog and without re-pushing back to cloud.
 // IMPORTANT: this also calls fbRerenderActiveView() INSIDE the _fbApplyingRemote
 // flag-protected block so the render's saveState calls are correctly skipped.
+// ── CFG MERGE HELPER (preserves custom role PINs across sync) ──
+// A shallow Object.assign for cfg would overwrite cfg.rolePasswords entirely
+// with the remote's version. If the remote was saved by an older client whose
+// cfg was missing some role keys (e.g. didn't know about 'marriages') or by a
+// freshly-booted device that pushed defaults before its ensureRolePinsInitialized
+// ran, the merge would clobber custom PINs the local device worked hard to set.
+// This helper does a key-by-key merge of rolePasswords: prefer remote when
+// present, keep local otherwise, backfill missing roles from DEFAULT_ROLE_PINS.
+function mergeCfgPreservingPins(localCfg, remoteCfg){
+  if(!remoteCfg || typeof remoteCfg !== 'object') return localCfg;
+  const remotePins = (remoteCfg.rolePasswords && typeof remoteCfg.rolePasswords === 'object') ? remoteCfg.rolePasswords : {};
+  const localPins  = (localCfg && localCfg.rolePasswords && typeof localCfg.rolePasswords === 'object') ? localCfg.rolePasswords : {};
+  // Local first so remote values win when both present. Custom PINs set on
+  // ANY device (and pushed to Firebase) propagate to every other device.
+  const mergedPins = { ...localPins, ...remotePins };
+  const { rolePasswords: _ignored, ...remoteCfgRest } = remoteCfg;
+  const merged = Object.assign({}, localCfg, remoteCfgRest, { rolePasswords: mergedPins });
+  // Backfill any role that's missing entirely (newly added role or first run)
+  try {
+    if(typeof DEFAULT_ROLE_PINS !== 'undefined'){
+      for(const r of Object.keys(DEFAULT_ROLE_PINS)){
+        if(merged.rolePasswords[r] == null) merged.rolePasswords[r] = DEFAULT_ROLE_PINS[r];
+      }
+    }
+  } catch(e){}
+  return merged;
+}
+
 function fbApplyRemoteState(restored, sourceTimestamp){
   _fbApplyingRemote = true;
   try {
@@ -4675,7 +4703,7 @@ function fbApplyRemoteState(restored, sourceTimestamp){
     if(Array.isArray(restored.coverInventory)) coverInventory = restored.coverInventory;
     if(restored.colorLibrary && typeof restored.colorLibrary === 'object') colorLibrary = restored.colorLibrary;
     if(restored.coverModelMapping && typeof restored.coverModelMapping === 'object') coverModelMapping = restored.coverModelMapping;
-    if(restored.cfg && typeof restored.cfg === 'object') cfg = Object.assign({}, cfg, restored.cfg);
+    if(restored.cfg && typeof restored.cfg === 'object') cfg = mergeCfgPreservingPins(cfg, restored.cfg);
     // ── PERSIST DIRECTLY (no saveState, no autopush) ──
     // CRITICAL: We MUST NOT route through saveState() here. saveState's debounced
     // setTimeout would fire AFTER _fbApplyingRemote was reset, triggering fbAutoPush
@@ -4958,71 +4986,25 @@ async function removeUserConfirm(emailK, displayEmail){
 
 // ══════════════════════════════════════════════════════════════════════════════
 // ADMIN ROLE PIN MANAGEMENT — local PINs for the role-switcher dropdown
-// These are NOT Firebase passwords — they are short PINs (default 0000) that gate
-// switching the "Viewing As" role in the sidebar. Stored in cfg.rolePasswords.
 // ══════════════════════════════════════════════════════════════════════════════
+// LEGACY: these two functions used to drive a separate PIN-editing modal that
+// duplicated openPasswordManager's job. Two parallel systems meant changes
+// made in one didn't always propagate the same way through saveState/fbAutoPush,
+// causing the "PINs don't work after I change them" bug. We now redirect to
+// the canonical openPasswordManager (defined further down) so there's exactly
+// one save path: setRolePin → saveState → fbAutoPush → all devices see it.
 function openAdminRolePinsModal(){
   if(currentRole !== 'admin'){ toast('Admin only','err'); return; }
-  const existing = document.getElementById('admin-pins-overlay');
-  if(existing) existing.remove();
-  const overlay = document.createElement('div');
-  overlay.id = 'admin-pins-overlay';
-  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(15,23,42,.65);z-index:9990;display:flex;align-items:center;justify-content:center;padding:20px;overflow-y:auto';
-  cfg.rolePasswords = cfg.rolePasswords || {};
-  const rolesList = Object.entries(ROLES).map(([k, r]) => {
-    const pin = (cfg.rolePasswords[k] !== undefined) ? cfg.rolePasswords[k] : (r.password || '0000');
-    return `
-      <div style="display:flex;align-items:center;gap:11px;padding:11px 13px;border:1px solid var(--line);border-radius:9px;margin-bottom:7px;background:#fff">
-        <div style="font-size:18px">${r.icon}</div>
-        <div style="flex:1 1 auto;min-width:0">
-          <div style="font-size:13px;font-weight:700">${r.label}</div>
-          <div style="font-size:10.5px;color:var(--text3)">${r.subtitle}</div>
-        </div>
-        <input id="pin-${k}" class="fi" type="text" inputmode="numeric" maxlength="8" value="${pin}" style="flex:0 0 90px;font-family:var(--mono);font-weight:700;text-align:center;font-size:14px">
-      </div>`;
-  }).join('');
-  overlay.innerHTML = `
-    <div style="background:#fff;border-radius:14px;max-width:540px;width:100%;max-height:90vh;overflow-y:auto;box-shadow:0 20px 60px -10px rgba(0,0,0,.4)">
-      <div style="padding:18px 22px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center">
-        <div>
-          <div style="font-size:17px;font-weight:800">🔑 Role Switch PINs</div>
-          <div style="font-size:11.5px;color:var(--text3);margin-top:3px">Set the PIN required to switch into each "Viewing As" role</div>
-        </div>
-        <button class="btn btn-sm" onclick="document.getElementById('admin-pins-overlay').remove()">✕ Close</button>
-      </div>
-      <div style="padding:14px 22px;background:#fef3c7;border-bottom:1px solid #fcd34d">
-        <div style="font-size:11.5px;color:#78350f;line-height:1.5">
-          <strong>⚠ Different from sign-in:</strong> These PINs control the in-app role switcher only. Firebase sign-in (with Google) is unaffected. Keep these simple (4-8 digits) — they're for quick role hand-off, not security.
-        </div>
-      </div>
-      <div style="padding:8px 18px 18px">
-        ${rolesList}
-        <div style="display:flex;gap:8px;margin-top:13px">
-          <button class="btn btn-p" onclick="saveAdminRolePins()" style="flex:1">💾 Save PINs</button>
-          <button class="btn" onclick="document.getElementById('admin-pins-overlay').remove()">Cancel</button>
-        </div>
-      </div>
-    </div>`;
-  document.body.appendChild(overlay);
-  overlay.addEventListener('click', e => { if(e.target === overlay) overlay.remove(); });
+  if(typeof openPasswordManager === 'function'){
+    openPasswordManager();
+  } else {
+    toast('Password manager not ready — try reloading','err');
+  }
 }
-
 function saveAdminRolePins(){
-  cfg.rolePasswords = cfg.rolePasswords || {};
-  let saved = 0;
-  Object.keys(ROLES).forEach(k => {
-    const inp = document.getElementById('pin-' + k);
-    if(inp){
-      const pin = (inp.value||'').trim();
-      if(pin){
-        cfg.rolePasswords[k] = pin;
-        saved++;
-      }
-    }
-  });
-  flushSave();
-  toast(`✓ Saved ${saved} role PIN${saved===1?'':'s'}`,'ok');
-  document.getElementById('admin-pins-overlay')?.remove();
+  // No-op kept for backward compatibility in case any inline onclick still
+  // points at it. The new flow saves per-row via window._savePin.
+  if(typeof toast === 'function') toast('Use the per-row Save button','err');
 }
 
 // Upload a photo to Firebase Storage. Returns {url, path} or null on failure.
@@ -5274,7 +5256,7 @@ let matPhotoData = null;
 let calYear = new Date().getFullYear();
 let calMonth = new Date().getMonth();
 let selDay = null;
-let cfg = {emails:[], gcal:false, gcalEmail:'', auth:['Alberto','Jarred','Tony','Dan'], rolePasswords:{admin:'0000',warehouse:'0000',factory:'0000',organizer:'0000'}};
+let cfg = {emails:[], gcal:false, gcalEmail:'', auth:['Alberto','Jarred','Tony','Dan'], rolePasswords:{admin:'2804',warehouse:'0000',factory:'0000',marriages:'0000',transit:'0000',organizer:'0000',viewer:'0000'}};
 
 // ── DEALER COLOR CODING ──
 // Assigns a stable color to each dealer name via hash, so all visualizations of the same
@@ -13945,12 +13927,20 @@ function renderFactory(){
   const spas = atFactory.filter(f => f.type==='hot' || f.type==='swim' || f.type==='extra');
   const acc = atFactory.filter(f => f.type==='accessory' || f.type==='misc');
   const married = acc.filter(a => a.marriedSn);
-  // Also count items currently in transit (separate stat for visibility)
-  const inTransitCount = factory.filter(f => f.trackingState === 'in-transit').length;
-  const transitNote = inTransitCount > 0 ? ` · ${inTransitCount} on truck` : '';
+  // ── IN-TRANSIT COUNTS, SPLIT BY TYPE ──
+  // The Spas Ready card was previously showing "X on truck" using the TOTAL of
+  // factory items with trackingState='in-transit'. That total includes shipped
+  // accessories too, which made it look like there was a "phantom" spa on the
+  // truck (Alberto reported: "desapareció uno de los despachados de factory").
+  // Splitting the counts so each stat card only reflects its own type.
+  const spasInTransit = factory.filter(f => f.trackingState === 'in-transit' && (f.type==='hot' || f.type==='swim' || f.type==='extra')).length;
+  const accInTransit = factory.filter(f => f.trackingState === 'in-transit' && (f.type==='accessory' || f.type==='misc')).length;
+  const inTransitCount = spasInTransit + accInTransit;  // kept for the empty-list fallback message below
+  const transitNote = spasInTransit > 0 ? ` · ${spasInTransit} on truck` : '';
+  const accTransitNote = accInTransit > 0 ? ` · ${accInTransit} on truck` : '';
   document.getElementById('fct-stats').innerHTML = `
     <div class="sc cb"><div class="sc-corner"></div><div class="sc-label">Spas Ready</div><div class="sc-val">${spas.length}</div><div class="sc-trend">At factory${transitNote}</div></div>
-    <div class="sc" style="border-left:3px solid var(--orange)"><div class="sc-label">Accessories</div><div class="sc-val" style="color:var(--orange)">${acc.length}</div><div class="sc-trend">${married.length} married to spa</div></div>
+    <div class="sc" style="border-left:3px solid var(--orange)"><div class="sc-label">Accessories</div><div class="sc-val" style="color:var(--orange)">${acc.length}</div><div class="sc-trend">${married.length} married to spa${accTransitNote}</div></div>
     <div class="sc${married.length>0?' marriage-warning-card':''}"><div class="sc-label">${married.length>0?'⚠ ':''}Holding Married</div><div class="sc-val" style="color:${married.length>0?'var(--red)':'var(--text2)'}">${married.length}</div><div class="sc-trend">Spa(s) waiting at warehouse</div></div>
   `;
   document.getElementById('fct-tab-spas').textContent = spas.length || '';
@@ -17940,7 +17930,7 @@ function loadState(){
     if(Array.isArray(s.coverInventory)) coverInventory = s.coverInventory;
     if(s.colorLibrary && typeof s.colorLibrary === 'object') colorLibrary = Object.assign(colorLibrary, s.colorLibrary);
     if(s.coverModelMapping && typeof s.coverModelMapping === 'object') coverModelMapping = s.coverModelMapping;
-    if(s.cfg && typeof s.cfg === 'object') cfg = Object.assign(cfg, s.cfg);
+    if(s.cfg && typeof s.cfg === 'object') cfg = mergeCfgPreservingPins(cfg, s.cfg);
     // ── MOBILE SYNC FIX ──
     // Remember when localStorage was last written. The realtime listener's
     // "newness guard" uses _fbLastLocalWriteAt to skip stale cloud snapshots
@@ -18052,7 +18042,7 @@ function importBackup(e){
       factory = Array.isArray(s.factory) ? s.factory : [];
       marriages = Array.isArray(s.marriages) ? s.marriages : [];
       dispatchRequests = Array.isArray(s.dispatchRequests) ? s.dispatchRequests : [];
-      if(s.cfg && typeof s.cfg === 'object') cfg = Object.assign(cfg, s.cfg);
+      if(s.cfg && typeof s.cfg === 'object') cfg = mergeCfgPreservingPins(cfg, s.cfg);
       migrateUnitsToStacks();
       saveState();
       toast(`Restored ${units.length} units`, 'ok');
@@ -18264,7 +18254,7 @@ window.addEventListener('storage', e => {
       if(Array.isArray(restored.coverInventory)) coverInventory = restored.coverInventory;
       if(restored.colorLibrary && typeof restored.colorLibrary === 'object') colorLibrary = restored.colorLibrary;
       if(restored.coverModelMapping && typeof restored.coverModelMapping === 'object') coverModelMapping = restored.coverModelMapping;
-      if(restored.cfg && typeof restored.cfg === 'object') cfg = Object.assign({}, cfg, restored.cfg);
+      if(restored.cfg && typeof restored.cfg === 'object') cfg = mergeCfgPreservingPins(cfg, restored.cfg);
       if(typeof restored._saved === 'number'){ _fbLastLocalWriteAt = restored._saved; }
       try { _lastSavedHash = stateHash(); } catch(e){}
       // Render INSIDE the flag-protected block so the render's saveState calls
