@@ -3328,7 +3328,7 @@ body.dark-mode .mar-card-track {
       <div class="role-current"><span id="role-indicator">Admin</span></div>
     </div>
   </div>
-  <div class="sb-foot"><div class="sb-ver">v3.80 · <span id="live-date"></span></div></div>
+  <div class="sb-foot"><div class="sb-ver">v3.81 · <span id="live-date"></span></div></div>
 </nav>
 
 <!-- MAIN -->
@@ -15108,18 +15108,58 @@ function setScanResult(kind, id, note){
 function handleQRPayload(raw, mode){
   let tid = (raw||'').trim();
   let parsedSn = '';
+  let parsedMid = null;
+  let parsedType = '';
   // Try to parse as JSON first (full QR payload), then fall back to plain TID
   try {
     const parsed = JSON.parse(tid);
     if(parsed.tid) tid = parsed.tid;
     if(parsed.sn) parsedSn = String(parsed.sn);
+    if(parsed.mid != null) parsedMid = parsed.mid;
+    if(parsed.type) parsedType = String(parsed.type);
   } catch(e){ /* not JSON, treat as plain TID */ }
   if(!tid){ toast('No tracking ID detected','err'); return; }
+
+  // ── MARRIAGE LABEL SHORTCUT ──
+  // Marriage labels encode {type:"marriage", mid, sn, acc, dealer}. They don't
+  // carry a tracking ID — instead they identify the marriage by its id. Resolve
+  // the marriage → its linked factory accessory → let the normal flow handle it
+  // as if the operator had scanned the accessory's own tracking ID. This is the
+  // common Warehouse-receive case for the auto-printed marriage labels.
+  let found = null;
+  if(parsedType === 'marriage' && parsedMid != null){
+    const m = marriages.find(x => x.id === parsedMid);
+    if(m){
+      const acc = factory.find(f => f.id === m.accessoryId);
+      if(acc){
+        found = { item: acc, source: 'factory' };
+        // Make sure downstream logging shows something useful even if the acc has no tid
+        if(!acc.trackingId) tid = `MID-${parsedMid}`;
+        else tid = acc.trackingId;
+      } else if(m.status === 'delivered' || m.status === 'completed'){
+        // Accessory already removed from factory[] (already received) — confirm + bail
+        setScanResult('ok', `for S/N ${m.spaSn}`, `marriage already ${m.status} — accessory previously received`);
+        toast(`Marriage for S/N ${m.spaSn} already ${m.status}`,'ok');
+        if(_qrScanState) _qrScanState.scanning = true;
+        return;
+      } else {
+        setScanResult('err', `for S/N ${m.spaSn}`, 'accessory not found in factory');
+        toast(`Accessory for marriage ${parsedMid} not in factory inventory`,'err');
+        if(_qrScanState) _qrScanState.scanning = true;
+        return;
+      }
+    } else {
+      setScanResult('err', `marriage ${parsedMid}`, 'marriage record not found');
+      toast(`Marriage ${parsedMid} not in system`,'err');
+      if(_qrScanState) _qrScanState.scanning = true;
+      return;
+    }
+  }
 
   // Find the item: first by tracking ID, then by S/N as fallback for items that were
   // CSV-imported (incoming) or placed before QR tracking existed (units). The lookup
   // tries each source in priority order and stops at the first hit.
-  let found = findByTrackingId(tid);
+  if(!found) found = findByTrackingId(tid);
   const trySnLookup = (sn) => {
     // Try incoming first (most common path: scanning to receive)
     const inc = incoming.find(x => String(x.sn) === sn);
