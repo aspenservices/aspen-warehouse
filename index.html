@@ -2,7 +2,17 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<!-- viewport-fit=cover enables CSS env(safe-area-inset-*) so the topbar can
+     pad around the iPhone notch / Dynamic Island. -->
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<!-- iOS web-app meta tags: lets the user "Add to Home Screen" and get a
+     fullscreen icon. apple-mobile-web-app-status-bar-style=black-translucent
+     puts the status bar over our blurred topbar (matches iOS native apps). -->
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Aspen WH">
+<meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0f172a" media="(prefers-color-scheme: dark)">
 <title>Aspen Spas — Warehouse Manager</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -560,8 +570,9 @@ body.dark-mode .bottom-nav {
   .bottom-nav { display: flex !important; }
   .main { padding-bottom: 72px !important; }
   .fab { display: flex !important; }
-  /* Hide the hamburger menu button — bottom nav covers it */
-  .menu-btn { display: none !important; }
+  /* Hamburger stays visible on mobile — it opens the sidebar which holds
+     all the secondary actions (settings, sign-in, search, dark-mode, etc.)
+     that we moved out of the cramped topbar. */
 }
 /* Hide bottom nav + FAB on desktop */
 @media (min-width: 769px){
@@ -1478,34 +1489,20 @@ tbody tr:hover td{background:var(--bg3)}
   .sidebar{width:78%;max-width:300px}
   .main{padding:0}
 
-  /* Stats: 3 cols on mobile */
-  .stats-grid{grid-template-columns:repeat(3,1fr) !important;gap:7px;margin-bottom:11px}
-  .sc{padding:10px 11px !important;min-height:auto}
-  .sc-val{font-size:19px;line-height:1.1}
-  .sc-label{font-size:8.5px;letter-spacing:.04em;line-height:1.2}
-  .sc-trend{font-size:8.5px;line-height:1.2}
-  .sc::after{display:none}  /* hide decorative dot */
-  .sc-corner{display:none !important}  /* hide corner decoration on mobile */
-  /* Long sc-trend text: wrap nicely */
-  .sc-trend{white-space:normal;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;max-height:2.4em}
+  /* Stats grid: rules below are now handled by the dedicated mobile-polish
+     block further down. Removed legacy 3-column grid + 19px stat values
+     (they conflicted with the 2-column premium layout). */
+  .sc::after{display:none}
+  .sc-corner{display:none !important}
 
-  /* Topbar: title row + actions row, compact buttons */
-  .topbar{padding:7px 11px;gap:5px;min-height:52px}
-  .topbar > div:first-child{display:none}  /* hamburger first */
+  /* Topbar: minimal legacy rules — the heavy lifting (hide search/avatar/
+     auth badge/etc., one-row layout, frosted glass) is in the mobile-polish
+     block below. The conflicting `.topbar > div:first-child{display:none}`
+     rule that was hiding the hamburger has been removed. */
   .menu-btn{padding:6px 8px}
   .menu-btn svg{width:15px;height:15px}
-  .topbar > div:nth-of-type(2){flex:1;min-width:0}
-  .pg-title{font-size:13.5px;line-height:1.2}
-  .pg-sub{font-size:9.5px;line-height:1.2}
-  body.role-warehouse .pg-title::after,
-  body.role-factory .pg-title::after,
-  body.role-organizer .pg-title::after{display:block;margin-left:0;margin-top:2px;font-size:9.5px}
 
-  /* Topbar buttons: icon-priority — hide text for compact look */
-  .tba{width:auto;justify-content:flex-end;gap:5px}
-  .tba .btn{padding:6px 9px;font-size:10.5px;min-width:auto}
-  .tba .btn svg{width:13px;height:13px}
-  /* Hide low-priority actions on small screens */
+  /* Hide low-priority topbar export/print actions */
   .tba > button[onclick*="exportCSV"],
   .tba > button[onclick*="printReport"],
   .tba > button[onclick*="exportFct"],
@@ -1515,17 +1512,8 @@ tbody tr:hover td{background:var(--bg3)}
   #fb-auth-badge > span,
   #fb-auth-badge > button{font-size:10px !important;padding:3px 7px !important}
 
-  /* View padding */
-  .view{padding:11px !important}
-
-  /* Cards: tighter spacing */
-  .card{margin-bottom:10px;border-radius:10px}
-  .card-hd{padding:9px 11px;flex-wrap:wrap;gap:7px}
-  .card-hd .card-acts{margin-left:0;width:100%;justify-content:flex-start;flex-wrap:wrap;gap:5px}
-  .card-hd .card-acts .btn{flex:0 1 auto;font-size:10.5px;padding:6px 9px}
-  .card-body{padding:10px 11px}
-  .card-title{font-size:12.5px;line-height:1.2}
-  .card-sub{font-size:10px;line-height:1.3}
+  /* View / card / banner-styling are now handled by the dedicated
+     mobile-polish block further down. Legacy compact rules removed. */
 
   /* Banner cards at top of views — removed broken legacy rules that assumed a structure
      where the first child of the gradient div was an icon. The current banners use the
@@ -1771,6 +1759,791 @@ tbody tr:hover td{background:var(--bg3)}
   .pr-ttl-print { display: block !important; font-size: 14px; font-weight: 700; margin-bottom: 6px; padding-bottom: 4px; border-bottom: 2px solid #333; }
 }
 .pr-ttl-print { display: none; }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   MOBILE APP POLISH — make the app feel like a native iOS app on phones.
+   Everything below applies ONLY at ≤768px so desktop is unchanged. Most rules
+   use !important because the existing mobile-768 block above sets things
+   we want to override (font sizes, padding, etc.) and we don't want to fight
+   over specificity for every selector.
+   Design goals:
+   • iOS-style frosted/blurred sticky header with safe-area
+   • One-line topbar — no more cramming subtitle + 6 buttons
+   • Touch targets ≥ 44pt (Apple HIG)
+   • Soft rounded cards with subtle shadows
+   • Snappy tap feedback (opacity dip on press)
+   • Notification pill wraps to its own second row instead of being cut off
+   ═══════════════════════════════════════════════════════════════════════════ */
+@media (max-width: 768px) {
+  /* ── SAFE AREA: respect the iPhone notch / Dynamic Island ── */
+  .topbar {
+    padding: calc(8px + env(safe-area-inset-top)) 12px 8px !important;
+    height: auto !important;
+    min-height: calc(54px + env(safe-area-inset-top)) !important;
+    flex-wrap: wrap !important;
+    row-gap: 6px !important;
+    /* iOS-style frosted glass background */
+    backdrop-filter: saturate(180%) blur(20px);
+    -webkit-backdrop-filter: saturate(180%) blur(20px);
+    background: rgba(255, 255, 255, 0.82) !important;
+    border-bottom: 0.5px solid rgba(0, 0, 0, 0.1) !important;
+    box-shadow: none !important;
+  }
+  body.dark-mode .topbar {
+    background: rgba(15, 23, 42, 0.85) !important;
+    border-bottom-color: rgba(255, 255, 255, 0.08) !important;
+  }
+  .main {
+    /* The padding-top of the main no longer needs to account for the topbar
+       since topbar is sticky and respects safe-area. Just clear bottom-nav. */
+    padding-bottom: calc(72px + env(safe-area-inset-bottom)) !important;
+  }
+
+  /* ── iOS-style large title ── */
+  .pg-title {
+    font-size: 17.5px !important;
+    font-weight: 700 !important;
+    letter-spacing: -0.015em !important;
+    line-height: 1.2 !important;
+    color: var(--text1);
+  }
+  .pg-sub {
+    /* Hide subtitle on phones — too cramped. Available on tap in card hero. */
+    display: none !important;
+  }
+
+  /* ── Hide overflow buttons that don't make sense on mobile ──
+     They're all accessible via the "More" sidebar button anyway. */
+  .tba > #global-search-toggle,
+  .tba > #dark-mode-toggle,
+  .tba > button[onclick*="exportCSV"],
+  .tba > button[onclick*="exportFct"],
+  .tba > button[onclick*="exportDispatch"],
+  .tba > button[onclick*="printReport"],
+  .tba > button[onclick*="printFct"],
+  .tba > button.btn-p[onclick*="goV('incoming')"] {
+    display: none !important;
+  }
+
+  /* ── User pill: avatar only, no name in topbar ── */
+  .user-pill {
+    padding: 0 !important;
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+    gap: 0 !important;
+  }
+  .user-pill-name { display: none !important; }
+  .user-pill-avatar {
+    width: 32px !important;
+    height: 32px !important;
+    font-size: 12px !important;
+    border: 1.5px solid rgba(0, 0, 0, 0.06);
+  }
+  body.dark-mode .user-pill-avatar {
+    border-color: rgba(255, 255, 255, 0.1);
+  }
+
+  /* ── Sync badge group: compact ── */
+  #sync-status-badge {
+    padding: 4px 9px !important;
+    font-size: 10.5px !important;
+    font-weight: 600 !important;
+  }
+  #sync-diag-btn {
+    width: 28px !important;
+    height: 28px !important;
+    font-size: 13px;
+  }
+
+  /* ── Auth badge ── */
+  #fb-auth-badge { flex-shrink: 0; }
+  #fb-auth-badge > span,
+  #fb-auth-badge > button {
+    font-size: 10px !important;
+    padding: 3px 7px !important;
+  }
+
+  /* ── NOTIFICATION PILL: gets its own full-width second row ──
+     Before: tried to fit "2 married spas waiting on factory" alongside the
+     avatar — got cut off. Now: wraps to row 2, full width, properly readable. */
+  #notif-area {
+    flex-basis: 100% !important;
+    order: 99 !important;
+    margin-top: 2px !important;
+    width: 100%;
+  }
+  #notif-area > div {
+    width: 100%;
+    justify-content: center !important;
+    flex-wrap: wrap !important;
+    padding: 8px 12px !important;
+    font-size: 12px !important;
+    line-height: 1.35 !important;
+    white-space: normal !important;
+    min-height: 36px;
+  }
+
+  /* ── iOS-style touch targets: 44pt minimum ── */
+  .btn:not(.btn-sm):not(.chip-rm):not(.btn-link) {
+    min-height: 44px;
+    padding: 12px 16px;
+    font-size: 14px;
+    border-radius: 10px;
+    font-weight: 600;
+  }
+  .btn-p:not(.btn-sm) {
+    box-shadow: 0 2px 8px rgba(26, 86, 219, 0.25);
+  }
+  .btn svg { width: 14px; height: 14px; }
+
+  /* ── iOS tap feedback: subtle opacity dip ── */
+  .btn:active,
+  .card:active,
+  .sc:active,
+  .ni:active,
+  .bn-item:active,
+  .fct-card:active {
+    opacity: 0.72 !important;
+    transition: opacity 0.04s ease !important;
+    transform: none !important;
+  }
+
+  /* ── iOS-style cards: rounded + soft shadow + hairline border ── */
+  .card {
+    border-radius: 14px !important;
+    border: 0.5px solid rgba(0, 0, 0, 0.08) !important;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04) !important;
+    overflow: hidden;
+  }
+  body.dark-mode .card {
+    border-color: rgba(255, 255, 255, 0.08) !important;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3) !important;
+  }
+  .sc {
+    border-radius: 14px !important;
+    border: 0.5px solid rgba(0, 0, 0, 0.08) !important;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04) !important;
+    padding: 14px 15px !important;
+  }
+  body.dark-mode .sc {
+    border-color: rgba(255, 255, 255, 0.08) !important;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3) !important;
+  }
+
+  /* ── Sleeker stat cards: 2 cols on phone for breathing room ── */
+  .stats-grid {
+    grid-template-columns: 1fr 1fr !important;
+    gap: 9px !important;
+    margin-bottom: 14px !important;
+  }
+  /* If only 3 cards, the lonely one spans full width on its row */
+  .stats-grid .sc:nth-child(3):last-child {
+    grid-column: 1 / -1 !important;
+  }
+  .sc-label {
+    font-size: 10px !important;
+    letter-spacing: 0.06em !important;
+    text-transform: uppercase;
+    color: var(--text3);
+    font-weight: 700;
+  }
+  .sc-val {
+    font-size: 26px !important;
+    font-weight: 700 !important;
+    margin-top: 5px !important;
+    line-height: 1 !important;
+    letter-spacing: -0.02em;
+  }
+  .sc-trend {
+    font-size: 11px !important;
+    margin-top: 4px !important;
+    color: var(--text3);
+  }
+
+  /* ── Hero banner cards (the "Factory Warehouse — Aspen Production" intro) ── */
+  /* The big colored intro card at the top of each view: soften the rounded
+     corners and make the icon more breathable. */
+  .view > .card:first-child {
+    border-radius: 16px !important;
+  }
+
+  /* ── iOS-style view transition: subtle vertical slide ── */
+  .view.active {
+    animation: iosSlideIn 0.32s cubic-bezier(0.32, 0.72, 0, 1);
+  }
+  @keyframes iosSlideIn {
+    from { opacity: 0; transform: translateY(6px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  /* ── View padding: more breathing room ── */
+  .view {
+    padding: 14px 12px !important;
+  }
+
+  /* ── FAB: larger and out of the way of bottom nav + safe area ── */
+  .fab {
+    width: 56px !important;
+    height: 56px !important;
+    bottom: calc(80px + env(safe-area-inset-bottom)) !important;
+    right: 16px !important;
+    box-shadow: 0 8px 20px -4px rgba(26, 86, 219, 0.4),
+                0 2px 6px rgba(26, 86, 219, 0.25) !important;
+  }
+  .fab svg { width: 22px; height: 22px; }
+
+  /* ── Bottom nav refinements ── */
+  .bottom-nav {
+    backdrop-filter: saturate(180%) blur(20px);
+    -webkit-backdrop-filter: saturate(180%) blur(20px);
+    background: rgba(255, 255, 255, 0.92) !important;
+    border-top: 0.5px solid rgba(0, 0, 0, 0.1) !important;
+    box-shadow: none !important;
+  }
+  body.dark-mode .bottom-nav {
+    background: rgba(15, 23, 42, 0.92) !important;
+    border-top-color: rgba(255, 255, 255, 0.08) !important;
+  }
+  .bn-item {
+    min-height: 50px;
+    padding: 6px 4px !important;
+    font-size: 9.5px;
+    font-weight: 600;
+    color: var(--text3);
+    letter-spacing: 0.01em;
+  }
+  .bn-item.active {
+    color: var(--accent);
+  }
+  .bn-item svg {
+    width: 22px;
+    height: 22px;
+    margin-bottom: 2px;
+  }
+  .bn-item:active {
+    background-color: rgba(0, 0, 0, 0.05);
+    opacity: 1 !important;
+  }
+  body.dark-mode .bn-item:active {
+    background-color: rgba(255, 255, 255, 0.08);
+  }
+
+  /* ── Factory tab bar: iOS-style segmented look ── */
+  .fct-tabs {
+    background: var(--bg3);
+    border-radius: 10px;
+    padding: 3px;
+    border: 0.5px solid rgba(0, 0, 0, 0.06);
+  }
+  .fct-tab {
+    border-radius: 8px !important;
+    font-weight: 600 !important;
+  }
+  .fct-tab.active {
+    background: var(--bg2) !important;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+  }
+
+  /* ── Toast notifications: bigger and easier to read on mobile ── */
+  .toast {
+    bottom: calc(82px + env(safe-area-inset-bottom)) !important;
+    left: 12px !important;
+    right: 12px !important;
+    max-width: calc(100vw - 24px) !important;
+    border-radius: 12px !important;
+    padding: 12px 16px !important;
+    font-size: 13.5px !important;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12) !important;
+  }
+
+  /* ── Inputs / form fields: iOS look ── */
+  .fi, input[type="text"], input[type="number"], input[type="email"],
+  input[type="search"], input[type="date"], select, textarea {
+    border-radius: 10px !important;
+    padding: 12px 14px !important;
+    font-size: 16px !important; /* 16px prevents iOS zoom on focus */
+    border: 1px solid rgba(0, 0, 0, 0.12) !important;
+    background: var(--bg2);
+  }
+  body.dark-mode .fi,
+  body.dark-mode input,
+  body.dark-mode select,
+  body.dark-mode textarea {
+    border-color: rgba(255, 255, 255, 0.15) !important;
+  }
+
+  /* ── Body background: soft gray for light, deep for dark ──
+     Contrasts cleanly against the white card surfaces below. */
+  body {
+    background: #f4f5f8 !important;
+  }
+  body.dark-mode {
+    background: #0a0f1c !important;
+  }
+  .main { background: transparent !important; }
+
+  /* ═══════════════════════════════════════════════════════════════════
+     RADICAL TOPBAR REDESIGN FOR MOBILE
+     The previous topbar showed: hamburger + title + subtitle + search +
+     dark mode + user pill (with name) + sync badge + diag + auth badge
+     + Sign in + notification pill + "New Shipment" button — 11+ items
+     that overflowed and wrapped chaotically.
+     
+     The mobile redesign shows ONLY:
+        [☰]  Title (centered-ish)  [sync dot] [avatar]
+     
+     Everything else moves to the sidebar ("More" button on bottom nav).
+     The notification pill becomes its own banner row BELOW the topbar.
+     ═══════════════════════════════════════════════════════════════════ */
+
+  /* Hamburger menu: shown again on mobile (opens sidebar where
+     everything else lives now) */
+  .menu-btn {
+    display: inline-flex !important;
+    width: 38px;
+    height: 38px;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    background: transparent;
+    border: none;
+    box-shadow: none;
+    color: var(--text1);
+  }
+  .menu-btn svg { width: 22px; height: 22px; }
+  .menu-btn:active { opacity: 0.6; }
+
+  .topbar {
+    padding: calc(6px + env(safe-area-inset-top)) 8px 6px !important;
+    height: auto !important;
+    min-height: calc(50px + env(safe-area-inset-top)) !important;
+    flex-wrap: nowrap !important;  /* NO wrap — one row only */
+    gap: 6px !important;
+    backdrop-filter: saturate(180%) blur(20px);
+    -webkit-backdrop-filter: saturate(180%) blur(20px);
+    background: rgba(255, 255, 255, 0.85) !important;
+    border-bottom: 0.5px solid rgba(0, 0, 0, 0.08) !important;
+    box-shadow: none !important;
+    align-items: center !important;
+  }
+  body.dark-mode .topbar {
+    background: rgba(15, 23, 42, 0.88) !important;
+    border-bottom-color: rgba(255, 255, 255, 0.08) !important;
+  }
+  .main {
+    padding-bottom: calc(72px + env(safe-area-inset-bottom)) !important;
+  }
+
+  /* Title block — centered visually, takes remaining space */
+  .topbar > div:nth-of-type(2) {
+    flex: 1 1 auto;
+    min-width: 0;
+    text-align: center;  /* center the title */
+    overflow: hidden;
+  }
+  .pg-title {
+    font-size: 16px !important;
+    font-weight: 700 !important;
+    letter-spacing: -0.015em !important;
+    line-height: 1.15 !important;
+    color: var(--text1);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .pg-sub {
+    display: none !important;
+  }
+  /* Hide the role suffix that gets appended to the title — clutters mobile */
+  body.role-warehouse .pg-title::after,
+  body.role-factory .pg-title::after,
+  body.role-organizer .pg-title::after,
+  body.role-transit .pg-title::after,
+  body.role-viewer .pg-title::after { display: none !important; }
+
+  /* RIGHT SIDE: minimal — only the sync badge group + tiny avatar */
+  .tba {
+    width: auto !important;
+    flex: 0 0 auto !important;
+    justify-content: flex-end !important;
+    gap: 4px !important;
+    align-items: center;
+  }
+
+  /* HIDE everything that doesn't belong in a mobile topbar */
+  .tba > #global-search-toggle,
+  .tba > #global-search-wrap,
+  .tba > #dark-mode-toggle,
+  .tba > button[onclick*="exportCSV"],
+  .tba > button[onclick*="exportFct"],
+  .tba > button[onclick*="exportDispatch"],
+  .tba > button[onclick*="printReport"],
+  .tba > button[onclick*="printFct"],
+  .tba > button[onclick*="goV('incoming')"],
+  .tba > .user-pill,                /* avatar+name goes to sidebar */
+  .tba > #fb-auth-badge {            /* "Sign in / Offline" too */
+    display: none !important;
+  }
+
+  /* Sync badge: compact pill — just visual indicator */
+  #sync-status-group {
+    margin: 0 !important;
+    gap: 3px !important;
+  }
+  #sync-status-badge {
+    padding: 4px 8px !important;
+    font-size: 10.5px !important;
+    font-weight: 600 !important;
+    border-radius: 100px !important;
+  }
+  #sync-diag-btn {
+    width: 28px !important;
+    height: 28px !important;
+    font-size: 13px;
+  }
+
+  /* ═══ NOTIFICATION BANNER (the "2 married spas waiting" pill) ═══
+     Was: cramped inside the topbar's right side, often cut off.
+     Now: full-width row pinned below the topbar, easy to read, tappable. */
+  #notif-area {
+    /* Take it OUT of the topbar's flex flow and pin it as its own row */
+    position: fixed !important;
+    top: calc(50px + env(safe-area-inset-top)) !important;
+    left: 0 !important;
+    right: 0 !important;
+    z-index: 99 !important;
+    padding: 6px 10px !important;
+    background: rgba(255, 255, 255, 0.92);
+    backdrop-filter: saturate(180%) blur(20px);
+    -webkit-backdrop-filter: saturate(180%) blur(20px);
+    border-bottom: 0.5px solid rgba(0, 0, 0, 0.08);
+    /* Hide if empty (no inner content) */
+  }
+  body.dark-mode #notif-area {
+    background: rgba(15, 23, 42, 0.92);
+    border-bottom-color: rgba(255, 255, 255, 0.08);
+  }
+  #notif-area:empty { display: none !important; }
+  /* When it has content, the inner pill becomes a compact full-width row */
+  #notif-area > div {
+    width: 100%;
+    margin: 0;
+    padding: 6px 11px !important;
+    font-size: 12px !important;
+    font-weight: 600 !important;
+    line-height: 1.3 !important;
+    border-radius: 8px !important;
+    display: flex !important;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+  }
+  /* Push the rest of content down to clear the banner — but ONLY when banner is non-empty.
+     We use a CSS class added by JS if we want this dynamic, but for now offset always
+     by a small margin if we detect non-empty banner via :not(:empty). */
+  #notif-area:not(:empty) ~ .main .view {
+    padding-top: 44px !important;
+  }
+
+  /* ═══ HERO BANNER — compact in mobile ═══
+     Was 30-40% of the screen for a description that's nice-to-know but
+     not essential. Now: small icon + title, optional 1-line description,
+     and a (?) bubble to read the full thing. */
+  .view > .card:first-child {
+    border-radius: 14px !important;
+    margin-bottom: 12px !important;
+  }
+  /* Inner padding */
+  .view > .card:first-child .card-body,
+  .view > .card:first-child > div[style*="display:flex"] {
+    padding: 11px 13px !important;
+  }
+  /* Shrink the icon circle (those big 60px factory icons) */
+  .view > .card:first-child div[style*="border-radius:50%"],
+  .view > .card:first-child div[style*="border-radius: 50%"] {
+    width: 36px !important;
+    height: 36px !important;
+    min-width: 36px !important;
+    min-height: 36px !important;
+    font-size: 18px !important;
+  }
+  .view > .card:first-child svg {
+    width: 18px !important;
+    height: 18px !important;
+  }
+  /* Cap descriptions to 2 lines max */
+  .view > .card:first-child p,
+  .view > .card:first-child > div > div:not([style*="font-weight: 700"]):not([style*="font-weight:700"]):not(:empty) {
+    font-size: 12px !important;
+    line-height: 1.35 !important;
+    color: var(--text2) !important;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  /* Make hero title smaller too */
+  .view > .card:first-child div[style*="font-weight: 700"],
+  .view > .card:first-child div[style*="font-weight:700"] {
+    font-size: 14px !important;
+    line-height: 1.25 !important;
+  }
+
+  /* ═══ PREMIUM STAT CARDS ═══ */
+  .stats-grid {
+    grid-template-columns: 1fr 1fr !important;
+    gap: 9px !important;
+    margin-bottom: 14px !important;
+  }
+  .stats-grid .sc:nth-child(3):last-child {
+    grid-column: 1 / -1 !important;
+  }
+  .sc {
+    padding: 14px 16px !important;
+    border-radius: 14px !important;
+    border: 0.5px solid rgba(0, 0, 0, 0.06) !important;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04),
+                0 4px 12px rgba(0, 0, 0, 0.03) !important;
+  }
+  body.dark-mode .sc {
+    border-color: rgba(255, 255, 255, 0.06) !important;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2),
+                0 4px 12px rgba(0, 0, 0, 0.25) !important;
+  }
+  .sc-label {
+    font-size: 10px !important;
+    letter-spacing: 0.08em !important;
+    text-transform: uppercase;
+    color: var(--text3);
+    font-weight: 700;
+    margin-bottom: 6px !important;
+  }
+  .sc-val {
+    font-size: 28px !important;
+    font-weight: 700 !important;
+    line-height: 1 !important;
+    letter-spacing: -0.025em;
+    margin-bottom: 4px !important;
+  }
+  .sc-trend {
+    font-size: 10.5px !important;
+    color: var(--text3);
+    margin-top: 0 !important;
+    line-height: 1.3;
+  }
+
+  /* Tab bar (Pending | Delivered | All) iOS segmented look */
+  .mar-tabs, [class*="tabs"]:not(.fct-tabs) {
+    background: var(--bg3);
+    padding: 3px;
+    border-radius: 10px;
+    margin-bottom: 11px;
+    display: inline-flex;
+    gap: 0;
+  }
+  body.dark-mode .mar-tabs,
+  body.dark-mode [class*="tabs"]:not(.fct-tabs) {
+    background: rgba(255, 255, 255, 0.05);
+  }
+
+  /* Tables: sleek list look */
+  .tw {
+    border-radius: 12px !important;
+    overflow: hidden;
+    border: 0.5px solid rgba(0, 0, 0, 0.06);
+  }
+  body.dark-mode .tw { border-color: rgba(255, 255, 255, 0.06); }
+  .tw table thead th {
+    font-size: 9.5px !important;
+    letter-spacing: 0.1em !important;
+    padding: 10px 11px !important;
+    background: var(--bg3) !important;
+    color: var(--text3) !important;
+    text-transform: uppercase;
+    font-weight: 700;
+    border: none !important;
+  }
+  .tw table tbody td {
+    padding: 13px 11px !important;
+    font-size: 13px !important;
+    border-top: 0.5px solid var(--line) !important;
+    border-bottom: none !important;
+  }
+  .tw table tbody tr:first-child td { border-top: none !important; }
+  .tw table tbody tr:active { background: var(--bg3) !important; }
+
+  /* Buttons */
+  .btn:not(.btn-sm):not(.chip-rm):not(.btn-link) {
+    min-height: 44px;
+    padding: 12px 16px;
+    font-size: 14px;
+    border-radius: 10px;
+    font-weight: 600;
+  }
+  .btn-p:not(.btn-sm) {
+    background: linear-gradient(180deg, #2563eb 0%, #1d4ed8 100%) !important;
+    box-shadow: 0 1px 0 rgba(255, 255, 255, 0.2) inset,
+                0 2px 6px rgba(29, 78, 216, 0.25) !important;
+    border-color: transparent !important;
+  }
+  .btn-p:not(.btn-sm):active {
+    background: linear-gradient(180deg, #1d4ed8 0%, #1e40af 100%) !important;
+  }
+  .btn:active {
+    opacity: 0.72 !important;
+    transition: opacity 0.04s !important;
+    transform: none !important;
+  }
+
+  /* Cards */
+  .card {
+    border-radius: 14px !important;
+    border: 0.5px solid rgba(0, 0, 0, 0.06) !important;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04),
+                0 4px 12px rgba(0, 0, 0, 0.03) !important;
+    margin-bottom: 12px !important;
+    overflow: hidden;
+  }
+  body.dark-mode .card {
+    border-color: rgba(255, 255, 255, 0.06) !important;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2),
+                0 4px 12px rgba(0, 0, 0, 0.25) !important;
+  }
+  .card-hd {
+    padding: 14px 15px 10px !important;
+  }
+  .card-body {
+    padding: 12px 15px 14px !important;
+  }
+  .card-title {
+    font-size: 14px !important;
+    font-weight: 700 !important;
+    letter-spacing: -0.005em;
+  }
+  .card-sub {
+    font-size: 11.5px !important;
+    color: var(--text3);
+    margin-top: 2px;
+  }
+
+  /* FAB — positioned safely */
+  .fab {
+    width: 54px !important;
+    height: 54px !important;
+    bottom: calc(80px + env(safe-area-inset-bottom)) !important;
+    right: 16px !important;
+    background: linear-gradient(180deg, #2563eb 0%, #1d4ed8 100%) !important;
+    box-shadow: 0 6px 16px rgba(29, 78, 216, 0.35),
+                0 2px 4px rgba(29, 78, 216, 0.2),
+                0 1px 0 rgba(255, 255, 255, 0.25) inset !important;
+  }
+  .fab svg { width: 22px; height: 22px; }
+
+  /* Bottom nav frosted glass */
+  .bottom-nav {
+    backdrop-filter: saturate(180%) blur(20px);
+    -webkit-backdrop-filter: saturate(180%) blur(20px);
+    background: rgba(255, 255, 255, 0.92) !important;
+    border-top: 0.5px solid rgba(0, 0, 0, 0.08) !important;
+    box-shadow: none !important;
+    padding: 4px 4px calc(4px + env(safe-area-inset-bottom)) !important;
+  }
+  body.dark-mode .bottom-nav {
+    background: rgba(15, 23, 42, 0.92) !important;
+    border-top-color: rgba(255, 255, 255, 0.06) !important;
+  }
+  .bn-item {
+    min-height: 48px;
+    padding: 6px 4px !important;
+    font-size: 9.5px;
+    font-weight: 600;
+    color: var(--text3);
+    letter-spacing: 0.01em;
+  }
+  .bn-item.active { color: var(--accent); }
+  .bn-item svg {
+    width: 22px;
+    height: 22px;
+    margin-bottom: 2px;
+  }
+  .bn-item:active {
+    background-color: rgba(0, 0, 0, 0.05);
+    opacity: 1 !important;
+  }
+  body.dark-mode .bn-item:active {
+    background-color: rgba(255, 255, 255, 0.08);
+  }
+
+  /* View padding + smooth slide-in */
+  .view {
+    padding: 16px 14px 90px !important;
+    animation: iosSlideIn 0.32s cubic-bezier(0.32, 0.72, 0, 1);
+  }
+  @keyframes iosSlideIn {
+    from { opacity: 0; transform: translateY(6px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  /* Sidebar (the "More" drawer) — adjustments for cleaner look */
+  .sidebar {
+    border-right: none !important;
+  }
+  .sidebar .ni {
+    border-radius: 10px;
+    margin: 1px 8px;
+    padding: 11px 12px !important;
+    font-size: 14px;
+  }
+  .sidebar .ni:active {
+    background: rgba(255, 255, 255, 0.1);
+  }
+  .sidebar .ni.active {
+    background: rgba(59, 130, 246, 0.18);
+    color: #93c5fd;
+  }
+
+  /* Toast notifications */
+  .toast {
+    bottom: calc(82px + env(safe-area-inset-bottom)) !important;
+    left: 12px !important;
+    right: 12px !important;
+    max-width: calc(100vw - 24px) !important;
+    border-radius: 12px !important;
+    padding: 12px 16px !important;
+    font-size: 13.5px !important;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12) !important;
+  }
+
+  /* Inputs */
+  .fi, input[type="text"], input[type="number"], input[type="email"],
+  input[type="search"], input[type="date"], select, textarea {
+    border-radius: 10px !important;
+    padding: 12px 14px !important;
+    font-size: 16px !important;
+    border: 1px solid rgba(0, 0, 0, 0.12) !important;
+    background: var(--bg2);
+  }
+  body.dark-mode .fi,
+  body.dark-mode input,
+  body.dark-mode select,
+  body.dark-mode textarea {
+    border-color: rgba(255, 255, 255, 0.15) !important;
+  }
+}
+
+/* Even tighter on very small phones (iPhone SE etc.) */
+@media (max-width: 380px) {
+  .pg-title { font-size: 16px !important; }
+  .user-pill-avatar { width: 28px !important; height: 28px !important; }
+  #sync-status-badge { padding: 3px 7px !important; font-size: 10px !important; }
+  #sync-diag-btn { width: 26px !important; height: 26px !important; }
+  .stats-grid { gap: 7px !important; }
+  .sc { padding: 13px 14px !important; }
+  .sc-val { font-size: 26px !important; }
+  .sc-label { font-size: 9.5px !important; margin-bottom: 6px !important; }
+}
+
 </style>
 </head>
 <body>
@@ -1935,7 +2708,7 @@ tbody tr:hover td{background:var(--bg3)}
       <div class="role-current"><span id="role-indicator">Admin</span></div>
     </div>
   </div>
-  <div class="sb-foot"><div class="sb-ver">v3.61 · <span id="live-date"></span></div></div>
+  <div class="sb-foot"><div class="sb-ver">v3.64 · <span id="live-date"></span></div></div>
 </nav>
 
 <!-- MAIN -->
@@ -15767,10 +16540,27 @@ document.addEventListener('keydown', e=>{
      ═══════════════════════════════════════════════════════════ -->
 <nav class="bottom-nav" id="bottom-nav">
   <!-- Items rendered dynamically by renderBottomNav() based on current role.
-       Empty fallback below ensures something shows if JS hasn't run yet. -->
-  <button class="bn-item active" data-page="dashboard" onclick="goV('dashboard');setBottomNavActive('dashboard')">
+       The 5 default-admin buttons below act as a fallback if JS fails to run
+       or hasn't initialized yet — better to show ALL nav items than just one. -->
+  <button class="bn-item active" data-page="dashboard" onclick="goV('dashboard');setBottomNavActive('dashboard')" aria-label="Home">
     <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="1" y="1" width="6" height="6" rx="1.5"/><rect x="9" y="1" width="6" height="6" rx="1.5"/><rect x="1" y="9" width="6" height="6" rx="1.5"/><rect x="9" y="9" width="6" height="6" rx="1.5"/></svg>
     <span>Home</span>
+  </button>
+  <button class="bn-item" data-page="map" onclick="goV('map');setBottomNavActive('map')" aria-label="Map">
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="1" y="1" width="4" height="4" rx="1"/><rect x="6" y="1" width="4" height="4" rx="1"/><rect x="11" y="1" width="4" height="4" rx="1"/><rect x="1" y="6" width="4" height="4" rx="1"/><rect x="6" y="6" width="4" height="4" rx="1"/><rect x="11" y="6" width="4" height="4" rx="1"/></svg>
+    <span>Map</span>
+  </button>
+  <button class="bn-item" data-page="marriages" onclick="goV('marriages');setBottomNavActive('marriages')" aria-label="Marriages">
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="5" cy="8" r="3.5"/><circle cx="11" cy="8" r="3.5"/></svg>
+    <span>Marriages</span>
+  </button>
+  <button class="bn-item" data-page="dispatched" onclick="goV('dispatched');setBottomNavActive('dispatched')" aria-label="Dispatch">
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M2 11h11l-1-4H2v4z"/><circle cx="5" cy="11" r="1.5"/><circle cx="11" cy="11" r="1.5"/></svg>
+    <span>Dispatch</span>
+  </button>
+  <button class="bn-item" onclick="toggleSidebar(true)" aria-label="More">
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="8" cy="3" r="1.5"/><circle cx="8" cy="8" r="1.5"/><circle cx="8" cy="13" r="1.5"/></svg>
+    <span>More</span>
   </button>
 </nav>
 
