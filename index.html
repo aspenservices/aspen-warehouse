@@ -3328,7 +3328,7 @@ body.dark-mode .mar-card-track {
       <div class="role-current"><span id="role-indicator">Admin</span></div>
     </div>
   </div>
-  <div class="sb-foot"><div class="sb-ver">v3.73 · <span id="live-date"></span></div></div>
+  <div class="sb-foot"><div class="sb-ver">v3.74 · <span id="live-date"></span></div></div>
 </nav>
 
 <!-- MAIN -->
@@ -10410,7 +10410,13 @@ function openTrackingHistory(source, id){
     <div class="th-hd">
       <div>
         <div style="font-size:10px;letter-spacing:.1em;color:var(--text3);text-transform:uppercase;margin-bottom:6px;font-weight:700">Tracking History</div>
-        <div style="font-size:20px;font-weight:800;font-family:ui-monospace,monospace;letter-spacing:.01em">${typeIcon} ${item.sn || '(no S/N)'}</div>
+        <div style="font-size:20px;font-weight:800;font-family:ui-monospace,monospace;letter-spacing:.01em">${typeIcon} ${
+          item.sn
+            ? item.sn
+            : (((item.type === 'accessory' || item.type === 'misc') && item.marriedSn)
+                ? `<span style="font-size:13px;color:var(--text2);font-weight:600">🔗 for</span> ${item.marriedSn}`
+                : '(no S/N)')
+        }</div>
         <div style="font-size:12px;color:var(--text2);margin-top:4px"><strong>${item.dealer||'—'}</strong> · ${typeLabel} · ${sourceLabel}</div>
         ${item.trackingId ? `<div style="font-size:10px;color:var(--text3);margin-top:4px;font-family:ui-monospace,monospace">TID: ${item.trackingId}</div>` : ''}
       </div>
@@ -10484,7 +10490,10 @@ function renderInTransit(){
         const cargoHtml = items.slice(0, 6).map((it, i) => {
           const isAcc = it.type === 'accessory' || it.type === 'misc';
           if(isAcc){
-            return `<div title="${escapeHTML(it.dealer||it.sn||'')}" style="width:10px;height:8px;background:#fcd34d;border:1px solid #92400e;border-radius:1px;animation:cargo-bounce 1.2s ease-in-out infinite;animation-delay:${i*0.1}s"></div>`;
+            const accTip = it.marriedSn
+              ? `${it.dealer||'Accessory'} → S/N ${it.marriedSn}`
+              : (it.dealer||it.sn||'Accessory');
+            return `<div title="${escapeHTML(accTip)}" style="width:10px;height:8px;background:#fcd34d;border:1px solid #92400e;border-radius:1px;animation:cargo-bounce 1.2s ease-in-out infinite;animation-delay:${i*0.1}s"></div>`;
           }
           const colors = ['#3b82f6','#10b981','#8b5cf6','#ef4444','#f59e0b','#06b6d4'];
           const color = colors[i % colors.length];
@@ -10574,7 +10583,13 @@ function renderInTransit(){
       <div style="display:flex;align-items:start;justify-content:space-between;gap:12px;flex-wrap:wrap">
         <div style="flex:1 1 auto;min-width:0">
           <div style="display:flex;align-items:baseline;gap:11px;flex-wrap:wrap;margin-bottom:5px">
-            <span style="font-size:23px;font-weight:800;font-family:ui-monospace,SFMono-Regular,monospace;letter-spacing:.02em">${item.sn||'(no S/N)'}</span>
+            <span style="font-size:23px;font-weight:800;font-family:ui-monospace,SFMono-Regular,monospace;letter-spacing:.02em" title="${item.sn ? 'S/N '+item.sn : (item.marriedSn ? 'Accessory paired with spa S/N '+item.marriedSn : 'No serial number')}">${
+              item.sn
+                ? item.sn
+                : (((item.type === 'accessory' || item.type === 'misc') && item.marriedSn)
+                    ? `<span style="font-size:14px;color:var(--text2);font-weight:600;letter-spacing:0">🔗 for</span> ${item.marriedSn}`
+                    : '(no S/N)')
+            }</span>
             <span style="background:${directionColor};color:#fff;padding:3px 11px;border-radius:11px;font-size:10px;font-weight:700;letter-spacing:.06em">${directionLabel}</span>
             ${stalledBadge}
           </div>
