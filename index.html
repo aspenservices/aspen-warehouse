@@ -1000,7 +1000,7 @@ body.role-admin .intransit-readonly{display:none !important}
    col5=DRIVE, col6=storage, col7=storage, col8=DRIVE,
    col9=storage, col10=storage, col11=DRIVE, col12=storage
 */
-.floor{display:inline-block;min-width:1000px}
+.floor{display:block;min-width:1100px;width:100%}
 
 /* TOP ROW: Dock Doors */
 .dock-row{display:grid;grid-template-columns:36px repeat(12,minmax(78px,1fr));gap:3px;margin-bottom:2px}
@@ -3589,6 +3589,9 @@ body.dark-mode .mar-card-track {
               <div class="fc" onclick="setFilt('extra',this)">Extra</div>
               <div class="fc" onclick="setFilt('empty',this)">Empty</div>
             </div>
+            <button class="btn" onclick="openRowManager()" title="Add, edit, or lock warehouse rows" style="padding:6px 12px;font-size:11.5px;font-weight:700;background:linear-gradient(135deg,#fefce8,#fef3c7);border-color:#eab308;color:#854d0e">
+              🛠 Manage rows
+            </button>
           </div>
         </div>
         <div class="card-body" style="padding:12px 14px">
@@ -3601,6 +3604,7 @@ body.dark-mode .mar-card-track {
               <div class="lg"><div class="lg-c" style="background:var(--orange)"></div>Material</div>
               <div class="lg"><div class="lg-stripe"></div>Forklift Aisle</div>
               <div class="lg"><div class="lg-door"></div>Dock Door</div>
+              <div class="lg"><div class="lg-c" style="background:linear-gradient(135deg,#fdf2f8,#fce7f3);border:1.5px solid #db2777"></div>Marriage Inventory</div>
             </div>
             <div class="map-outer" style="position:relative">
               <div class="floor" id="floor"></div>
@@ -4440,7 +4444,7 @@ let _fbInitAttempts = 0;
 //   /app_version/current  (in Firebase console, manually, OR call
 //   pushVersionToFirebase() from the Admin console at deploy time)
 // ══════════════════════════════════════════════════════════════════
-const APP_VERSION = 'v3.97';
+const APP_VERSION = 'v3.98';
 window.APP_VERSION = APP_VERSION;
 
 let _updateBannerShown = false;
@@ -5602,32 +5606,278 @@ function addDamagePhoto(itemType, itemId){
 }
 
 // ═══════════════════════════════════════════════════════
-// FLOOR LAYOUT CONSTANTS — from actual Excel analysis
+// FLOOR LAYOUT — BLUEPRINT v2 (refactor 2026-05-17)
 // ═══════════════════════════════════════════════════════
-// Correct order: A→L, then N (has elevator row), then M (back wall)
-const ROWS = ['A','B','C','D','E','F','G','H','I','J','K','L','N','M'];
-// Row N = has ELEVATOR at cols 1 and 12, all other cols are DRIVE lanes
-// Row M = back wall storage: UK Packs(1), Saunas(7,8), 16'SwimCovers(9,10), 13'SwimCovers(11)
-const ELEVATOR_ROW = 'N';   // row N has elevators at col 1 and 12
-const BACK_WALL_ROW = 'M';  // row M is the last row at the back wall
+// Source of truth: warehouse-blueprint-v2_15.html (REV 3.5)
+//
+// Grid is 16 columns (A → P) × 14 rows (1 → 14) plus two cover hileras
+// 15A (front) and 15B (back). Every cell is 7' × 7'. Position naming is
+// `${rowNum}${colLetter}` (e.g., "7B" = row 7, col B) — matches the
+// physical labels in the warehouse and the blueprint document.
+//
+// LEGACY COMPAT: a `ROWS` array is still exported so the bottom-nav, 3D
+// view's pos2World, and any other ancient consumer that calls
+// `ROWS.indexOf(letter)` doesn't crash before migration runs. New code
+// should use COLS_NEW + ROW_NUMBERS_NEW instead.
+const COLS_NEW = ['A','B','C','D','E','F','G','H','I','J','K','L','M','N','O','P'];   // 16 cols
+const ROW_NUMBERS_NEW = [1,2,3,4,5,6,7,8,9,10,11,12,13,14];                            // 14 rows
+const COVER_ROWS_NEW  = ['15A','15B'];                                                  // 2 cover hileras
 
-// For each visual column (1-12): is it a forklift aisle or storage?
-// Cols 2,3,5,8,11 = FORKLIFT DRIVE AISLES
-// Cols 1,4,6,7,9,10,12 = STORAGE BLOCKS
-const COL_TYPE = {
-  1:'stor', 2:'drive', 3:'drive', 4:'stor',
-  5:'drive', 6:'stor', 7:'stor', 8:'drive',
-  9:'stor', 10:'stor', 11:'drive', 12:'stor'
+// Per-row default type, exactly as the blueprint specifies. Cells inherit
+// this unless an override fires (column O is drive, column P depends, etc.)
+const ROW_DEFS_NEW = {
+   1: {type:'spa',  label:'SPA · Local',       zone:'local'},
+   2: {type:'drv',  label:'Drive',             zone:'drive'},
+   3: {type:'drv',  label:'Drive · Post',      zone:'drive'},
+   4: {type:'spa',  label:'SPA · Dealer',      zone:'dealer'},
+   5: {type:'drv',  label:'Drive',             zone:'drive'},
+   6: {type:'drv',  label:'Drive',             zone:'drive'},
+   7: {type:'spa',  label:'SPA · Dealer',      zone:'dealer'},
+   8: {type:'spa',  label:'SPA · Dealer/Sw',   zone:'dealer'},   // mixed dealer + swim
+   9: {type:'main', label:'⬇ Main Drive ⬇',    zone:'drive'},
+  10: {type:'drv',  label:'Drive',             zone:'drive'},
+  11: {type:'spa',  label:'SPA · Swim',        zone:'swim'},
+  12: {type:'spa',  label:'SPA · Extra',       zone:'extra'},
+  13: {type:'drv',  label:'Drive',             zone:'drive'},
+  14: {type:'drv',  label:'Drive',             zone:'drive'},
 };
 
-// Zone assignments per column
-const COL_ZONE = {
-  1:'local', 2:'drive', 3:'drive', 4:'dealer',
-  5:'drive', 6:'dealer', 7:'dealer', 8:'drive',
-  9:'swim', 10:'extra', 11:'drive', 12:'misc'
+// Column-P storage rows (storage even when their row is drive)
+const P_STORAGE_ROWS_NEW = {5:true, 6:true, 9:true, 10:true, 12:true, 13:true, 14:true};
+
+// Specific P-cell content labels (cover storage on back wall)
+const P_LABELS_NEW = {
+  12: 'AV/B',   // Avalanche + Bassiani covers
+  13: "R13'",   // Roll 13'
+  14: "R13'",   // Roll 13'
 };
 
-// Dock doors — which columns they span
+// Elevator 1 — 3 rows × 4 cols block at rows 1-3, cols K-N
+const ELEV1_ROWS_NEW = new Set([1,2,3]);
+const ELEV1_COLS_NEW = new Set(['K','L','M','N']);
+// Elevator 2 — corner of back row (15B-N + 15B-O)
+const ELEV2_CELLS_NEW = new Set(['15B-N','15B-O']);
+
+// Row 15 cover map: each cover type spans 2 columns × 2 hileras (a/b sub-slots)
+const COVER_TYPES_NEW = [
+  {t:'Col',  a:'A', b:'B', name:'Colorado'},
+  {t:'Pico', a:'C', b:'D', name:'Pioneer / Colorado'},
+  {t:'Q',    a:'E', b:'F', name:'Quattro'},
+  {t:'M/E',  a:'G', b:'H', name:'Monarch / Eldorado'},
+  {t:'P/A',  a:'I', b:'J', name:'Pinnacle / Arcadia'},
+  {t:'Alp',  a:'K', b:'L', name:'Alpine / Northstar'},
+  {t:'Etn',  a:'M', b:'N', name:'Eternal'},
+  {t:'Rol',  a:'O', b:'P', name:'Roll'},
+];
+
+// ─────────────────────────────────────────────────────────────────────
+// MARRIAGE INVENTORY — single dedicated position 'MINV' (merged from
+// the old 13A + 14A pair per Alberto). The cell visually spans both
+// the row-13 and row-14 columns in the strip, but it's ONE position in
+// the data model. Holds marriage accessories only — never tinas.
+// ─────────────────────────────────────────────────────────────────────
+const MARRIAGE_INVENTORY_CELLS = new Set(['MINV']);
+
+// One-time data migration: existing marriages saved with location='13A'
+// or '14A' (from the two-cell era) get rewritten to 'MINV' on load so
+// they show up in the merged shelf. Runs idempotently every drawMap.
+function migrateMarriageLocations(){
+  if(typeof marriages !== 'undefined' && Array.isArray(marriages)){
+    marriages.forEach(m => {
+      if(m.location === '13A' || m.location === '14A') m.location = 'MINV';
+    });
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// PER-CELL OVERRIDES — let the user change ANY cell's type (including
+// elevators), or lock individual cells. Stored in cfg.cellOverrides and
+// keyed by position. Overrides take precedence over the blueprint.
+// ─────────────────────────────────────────────────────────────────────
+function getCellOverride(pos){
+  return (cfg && cfg.cellOverrides && cfg.cellOverrides[pos]) || null;
+}
+function setCellOverride(pos, override){
+  if(!cfg) cfg = {};
+  if(!cfg.cellOverrides) cfg.cellOverrides = {};
+  if(!override || Object.keys(override).length === 0){
+    delete cfg.cellOverrides[pos];
+  } else {
+    cfg.cellOverrides[pos] = override;
+  }
+  if(typeof saveState === 'function') saveState();
+}
+function isCellLocked(pos){
+  const ov = getCellOverride(pos);
+  return !!(ov && ov.locked);
+}
+
+// User-editable overrides for individual rows. Persisted in cfg and
+// merged on top of ROW_DEFS_NEW. Each entry: {type, label, locked}.
+// `type` is one of 'spa' | 'drv' | 'main'.
+// `locked` makes the row read-only (no cell edits, no drag in/out).
+function getRowOverrides(){
+  try { return (cfg && cfg.rowOverrides) ? cfg.rowOverrides : {}; }
+  catch(e){ return {}; }
+}
+function getRowDef(rowN){
+  const ov = getRowOverrides()[rowN];
+  const base = ROW_DEFS_NEW[rowN] || { type:'drv', label:'Custom row', zone:'custom' };
+  if(!ov) return base;
+  return Object.assign({}, base, ov);
+}
+function isRowLocked(rowN){
+  const ov = getRowOverrides()[rowN];
+  return !!(ov && ov.locked);
+}
+
+// Determine cell type for a given row number + column letter. Honors
+// per-cell overrides first, then per-row overrides, then blueprint
+// defaults. Returns: 'spa'|'drv'|'main'|'elev'|'pstor'|'cb'|'cf'|'minv'
+function cellTypeNew(rowKey, colLetter){
+  const pos = (rowKey.startsWith('15') ? rowKey + '-' : rowKey) + colLetter;
+  // Per-cell override wins over everything
+  const ov = getCellOverride(pos);
+  if(ov && ov.type) return ov.type;
+  // Cover rows 15A / 15B
+  if(rowKey === '15A'){
+    if(colLetter === 'P') return 'pstor';   // 15A-P = Roll 16'
+    return 'cf';                              // 15A-* = cover front
+  }
+  if(rowKey === '15B'){
+    if(colLetter === 'N' || colLetter === 'O') return 'elev'; // Elevator 2
+    if(colLetter === 'P') return 'pstor';                      // 15B-P = Roll 16'
+    return 'cb';                                                // 15B-* = cover back
+  }
+  // Numbered rows 1-14 (with user overrides honored)
+  const rowN = +rowKey;
+  const rowDef = getRowDef(rowN);
+  if(!rowDef) return 'drv';
+  // Elevator 1: rows 1-3 × cols K-N
+  if(ELEV1_ROWS_NEW.has(rowN) && ELEV1_COLS_NEW.has(colLetter)) return 'elev';
+  // Column O: drive default, EXCEPT 1O which inherits SPA storage
+  if(colLetter === 'O'){
+    if(rowN === 1) return 'spa';
+    return 'drv';
+  }
+  // Column P: P-storage in specific rows, otherwise inherits row type
+  if(colLetter === 'P'){
+    if(P_STORAGE_ROWS_NEW[rowN]) return 'pstor';
+    if(rowDef.type === 'spa')  return 'spa';
+    if(rowDef.type === 'main') return 'main';
+    return 'drv';
+  }
+  // Default: inherit row type
+  return rowDef.type;
+}
+
+// Is this cell a real storage location for hot tubs / swim spas?
+function isSpaStorageCell(rowKey, colLetter){
+  return cellTypeNew(rowKey, colLetter) === 'spa';
+}
+
+// Validate a position string. Returns {valid, rowKey, colLetter, type} or
+// {valid:false, reason}. Accepts new format only (e.g., "7B", "12N").
+// For "1O" — col is 'O', row is '1' — letter is always at the END.
+function parsePos(pos){
+  if(!pos || typeof pos !== 'string') return {valid:false, reason:'empty'};
+  // Try numeric-row format "7B", "12N", "15A-N", "15B-P"
+  let m = pos.match(/^(\d{1,2})([A-P])$/);
+  if(m){
+    const rowN = +m[1], colLetter = m[2];
+    if(rowN < 1 || rowN > 14) return {valid:false, reason:'row-out-of-range'};
+    return {valid:true, rowKey:String(rowN), colLetter, type:cellTypeNew(String(rowN), colLetter)};
+  }
+  m = pos.match(/^(15[AB])-([A-P])$/);
+  if(m){
+    return {valid:true, rowKey:m[1], colLetter:m[2], type:cellTypeNew(m[1], m[2])};
+  }
+  return {valid:false, reason:'unrecognized-format'};
+}
+
+// Lightweight position-format validator used by addUnit, saveEdit, etc.
+// Accepts numeric rows 1..14 with cols A..P (e.g. "4C", "12P") AND the
+// cover hilera cells "15A-X" / "15B-X". Replaces a handful of legacy
+// regexes that only accepted A..N and broke on cols O/P + covers.
+function isValidPosFormat(pos){
+  if(!pos || typeof pos !== 'string') return false;
+  const s = pos.toUpperCase().trim();
+  return /^\d{1,2}[A-P]$/.test(s) || /^15[AB]-[A-P]$/.test(s);
+}
+
+// Build the list of all valid SPA storage cell IDs (used by validators
+// and the migration helper). Cached at first use.
+let _SPA_CELLS_CACHE = null;
+function allSpaStorageCells(){
+  if(_SPA_CELLS_CACHE) return _SPA_CELLS_CACHE;
+  const out = [];
+  ROW_NUMBERS_NEW.forEach(rowN => {
+    COLS_NEW.forEach(colL => {
+      if(isSpaStorageCell(String(rowN), colL)){
+        out.push(rowN + colL);
+      }
+    });
+  });
+  _SPA_CELLS_CACHE = out;
+  return out;
+}
+
+// ── SWIM-SPA PAIR LOGIC ─────────────────────────────────────────────
+// A swim spa is wider than a hot tub: it occupies the cell where it's
+// placed PLUS the cell immediately to its right (same row, next column
+// letter). Both cells are physically blocked while the swim spa is there.
+//
+//   • In a paired pair: max 2 swim spas high (BTM + TOP). No MID — swims
+//     are too tall for a 3-deep stack.
+//   • If any hot tub is in the partner cell, you can't place a swim spa.
+//   • If you remove the swim spa, both cells go back to normal 3-high
+//     hot tub rules.
+//
+// partnerCell('7B') → '7C'   (col B + 1 = col C)
+// partnerCell('7P') → null    (no col Q)
+// partnerCell('7N') → '7O' but 7O is drive — so callers also need
+//                      to check the partner is a valid spa cell.
+function partnerCell(pos){
+  const p = parsePos(pos);
+  if(!p.valid || p.rowKey.startsWith('15')) return null;  // covers don't pair
+  const idx = COLS_NEW.indexOf(p.colLetter);
+  if(idx < 0 || idx >= COLS_NEW.length - 1) return null;
+  const partner = p.rowKey + COLS_NEW[idx + 1];
+  return partner;
+}
+
+// Returns the swim-pair container for `pos`: the LEFT cell of the pair.
+// If `pos` is a left-cell that has (or could have) a swim spa, returns
+// `pos`. If `pos` is the RIGHT half of an existing swim-pair, returns
+// the left cell. If no swim is present anywhere relevant, returns null.
+//
+// Used by the renderer to detect when two cells should visually merge
+// into one wider "swim spa zone".
+function swimPairOwnerOf(pos){
+  // Is there a swim spa at this exact pos?
+  if(units.some(u => u.pos === pos && u.type === 'swim')) return pos;
+  // Is this the right-half of a pair?
+  const p = parsePos(pos);
+  if(!p.valid || p.rowKey.startsWith('15')) return null;
+  const idx = COLS_NEW.indexOf(p.colLetter);
+  if(idx <= 0) return null;
+  const leftCell = p.rowKey + COLS_NEW[idx - 1];
+  if(units.some(u => u.pos === leftCell && u.type === 'swim')) return leftCell;
+  return null;
+}
+
+// ═══════════════════════════════════════════════════════
+// LEGACY COMPAT — keep these constants live until every caller has been
+// updated. The OLD app used col-numbers 1-12 × row-letters A-N/M; some
+// late-binding consumers (3D init, search UI, exports) still poke at
+// ROWS.indexOf and COL_ZONE briefly during migration. We re-point them
+// to the new grid so they at least don't crash.
+// ═══════════════════════════════════════════════════════
+const ROWS = COLS_NEW.slice();                  // legacy: was row-letters; now cols A-P
+const ELEVATOR_ROW = 'O';                       // legacy stub — actual elev is on the blueprint
+const BACK_WALL_ROW = 'P';                      // legacy stub
+const COL_TYPE = {};   // legacy stub — kept as empty object
+const COL_ZONE = {};   // legacy stub
 const DOCK_DOORS = [
   {label:'Dock Door #1', cols:[1]},
   {label:'Dock Door #2', cols:[4,5,6]},
@@ -5635,22 +5885,27 @@ const DOCK_DOORS = [
   {label:'Dock Door #4', cols:[9]},
   {label:'Dock Door #5', cols:[10,11]},
 ];
-
 const ZONE_LABELS = {
   local:'LOCAL SPAS', dealer:'DEALER SPAS', swim:'SWIM SPAS',
   extra:'EXTRA STOCK', misc:'MISC', drive:''
 };
 
 // ═══════════════════════════════════════════════════════
-// STACK RULES — physical limits for hot/swim tubs
+// STACK RULES — physical limits per blueprint
 // ═══════════════════════════════════════════════════════
-// Each storage cell holds up to MAX_STACKS stacks side-by-side,
-// each stack up to MAX_LEVELS tubs high (level 1 = bottom, MAX = top).
-// Only HOT TUBS and SWIM SPAS follow this rule.
-// Covers, materials, accessories, and 'extra/misc' are unlimited.
-const MAX_STACKS  = 2;
-const MAX_LEVELS  = 3;
-const MAX_PER_CELL = MAX_STACKS * MAX_LEVELS;  // 6
+// NEW MODEL: each spa cell has ONE stack only.
+//   • Hot tubs: stack up to 3 high (BTM = 1, MID = 2, TOP = 3)
+//   • Swim spas: occupy the cell + the cell to the right (paired), stack
+//     up to 2 high (BTM = 1, TOP = 2 — there's no MID for swims, they're
+//     too tall). Both cells in the pair are blocked from receiving any
+//     hot tub while a swim spa is there.
+// Only HOT TUBS and SWIM SPAS follow these rules. Covers, materials,
+// accessories, and 'extra/misc' items are unlimited per cell.
+const MAX_STACKS  = 1;                  // 1 stack per cell (was 2)
+const MAX_LEVELS_HOT  = 3;              // 3 hot tubs high per stack
+const MAX_LEVELS_SWIM = 2;              // 2 swim spas high per pair
+const MAX_LEVELS = MAX_LEVELS_HOT;      // legacy default — defaults to the hot-tub rule
+const MAX_PER_CELL = MAX_LEVELS_HOT;    // 3 (was 6 with 2 stacks)
 const STACK_TYPES = ['hot','swim'];
 const isStackedType = t => STACK_TYPES.includes(t);
 const LEVEL_LABEL = lv => lv===1?'Bottom' : lv===2?'Middle' : lv===3?'Top' : `L${lv}`;
@@ -7318,139 +7573,585 @@ function findMissingDispatches(){
 // STACK HELPERS — manage 2-stack × 3-level cell layout
 // ═══════════════════════════════════════════════════════
 // Returns {stacks, overflow}. stacks[s-1][lv-1] = unit-or-null.
+// ─────────────────────────────────────────────────────────────────────
+// CELL STACK MODEL — BLUEPRINT v2
+// ─────────────────────────────────────────────────────────────────────
+// New model: every spa cell has ONE stack. Hot tubs go up to 3 high
+// (BTM/MID/TOP). Swim spas occupy the cell PLUS the cell to the right
+// (paired) and stack only 2 high (BTM/TOP).
+//
+// cellStacks(pos) → returns { stacks, overflow, mode, pair } where:
+//   stacks: array of one or more "stack" arrays. Index 0 is the only
+//           stack for a normal cell. For a swim-pair cell, this is the
+//           combined stack (length 2).
+//   overflow: units with invalid stack/level (defensive)
+//   mode: 'hot' (3-high), 'swim' (paired, 2-high), or 'empty'
+//   pair: for swim mode, { left, right } cell IDs
+//
+// The legacy contract — `stacks[N][lv]` indexed by stack number 1..N and
+// level 1..MAX — is preserved so the rest of the codebase keeps working.
+
 function cellStacks(pos){
-  const stacks = Array.from({length:MAX_STACKS}, ()=>Array(MAX_LEVELS).fill(null));
+  // Detect swim-pair state: a swim spa anywhere in pos or its left partner
+  const swimHere     = units.find(u => u.pos === pos && u.type === 'swim');
+  const swimOwnerPos = swimPairOwnerOf(pos);
+  const isSwimPair   = !!swimOwnerPos;
+
+  if(isSwimPair){
+    // Both cells (left + right) share a single 2-high stack of swim spas.
+    // Any hot tub in either cell is "overflow" — illegal, surface it.
+    const rightCell = partnerCell(swimOwnerPos) || '';
+    const swims = units.filter(u =>
+      (u.pos === swimOwnerPos || u.pos === rightCell) && u.type === 'swim'
+    );
+    const stack = Array(MAX_LEVELS_SWIM).fill(null);
+    const overflow = [];
+    swims.forEach(u => {
+      const lv = u.level || 1;
+      if(lv >= 1 && lv <= MAX_LEVELS_SWIM && !stack[lv-1]){
+        stack[lv-1] = u;
+      } else {
+        overflow.push(u);
+      }
+    });
+    // Hot tubs in a swim-pair are misplaced and should surface as overflow
+    const intruders = units.filter(u =>
+      (u.pos === swimOwnerPos || u.pos === rightCell) &&
+      u.type === 'hot'
+    );
+    intruders.forEach(u => overflow.push(u));
+    return {
+      stacks: [stack],   // single combined stack
+      overflow,
+      mode: 'swim',
+      pair: { left: swimOwnerPos, right: rightCell }
+    };
+  }
+
+  // Normal cell: one stack, up to 3 hot tubs high
+  const stack = Array(MAX_LEVELS_HOT).fill(null);
   const overflow = [];
-  units.filter(u=>u.pos===pos && isStackedType(u.type)).forEach(u=>{
-    const s = u.stack||1, lv = u.level||1;
-    if(s>=1 && s<=MAX_STACKS && lv>=1 && lv<=MAX_LEVELS){
-      if(stacks[s-1][lv-1]) overflow.push(u);
-      else stacks[s-1][lv-1] = u;
-    } else { overflow.push(u); }
-  });
-  return {stacks, overflow};
-}
-function cellSpaCount(pos){
-  return units.filter(u=>u.pos===pos && isStackedType(u.type)).length;
-}
-function cellHasSpaCapacity(pos){
-  return cellSpaCount(pos) < MAX_PER_CELL;
-}
-// Find next available slot {stack, level} or null if cell is full.
-function findNextSlot(pos, preferStack=null){
-  const {stacks} = cellStacks(pos);
-  const order = preferStack
-    ? [preferStack-1, ...Array.from({length:MAX_STACKS},(_,i)=>i).filter(i=>i!==preferStack-1)]
-    : Array.from({length:MAX_STACKS},(_,i)=>i);
-  for(const sIdx of order){
-    for(let lv=0; lv<MAX_LEVELS; lv++){
-      if(!stacks[sIdx][lv]) return {stack:sIdx+1, level:lv+1};
+  units.filter(u => u.pos === pos && isStackedType(u.type)).forEach(u => {
+    // A hot tub in a cell that's the RIGHT half of a swim pair is invalid
+    // — but we don't get here in that case (handled above).
+    const lv = u.level || 1;
+    if(u.type === 'swim'){
+      // A swim spa not yet recognized as a pair owner — treat its single
+      // cell as a degenerate 2-high stack (mid-migration state).
+      if(lv >= 1 && lv <= MAX_LEVELS_SWIM && !stack[lv-1]){
+        stack[lv-1] = u;
+      } else { overflow.push(u); }
+    } else {
+      if(lv >= 1 && lv <= MAX_LEVELS_HOT && !stack[lv-1]){
+        stack[lv-1] = u;
+      } else { overflow.push(u); }
     }
+  });
+  const isEmpty = stack.every(s => !s);
+  return {
+    stacks: [stack],
+    overflow,
+    mode: isEmpty ? 'empty' : 'hot',
+    pair: null
+  };
+}
+
+function cellSpaCount(pos){
+  return units.filter(u => u.pos === pos && isStackedType(u.type)).length;
+}
+
+function cellHasSpaCapacity(pos){
+  // Capacity depends on what's currently in the cell
+  const { mode, stacks } = cellStacks(pos);
+  if(mode === 'swim'){
+    return stacks[0].filter(Boolean).length < MAX_LEVELS_SWIM;
+  }
+  return cellSpaCount(pos) < MAX_LEVELS_HOT;
+}
+
+// Find next available slot {stack:1, level:N} for type t, or null if full.
+// type defaults to 'hot' for back-compat.
+function findNextSlot(pos, preferStack=null, type='hot'){
+  // For swim spas: also need to verify the partner cell is free of hot tubs
+  if(type === 'swim'){
+    const partner = partnerCell(pos);
+    if(!partner || !isSpaStorageCell(parsePos(pos).rowKey, parsePos(pos).colLetter)) return null;
+    const pPos = parsePos(partner);
+    if(!pPos.valid || !isSpaStorageCell(pPos.rowKey, pPos.colLetter)) return null;
+    // No hot tubs in either cell
+    const blockers = units.filter(u =>
+      (u.pos === pos || u.pos === partner) && u.type === 'hot'
+    );
+    if(blockers.length) return null;
+    // Count existing swims in the pair
+    const swims = units.filter(u =>
+      (u.pos === pos || u.pos === partner) && u.type === 'swim'
+    );
+    const taken = new Set(swims.map(u => u.level || 1));
+    for(let lv = 1; lv <= MAX_LEVELS_SWIM; lv++){
+      if(!taken.has(lv)) return {stack:1, level:lv};
+    }
+    return null;
+  }
+  // Hot tub: cell must not be in swim-pair mode (left OR right)
+  if(swimPairOwnerOf(pos)) return null;
+  const { stacks } = cellStacks(pos);
+  const stack = stacks[0];
+  for(let lv = 0; lv < MAX_LEVELS_HOT; lv++){
+    if(!stack[lv]) return {stack:1, level:lv+1};
   }
   return null;
 }
+
 // Validate a placement at pos (excluding self if id given).
-function validateSlot(pos, stack, level, excludeId=null){
-  if(!stack || !level) return {ok:false, reason:'Missing stack/level'};
-  if(stack<1||stack>MAX_STACKS) return {ok:false, reason:`Stack must be 1–${MAX_STACKS}`};
-  if(level<1||level>MAX_LEVELS) return {ok:false, reason:`Max ${MAX_LEVELS} levels high`};
-  const occ = units.find(u=>u.pos===pos && isStackedType(u.type) && u.stack===stack && u.level===level && u.id!==excludeId);
-  if(occ) return {ok:false, reason:`Slot ${stack}-${LEVEL_LABEL(level)} occupied by ${occ.sn||occ.dealer}`};
-  for(let lv=1; lv<level; lv++){
-    const below = units.find(u=>u.pos===pos && isStackedType(u.type) && u.stack===stack && u.level===lv && u.id!==excludeId);
-    if(!below) return {ok:false, reason:`Cannot place at ${LEVEL_LABEL(level)} — ${LEVEL_LABEL(lv)} of stack ${stack} is empty`};
+function validateSlot(pos, stack, level, excludeId=null, type='hot'){
+  if(!level) return {ok:false, reason:'Missing level'};
+  stack = stack || 1;
+  if(stack !== 1) return {ok:false, reason:'Each cell has only 1 stack'};
+  // Swim spa rules
+  if(type === 'swim'){
+    if(level < 1 || level > MAX_LEVELS_SWIM){
+      return {ok:false, reason:`Swim spas max ${MAX_LEVELS_SWIM} high`};
+    }
+    const partner = partnerCell(pos);
+    if(!partner) return {ok:false, reason:'No partner cell — swim spa needs 2 adjacent cells'};
+    const pPos = parsePos(partner);
+    if(!pPos.valid || !isSpaStorageCell(pPos.rowKey, pPos.colLetter)){
+      return {ok:false, reason:`Partner cell ${partner} is not a storage cell`};
+    }
+    // No hot tubs in either cell
+    const hotInPair = units.find(u =>
+      (u.pos === pos || u.pos === partner) && u.type === 'hot' && u.id !== excludeId
+    );
+    if(hotInPair) return {ok:false, reason:`Hot tub ${hotInPair.sn||hotInPair.dealer} blocks the swim pair — move it first`};
+    // Slot occupancy check
+    const occ = units.find(u =>
+      (u.pos === pos || u.pos === partner) && u.type === 'swim' &&
+      (u.level || 1) === level && u.id !== excludeId
+    );
+    if(occ) return {ok:false, reason:`Slot ${LEVEL_SHORT(level)} occupied by ${occ.sn||occ.dealer}`};
+    // Must have BTM filled before TOP (level 1 first)
+    if(level > 1){
+      const below = units.find(u =>
+        (u.pos === pos || u.pos === partner) && u.type === 'swim' &&
+        (u.level || 1) === level - 1 && u.id !== excludeId
+      );
+      if(!below) return {ok:false, reason:`Place a swim spa at BTM first`};
+    }
+    return {ok:true};
+  }
+  // Hot tub rules
+  if(level < 1 || level > MAX_LEVELS_HOT){
+    return {ok:false, reason:`Hot tubs max ${MAX_LEVELS_HOT} high`};
+  }
+  // Block hot tubs if a swim pair owns this cell or its left partner
+  if(swimPairOwnerOf(pos)) return {ok:false, reason:'Cell is part of a swim spa pair — remove the swim first'};
+  const occ = units.find(u => u.pos === pos && isStackedType(u.type) &&
+    (u.stack || 1) === 1 && (u.level || 1) === level && u.id !== excludeId);
+  if(occ) return {ok:false, reason:`Slot ${LEVEL_SHORT(level)} occupied by ${occ.sn||occ.dealer}`};
+  for(let lv = 1; lv < level; lv++){
+    const below = units.find(u => u.pos === pos && isStackedType(u.type) &&
+      (u.stack || 1) === 1 && (u.level || 1) === lv && u.id !== excludeId);
+    if(!below) return {ok:false, reason:`Cannot place at ${LEVEL_LABEL(level)} — ${LEVEL_LABEL(lv)} is empty`};
   }
   return {ok:true};
 }
+
 // Is unit on top of its stack?
 function unitIsTop(u){
   if(!isStackedType(u.type)) return true;
-  const {stacks} = cellStacks(u.pos);
-  const stack = stacks[(u.stack||1)-1];
+  const { stacks, mode } = cellStacks(u.pos);
+  const stack = stacks[0];
+  const maxLv = (mode === 'swim') ? MAX_LEVELS_SWIM : MAX_LEVELS_HOT;
   let topLv = 0;
-  for(let i=0; i<stack.length; i++) if(stack[i]) topLv = i+1;
-  return (u.level||1) === topLv;
+  for(let i = 0; i < maxLv; i++) if(stack[i] && stack[i].id === u.id) topLv = i+1;
+  // Verify nothing above
+  for(let i = (u.level||1); i < maxLv; i++){
+    if(stack[i] && stack[i].id !== u.id) return false;
+  }
+  return topLv > 0;
 }
+
 // Units physically above u (must be moved before removing u).
 function unitsAbove(u){
   if(!isStackedType(u.type)) return [];
-  const {stacks} = cellStacks(u.pos);
-  const stack = stacks[(u.stack||1)-1];
-  const myLv = u.level||1;
+  const { stacks, mode } = cellStacks(u.pos);
+  const stack = stacks[0];
+  const maxLv = (mode === 'swim') ? MAX_LEVELS_SWIM : MAX_LEVELS_HOT;
+  const myLv = u.level || 1;
   const out = [];
-  for(let i=myLv; i<MAX_LEVELS; i++){
+  for(let i = myLv; i < maxLv; i++){
     if(stack[i] && stack[i].id !== u.id) out.push(stack[i]);
   }
   return out;
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// ONE-TIME POSITION MIGRATION — legacy grid → blueprint grid
+// ─────────────────────────────────────────────────────────────────────
+// The pre-v2 app used positions like "6B" where 6=column-number,
+// B=row-letter. The blueprint flips that: "6B" means row 6, col B.
+// Best-effort mapping (Option B):
+//   • OLD col → NEW row, by zone equivalence:
+//       col 1 (LOCAL)  → row 1  (SPA·Local)
+//       col 4 (DEALER) → row 4  (SPA·Dealer)
+//       col 6 (DEALER) → row 7  (SPA·Dealer)
+//       col 7 (DEALER) → row 8  (SPA·Dealer/Sw)
+//       col 9 (SWIM)   → row 11 (SPA·Swim)
+//       col 10 (EXTRA) → row 12 (SPA·Extra)
+//       col 12 (MISC)  → row 12 (best effort — also SPA·Extra)
+//   • OLD row-letter → NEW col-letter, with stack 2 shifted one column
+//     to the right (since each old cell held 2 stacks, stack 2 now lives
+//     in the cell beside it):
+//       row A stack 1 → col A      ·  row A stack 2 → col B
+//       row B stack 1 → col B      ·  row B stack 2 → col C
+//       ...
+//   • If the mapping lands on a non-SPA cell (drive aisle, elevator),
+//     the unit is sent back to "incoming" so the warehouse manager can
+//     re-place it manually. A migration banner surfaces the count.
+//   • Idempotent: writes a flag `state.posMigrationV2` so it only runs
+//     once. If a unit already has a v2-shaped position, it's left alone.
+
+const POS_MIGRATION_FLAG = 'posMigrationV2';
+
+function migratePositionsToBlueprint(){
+  // Check if migration already ran (flag stored in cfg)
+  if(cfg && cfg[POS_MIGRATION_FLAG]) return;
+
+  const COL_TO_ROW_BLUEPRINT = { 1:1, 4:4, 6:7, 7:8, 9:11, 10:12, 12:12 };
+  const ROW_LETTER_TO_COL_IDX = { A:0, B:1, C:2, D:3, E:4, F:5, G:6, H:7, I:8, J:9, K:10, L:11, N:12, M:13 };
+
+  let migrated = 0;
+  let bumpedToIncoming = 0;
+  const bumpedDetails = [];
+
+  // Build a quick check: is this string already in v2 format?
+  const isV2 = (pos) => {
+    if(!pos) return false;
+    const p = parsePos(pos);
+    return p.valid && p.type === 'spa';
+  };
+
+  units.forEach(u => {
+    if(!u.pos) return;
+    // Already in v2 format? skip
+    if(isV2(u.pos)) return;
+    // Legacy "colNum + rowLetter" format
+    const m = String(u.pos).match(/^(\d{1,2})([A-N])$/);
+    if(!m){
+      // unrecognized — clear position, send to incoming
+      addIncomingFromMigrated(u, `Unknown legacy pos: ${u.pos}`);
+      bumpedToIncoming++;
+      bumpedDetails.push(`${u.sn||u.dealer||'?'} (${u.pos})`);
+      return;
+    }
+    const oldCol = parseInt(m[1], 10);
+    const oldRow = m[2];
+    const newRowN = COL_TO_ROW_BLUEPRINT[oldCol];
+    if(!newRowN){
+      // Drive lane in old map — nothing equivalent
+      addIncomingFromMigrated(u, `Old pos ${u.pos} was a drive aisle`);
+      bumpedToIncoming++;
+      bumpedDetails.push(`${u.sn||u.dealer||'?'} (${u.pos})`);
+      return;
+    }
+    const baseColIdx = ROW_LETTER_TO_COL_IDX[oldRow];
+    if(baseColIdx == null){
+      addIncomingFromMigrated(u, `Old row letter ${oldRow} unmapped`);
+      bumpedToIncoming++;
+      bumpedDetails.push(`${u.sn||u.dealer||'?'} (${u.pos})`);
+      return;
+    }
+    // Stack 2 shifts one column to the right (each old cell = 2 new cells side-by-side)
+    const stackShift = (u.stack === 2) ? 1 : 0;
+    const newColIdx = baseColIdx + stackShift;
+    const newColLetter = COLS_NEW[newColIdx];
+    if(!newColLetter){
+      // Past column P — out of grid
+      addIncomingFromMigrated(u, `Mapped past col P`);
+      bumpedToIncoming++;
+      bumpedDetails.push(`${u.sn||u.dealer||'?'} (${u.pos})`);
+      return;
+    }
+    const newPos = newRowN + newColLetter;
+    // Verify the new pos is actually an SPA storage cell
+    if(!isSpaStorageCell(String(newRowN), newColLetter)){
+      addIncomingFromMigrated(u, `Mapped to non-spa cell ${newPos}`);
+      bumpedToIncoming++;
+      bumpedDetails.push(`${u.sn||u.dealer||'?'} ${u.pos}→${newPos}`);
+      return;
+    }
+    // SUCCESS — assign new position. Stack is always 1 in the new model.
+    u._legacyPos = u.pos;
+    u._legacyStack = u.stack;
+    u.pos = newPos;
+    u.stack = 1;
+    // Level stays the same; stack 2 → stack 1 of the adjacent cell preserves level (BTM stays BTM, etc.)
+    migrated++;
+  });
+
+  // Mark migration done
+  cfg[POS_MIGRATION_FLAG] = {
+    at: new Date().toISOString(),
+    migrated, bumpedToIncoming,
+    sample: bumpedDetails.slice(0, 10)
+  };
+
+  if(migrated || bumpedToIncoming){
+    addAct(`📐 Blueprint v2 migration: ${migrated} placed, ${bumpedToIncoming} returned to Incoming`, 'var(--accent)');
+    console.log('[migrate v2]', { migrated, bumpedToIncoming, sample: bumpedDetails });
+    try { saveState?.(); } catch(e){}
+  }
+}
+
+// Helper: move a unit from units[] back to incoming[] (during migration)
+function addIncomingFromMigrated(u, reason){
+  // Build an incoming record from the unit's existing data
+  const inc = {
+    id: u.id,
+    sn: u.sn,
+    dealer: u.dealer,
+    type: u.type,
+    model: u.model,
+    acrylicColor: u.acrylicColor,
+    cabinetColor: u.cabinetColor,
+    trackingId: u.trackingId,
+    cover: u.cover,
+    plasticWrap: u.plasticWrap,
+    looseAccessories: u.looseAccessories,
+    arrivedAt: u.entry || new Date().toISOString().slice(0,10),
+    notes: (u.notes ? u.notes + ' · ' : '') + `[v2-migrate] ${reason}`,
+    needsPlacement: true,
+    _legacyPos: u.pos,
+    _legacyStack: u.stack,
+    _legacyLevel: u.level
+  };
+  if(typeof incoming !== 'undefined' && Array.isArray(incoming)){
+    incoming.unshift(inc);
+  }
+  // Remove from units[]
+  units = units.filter(x => x.id !== u.id);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// AUTO-ORGANIZE: relocate every tina to a row that matches its type
+// ─────────────────────────────────────────────────────────────────────
+// Rules (from blueprint ROW_DEFS_NEW + Alberto):
+//   • hot tub   → rows 1 (Local) and 4, 7, 8 (Dealer). Tries 4/7/8 first,
+//                 falls back to row 1 if all dealer rows are full.
+//   • swim spa  → row 11 (SPA·Swim) first, row 8 (Dealer/Sw) as fallback,
+//                 row 12 (Extra) as last resort. Always pairs with the
+//                 cell to the right.
+//   • extra     → row 12 (SPA·Extra)
+//   • misc      → row 12, then 1 as fallback
+//
+// Operates on TWO populations:
+//   1. Units already on the map but in the wrong row → relocated
+//   2. Incoming items flagged needsPlacement → moved into units[] at a
+//      valid slot, flag cleared
+//
+// Returns { relocated, placed, skipped } for the toast/banner update.
+
+function autoOrganizeUnits(){
+  const targetRows = {
+    'hot':   [4, 7, 8, 1],          // dealer rows first, then local
+    'swim':  [11, 8, 12],            // swim row first, then mixed dealer/sw, then extra
+    'extra': [12, 1],
+    'misc':  [12, 1],
+  };
+  // Is unit's current pos already in one of its preferred rows?
+  const isInGoodRow = (u) => {
+    const parsed = parsePos(u.pos);
+    if(!parsed.valid || parsed.rowKey.startsWith('15')) return false;
+    const rowN = +parsed.rowKey;
+    return (targetRows[u.type] || []).includes(rowN);
+  };
+  // Find first available cell+slot for `type` across the preferred rows
+  const findSlotInPreferredRows = (type, excludeUnitId) => {
+    const rows = targetRows[type] || [1, 4, 7, 8, 11, 12];
+    for(const rowN of rows){
+      for(const colLetter of COLS_NEW){
+        if(!isSpaStorageCell(String(rowN), colLetter)) continue;
+        const pos = rowN + colLetter;
+        // Swim spas need a valid partner cell to the right and both clear of hot tubs
+        if(type === 'swim'){
+          const partner = partnerCell(pos);
+          if(!partner) continue;
+          const p = parsePos(partner);
+          if(!p.valid || !isSpaStorageCell(p.rowKey, p.colLetter)) continue;
+          const hotInPair = units.some(u =>
+            (u.pos === pos || u.pos === partner) && u.type === 'hot' && u.id !== excludeUnitId
+          );
+          if(hotInPair) continue;
+        }
+        // Hot tubs need the cell to NOT already be part of a swim pair
+        if(type === 'hot' && swimPairOwnerOf(pos)) continue;
+        const slot = findNextSlot(pos, null, type);
+        if(slot) return { pos, slot };
+      }
+    }
+    return null;
+  };
+
+  let relocated = 0;
+  let placed = 0;
+  let skipped = 0;
+
+  // Pass 1 — relocate units that are in the wrong row
+  units.slice().forEach(u => {
+    if(!isStackedType(u.type)) return;
+    if(isInGoodRow(u)) return;
+    const dest = findSlotInPreferredRows(u.type, u.id);
+    if(!dest){ skipped++; return; }
+    const oldPos = u.pos;
+    u.pos = dest.pos;
+    u.stack = dest.slot.stack;
+    u.level = dest.slot.level;
+    addAct(`📦 Auto-organize: ${u.sn||u.dealer} ${oldPos}→${dest.pos}`, 'var(--accent)');
+    relocated++;
+  });
+
+  // Pass 2 — auto-place needsPlacement items from Incoming
+  if(typeof incoming !== 'undefined' && Array.isArray(incoming)){
+    incoming.slice().forEach(it => {
+      if(!it.needsPlacement) return;
+      if(!isStackedType(it.type)){
+        // Non-stackable (covers, materials, accessories) — just clear the flag
+        delete it.needsPlacement;
+        return;
+      }
+      const dest = findSlotInPreferredRows(it.type, null);
+      if(!dest){ skipped++; return; }
+      // Promote from incoming → units. Preserve every field the unit cares about.
+      const newU = {
+        id: it.id,
+        pos: dest.pos,
+        stack: dest.slot.stack,
+        level: dest.slot.level,
+        sn: it.sn,
+        dealer: it.dealer,
+        type: it.type,
+        model: it.model,
+        acrylicColor: it.acrylicColor,
+        cabinetColor: it.cabinetColor,
+        trackingId: it.trackingId,
+        cover: it.cover,
+        plasticWrap: it.plasticWrap,
+        looseAccessories: it.looseAccessories,
+        entry: it.arrivedAt || it.entry || new Date().toISOString().slice(0,10),
+        notes: it.notes || ''
+      };
+      units.push(newU);
+      incoming = incoming.filter(x => x.id !== it.id);
+      addAct(`📦 Auto-organize: placed ${newU.sn||newU.dealer} at ${dest.pos}`, 'var(--teal)');
+      placed++;
+    });
+  }
+
+  // Persist and refresh
+  if(relocated || placed){
+    try { saveState?.(); } catch(e){}
+    try { drawMap?.(); } catch(e){}
+    try { renderIncoming?.(); } catch(e){}
+    try { updBadges?.(); } catch(e){}
+  }
+  return { relocated, placed, skipped };
+}
+
+// Button handler — called from the migration banner. Runs autoOrganize
+// and shows a result toast.
+function runAutoOrganize(){
+  if(!confirm('Auto-organize all hot tubs and swim spas into their correct rows? Items currently in the wrong row will be moved. Items waiting in Incoming with needsPlacement will be placed.')) return;
+  snapshot('auto-organize');
+  const r = autoOrganizeUnits();
+  const parts = [];
+  if(r.relocated) parts.push(`${r.relocated} relocated`);
+  if(r.placed) parts.push(`${r.placed} placed from Incoming`);
+  if(r.skipped) parts.push(`${r.skipped} skipped (no space)`);
+  toast(parts.length ? `✓ ${parts.join(' · ')}` : 'Everything is already in the right place', parts.length ? 'ok' : 'info');
+}
+window.runAutoOrganize = runAutoOrganize;
+window.autoOrganizeUnits = autoOrganizeUnits;
+
 // Migrate units that don't have stack/level yet (legacy seed/imported).
 function migrateUnitsToStacks(){
   const byPos = {};
-  units.forEach(u=>{ if(isStackedType(u.type)){ (byPos[u.pos]=byPos[u.pos]||[]).push(u); } });
+  units.forEach(u => { if(isStackedType(u.type)){ (byPos[u.pos] = byPos[u.pos] || []).push(u); } });
   for(const pos in byPos){
     const list = byPos[pos];
     const unassigned = list.filter(u => !u.stack || !u.level);
-    unassigned.sort((a,b)=>(a.id||0)-(b.id||0));
+    unassigned.sort((a,b) => (a.id||0) - (b.id||0));
     for(const u of unassigned){
-      const slot = findNextSlot(pos);
-      if(slot){ u.stack=slot.stack; u.level=slot.level; }
-      else { u.stack=99; u.level=99; }  // overflow flag
+      u.stack = 1;
+      const slot = findNextSlot(pos, null, u.type);
+      if(slot){ u.level = slot.level; }
+      else { u.level = 99; }   // overflow flag
     }
   }
 }
+
 // Stack visualization HTML — used in cell panel and add-form
 function renderStackTowers(pos, opts={}){
-  const {stacks, overflow} = cellStacks(pos);
+  const { stacks, overflow, mode, pair } = cellStacks(pos);
   const onSlotClick = opts.onSlotClick || '';
   const selectedSlot = opts.selectedSlot || null;
-  const towers = stacks.map((stack, sIdx)=>{
-    const sNum = sIdx+1;
-    const slots = [];
-    for(let lv=MAX_LEVELS; lv>=1; lv--){
-      const u = stack[lv-1];
-      const isTop = u && stack.slice(lv).every(x=>!x);
-      const sel = selectedSlot && selectedSlot.stack===sNum && selectedSlot.level===lv;
-      const lvLbl = LEVEL_SHORT(lv);
-      if(u){
-        slots.push(`<div class="stk-slot stk-occ ${isTop?'stk-top':''} t-${u.type}" title="${(u.sn||u.dealer).replace(/"/g,'')} (${LEVEL_LABEL(lv)})">
-          <div class="stk-lv">${lvLbl}</div>
-          <div class="stk-dl">${u.dealer||''}</div>
-          <div class="stk-sn">${u.sn||'—'}</div>
-          ${isTop?'<div class="stk-top-mark">↑ access</div>':''}
-        </div>`);
-      } else {
-        const canPlace = lv===1 || stack[lv-2];
-        const clickAttr = onSlotClick && canPlace
-          ? `onclick="event.stopPropagation();${onSlotClick.replace(/\{stack\}/g,sNum).replace(/\{level\}/g,lv)}"`
-          : '';
-        slots.push(`<div class="stk-slot stk-empty ${sel?'stk-sel':''} ${canPlace?'stk-can':'stk-no'}" ${clickAttr} title="${canPlace?'Empty — '+LEVEL_LABEL(lv):'Fill '+LEVEL_LABEL(lv-1)+' first'}">
-          <div class="stk-lv">${lvLbl}</div>
-          <div class="stk-empty-hint">${canPlace?(onSlotClick?'+ place':'empty'):'—'}</div>
-        </div>`);
-      }
+  const stack = stacks[0];
+  const maxLv = (mode === 'swim') ? MAX_LEVELS_SWIM : MAX_LEVELS_HOT;
+  const slots = [];
+  for(let lv = maxLv; lv >= 1; lv--){
+    const u = stack[lv-1];
+    const isTop = u && stack.slice(lv).every(x => !x);
+    const sel = selectedSlot && selectedSlot.level === lv;
+    const lvLbl = LEVEL_SHORT(lv);
+    if(u){
+      slots.push(`<div class="stk-slot stk-occ ${isTop?'stk-top':''} t-${u.type}" title="${(u.sn||u.dealer||'').replace(/"/g,'')} (${LEVEL_LABEL(lv)})">
+        <div class="stk-lv">${lvLbl}</div>
+        <div class="stk-dl">${u.dealer||''}</div>
+        <div class="stk-sn">${u.sn||'—'}</div>
+        ${isTop?'<div class="stk-top-mark">↑ access</div>':''}
+      </div>`);
+    } else {
+      const canPlace = lv === 1 || stack[lv-2];
+      const clickAttr = onSlotClick && canPlace
+        ? `onclick="event.stopPropagation();${onSlotClick.replace(/\{stack\}/g,1).replace(/\{level\}/g,lv)}"`
+        : '';
+      slots.push(`<div class="stk-slot stk-empty ${sel?'stk-sel':''} ${canPlace?'stk-can':'stk-no'}" ${clickAttr} title="${canPlace?'Empty — '+LEVEL_LABEL(lv):'Fill '+LEVEL_LABEL(lv-1)+' first'}">
+        <div class="stk-lv">${lvLbl}</div>
+        <div class="stk-empty-hint">${canPlace?(onSlotClick?'+ place':'empty'):'—'}</div>
+      </div>`);
     }
-    const filled = stack.filter(Boolean).length;
-    return `<div class="stk-tower">
-      <div class="stk-hdr">Stack ${sNum} <span class="stk-cnt">${filled}/${MAX_LEVELS}</span></div>
-      ${slots.join('')}
-    </div>`;
-  }).join('');
-  const overflowHtml = overflow.length ? `<div class="stk-overflow">⚠ ${overflow.length} unit${overflow.length>1?'s':''} in overflow (auto-migrated — please review and reassign)</div>` : '';
-  return `<div class="stk-row">${towers}</div>${overflowHtml}`;
+  }
+  const filled = stack.filter(Boolean).length;
+  const hdrLabel = (mode === 'swim')
+    ? `Swim pair · ${pair.left}+${pair.right}`
+    : 'Stack';
+  const tower = `<div class="stk-tower" style="${mode==='swim'?'max-width:none;width:100%;background:#ecfdf5;border-color:#a7f3d0':''}">
+    <div class="stk-hdr">${hdrLabel} <span class="stk-cnt">${filled}/${maxLv}</span></div>
+    ${slots.join('')}
+  </div>`;
+  const overflowHtml = overflow.length ? `<div class="stk-overflow">⚠ ${overflow.length} unit${overflow.length>1?'s':''} in overflow (review & reassign — may have invalid level/type for this cell)</div>` : '';
+  return `<div class="stk-row">${tower}</div>${overflowHtml}`;
 }
 
-// Validate a position string (e.g. "7G") — checks format AND that it's a real storage cell, not a drive aisle.
-// Returns {ok:bool, pos:normalized, reason?:string}
+// Validate a position string (e.g. "7B") — checks format AND that it's
+// a real spa storage cell per the blueprint (not a drive aisle, elevator,
+// or P-storage/cover cell). Returns {ok, pos, reason?}.
 function validatePos(input){
   const s = (input||'').toUpperCase().trim();
-  const m = s.match(/^(\d{1,2})([A-N])$/);
-  if(!m) return {ok:false, pos:s, reason:'Format must be like 7G (column 1-12, row A-N)'};
-  const col = parseInt(m[1]);
-  const row = m[2];
-  if(col < 1 || col > 12) return {ok:false, pos:s, reason:'Column must be 1-12'};
-  if(!ROWS.includes(row)) return {ok:false, pos:s, reason:`Row ${row} doesn't exist (use A-L, M, or N)`};
-  if(COL_TYPE[col] === 'drive') return {ok:false, pos:s, reason:`Column ${col} is a forklift aisle, not storage`};
-  if(row === ELEVATOR_ROW && col !== 1 && col !== 12) return {ok:false, pos:s, reason:`Row N has elevators only at columns 1 and 12 — other cells are drive lanes`};
+  const parsed = parsePos(s);
+  if(!parsed.valid){
+    return {ok:false, pos:s, reason:'Format must be like 7B (row 1-14, col A-P)'};
+  }
+  if(parsed.rowKey.startsWith('15')){
+    return {ok:false, pos:s, reason:'Row 15 is cover storage — not for spas'};
+  }
+  if(parsed.type !== 'spa'){
+    const label = ({drv:'drive aisle', main:'main drive', elev:'elevator', pstor:'panel/cover storage', minv:'marriage inventory'})[parsed.type] || parsed.type;
+    return {ok:false, pos:s, reason:`${s} is ${label}, not spa storage`};
+  }
+  if(typeof isRowLocked === 'function' && isRowLocked(+parsed.rowKey)){
+    return {ok:false, pos:s, reason:`Row ${parsed.rowKey} is 🔒 LOCKED — unlock it in Manage Rows first`};
+  }
   return {ok:true, pos:s};
 }
 function addAct(m,c){ activity.unshift({m,c,t:new Date().toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'})}); if(activity.length>30)activity.pop(); }
@@ -8185,10 +8886,38 @@ function setupDropExtended(el,pos){
   el.addEventListener('drop',e=>{
     e.preventDefault();el.classList.remove('drag-over');
 
+    // ── Lock check on the DESTINATION ──
+    const p = (typeof parsePos === 'function') ? parsePos(pos) : { valid:false };
+    const rowLocked = (typeof isRowLocked === 'function' && p.valid && p.rowKey && !p.rowKey.startsWith('15') && isRowLocked(+p.rowKey));
+    const cellLocked = (typeof isCellLocked === 'function') ? isCellLocked(pos) : false;
+    if(rowLocked || cellLocked){
+      toast(`${pos} is 🔒 locked — unlock it first`, 'warn');
+      dragUnit = null; dragQueueItem = null;
+      return;
+    }
+
     // Drop from QUEUE
     if(dragQueueItem){
       const qi=dragQueueItem;
       dragQueueItem=null;
+
+      // ── BUG FIX (audit) — destination-type validation for spa drops ──
+      // Without this, dragging a hot tub queue item onto a cover/drive/elev
+      // cell silently places the unit into a non-storage cell. Pallets
+      // and materials are intentionally allowed anywhere because Alberto
+      // sometimes stages them in drive aisles before dispatch.
+      if(isStackedType(qi.type)){
+        const destType = (typeof parsePos === 'function')
+          ? (parsePos(pos).valid ? parsePos(pos).type : null)
+          : null;
+        if(destType && destType !== 'spa'){
+          const human = {drv:'drive aisle', main:'main drive', elev:'elevator', cf:'cover front', cb:'cover back', pstor:'panel storage', minv:'marriage inventory'}[destType] || destType;
+          toast(`Can't drop spa onto ${pos} (${human}) — pick a 🛁 SPA cell`, 'err');
+          // Put back in queue UI (queue array still has it)
+          renderQueue();
+          return;
+        }
+      }
       // Place item at this position
       snapshot(`add ${qi.dealer} from queue`);
 
@@ -8216,9 +8945,9 @@ function setupDropExtended(el,pos){
         // Single-item path (spas, covers, legacy single-material)
         // Stack-rule check for hot/swim
         if(isStackedType(qi.type)){
-          const slot = findNextSlot(pos);
+          const slot = findNextSlot(pos, null, qi.type);
           if(!slot){
-            toast(`${pos} is full (${MAX_PER_CELL} max). Drop on a different cell.`,'err');
+            toast(`${pos} is full (max ${qi.type==='swim'?MAX_LEVELS_SWIM:MAX_LEVELS_HOT}). Drop on a different cell.`,'err');
             // Put back in queue UI (item was already taken out of dragQueueItem; queue array still has it)
             renderQueue();
             return;
@@ -8256,10 +8985,25 @@ function setupDropExtended(el,pos){
     if(!dragUnit||dragUnit.fromPos===pos)return;
     const u=units.find(x=>x.id===dragUnit.unitId);
     if(u){
+      // ── BUG FIX (audit) — validate destination type ──
+      // findNextSlot only checks "stack not full"; it doesn't reject
+      // non-spa cells. So without this guard you could drop a hot tub
+      // onto a cover (cf/cb), pstor, drv, elev, or minv cell.
+      if(isStackedType(u.type)){
+        const destType = (typeof parsePos === 'function')
+          ? (parsePos(pos).valid ? parsePos(pos).type : null)
+          : null;
+        if(destType && destType !== 'spa'){
+          const human = {drv:'drive aisle', main:'main drive', elev:'elevator', cf:'cover front', cb:'cover back', pstor:'panel storage', minv:'marriage inventory'}[destType] || destType;
+          toast(`Can't drop spa onto ${pos} (${human}) — pick a 🛁 SPA cell`, 'err');
+          dragUnit = null;
+          return;
+        }
+      }
       // Stack-rule check at destination for hot/swim
       if(isStackedType(u.type)){
-        const slot = findNextSlot(pos);
-        if(!slot){ toast(`${pos} is full (${MAX_PER_CELL} max)`,'err'); dragUnit=null; return; }
+        const slot = findNextSlot(pos, null, u.type);
+        if(!slot){ toast(`${pos} is full (max ${u.type==='swim'?MAX_LEVELS_SWIM:MAX_LEVELS_HOT})`,'err'); dragUnit=null; return; }
         snapshot(`move ${u.sn||u.dealer}`);
         const old=u.pos;u.pos=pos;u.stack=slot.stack;u.level=slot.level;
         addAct(`${u.sn?'S/N '+u.sn:u.dealer} moved: ${old} → ${pos} (S${slot.stack}-${LEVEL_SHORT(slot.level)})`,'var(--accent)');
@@ -8278,361 +9022,1042 @@ function setupDropExtended(el,pos){
 }
 
 
+// Convenience: open the position-detail panel for `pos`. Wraps the older
+// showCellPanel(pos, cu) which requires the list of units already filtered.
+// All v2 drawMap call sites use this single-argument form.
+function selPosPanel(pos){
+  if(!pos) return;
+  const cu = units.filter(u => u.pos === pos);
+  // Include swim-pair partner units (right half of a pair)
+  const owner = swimPairOwnerOf(pos);
+  if(owner && owner !== pos){
+    // pos is the right half — surface the owner's units instead
+    const ownerUnits = units.filter(u => u.pos === owner);
+    showCellPanel(owner, ownerUnits);
+    return;
+  }
+  if(owner === pos){
+    // pos is the owner — also pull units from the right partner cell
+    const right = partnerCell(pos);
+    if(right){
+      const partnerUnits = units.filter(u => u.pos === right);
+      showCellPanel(pos, [...cu, ...partnerUnits]);
+      return;
+    }
+  }
+  showCellPanel(pos, cu);
+}
+
 function drawMap(){
   const floor = document.getElementById('floor');
   const q = (document.getElementById('map-srch')?.value||'').toLowerCase().trim();
   floor.innerHTML='';
 
-  const gridCols = `36px repeat(12,minmax(82px,1fr))`;
+  // ═══════════════════════════════════════════════════════════════════
+  // BLUEPRINT v2 LAYOUT — 16 cols (A-P) × 14 rows (1-14) + 15A/15B
+  // ───────────────────────────────────────────────────────────────────
+  // Every cell is its own storage location. Spa cells stack 1 hot tub
+  // wide × up to 3 high (BTM/MID/TOP). When a SWIM SPA is placed, it
+  // occupies the cell + the cell to the right; the pair shows as one
+  // merged 2-high (BTM/TOP) zone. Drive cells, elevators, P-storage,
+  // and cover rows render distinctly per the blueprint legend.
+  // ═══════════════════════════════════════════════════════════════════
 
-  // ── DOCK DOORS + OFFICE + BATHROOM (top wall) ──
-  // Exact mapping from Excel: Door#1=col1, Door#2=cols4-6, Door#3=cols7-8, Door#4=col9, Door#5=cols10-11, Office=col11(partial), Bathroom=col12
-  const topWall=el('div','');
-  topWall.style.cssText=`display:grid;gap:3px;grid-template-columns:${gridCols};margin-bottom:2px`;
-  topWall.appendChild(el('div',''));
+  // Grid: 40px row-label gutter + 16 columns, each min 78px wide so they
+  // have room for the dealer + SN + type tag layout Alberto requested.
+  const gridCols = `40px repeat(16,minmax(78px,1fr))`;
 
-  // col 1 = Dock Door #1
-  // col 2 = empty (drive aisle gap)
-  // col 3 = empty (drive aisle gap)
-  // col 4,5,6 = Dock Door #2 (but 5 is drive, so 4 and 6)
-  // col 7 = Dock Door #3
-  // col 8 = drive aisle
-  // col 9 = Dock Door #4
-  // col 10,11 = Dock Door #5 (but 11 is drive)
-  // col 11 = Office (above drive aisle)
-  // col 12 = Bathroom
+  // ── Helper: build a single cell DOM element ──
+  // pos is "${rowN}${colLetter}" for numbered rows, or "15A-X" / "15B-X"
+  const buildCell = (rowKey, colLetter) => {
+    const t = cellTypeNew(rowKey, colLetter);
+    const pos = (rowKey.startsWith('15') ? rowKey + '-' : rowKey) + colLetter;
 
-  const doorConfig = {
-    1: {type:'door', label:'Dock Door #1'},
-    2: {type:'gap'},
-    3: {type:'gap'},
-    4: {type:'door', label:'Dock Door #2'},
-    5: {type:'gap'},  // drive aisle
-    6: {type:'door', label:'Dock Door #2'},
-    7: {type:'door', label:'Dock Door #3'},
-    8: {type:'gap'},  // drive aisle
-    9: {type:'door', label:'Dock Door #4'},
-    10: {type:'door', label:'Dock Door #5'},
-    11: {type:'office', label:'Office'},
-    12: {type:'bathroom', label:'Bathroom'},
+    // Drive aisles, main drive, elevators — render and bail (no storage).
+    // BUT clickable now to open the cell editor (per Alberto: every cell
+    // must be editable, including elevators).
+    if(t === 'drv'){
+      const cell = el('div','');
+      cell.style.cssText = 'background:repeating-linear-gradient(45deg,#f1f5f9,#f1f5f9 6px,#e2e8f0 6px,#e2e8f0 12px);border:1px solid #e2e8f0;border-radius:5px;min-height:84px;cursor:pointer;position:relative;display:flex;align-items:flex-end;justify-content:flex-start;padding:5px';
+      cell.innerHTML = `<span style="font-size:8.5px;font-weight:700;color:#64748b;letter-spacing:.04em;opacity:.7">${pos}</span>`;
+      cell.title = `${pos} · drive aisle — click to override cell type`;
+      cell.onclick = () => openCellEditor(pos);
+      if(isCellLocked(pos)){
+        cell.style.outline = '2px dashed #f59e0b';
+        cell.style.outlineOffset = '1px';
+      }
+      return cell;
+    }
+    if(t === 'main'){
+      const cell = el('div','');
+      cell.style.cssText = 'background:repeating-linear-gradient(45deg,#cbd5e1,#cbd5e1 4px,#94a3b8 4px,#94a3b8 8px);border:1px solid #64748b;border-radius:5px;min-height:84px;color:#fff;font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;cursor:pointer';
+      cell.title = `${pos} · main drive — click to override cell type`;
+      cell.textContent = '⬇';
+      cell.onclick = () => openCellEditor(pos);
+      return cell;
+    }
+    if(t === 'elev'){
+      const cell = el('div','');
+      cell.style.cssText = 'background:#fef2f2;border:1.5px solid #dc2626;border-radius:5px;min-height:84px;display:flex;align-items:center;justify-content:center;font-size:9.5px;font-weight:700;color:#991b1b;letter-spacing:.06em;cursor:pointer;position:relative';
+      cell.title = `${pos} · elevator — click to override cell type`;
+      cell.innerHTML = `<div style="text-align:center"><div>ELEV</div><div style="font-size:7.5px;color:#dc2626;opacity:.7;margin-top:2px">${pos}</div></div>`;
+      cell.onclick = () => openCellEditor(pos);
+      if(isCellLocked(pos)){
+        cell.style.outline = '2px dashed #f59e0b';
+        cell.style.outlineOffset = '1px';
+      }
+      return cell;
+    }
+    if(t === 'minv'){
+      // A cell explicitly overridden to 'minv' (by user via cell editor).
+      // Render as a marriage shelf cell at this position.
+      const cell = el('div','');
+      const items = (typeof marriages !== 'undefined' && Array.isArray(marriages))
+        ? marriages.filter(m => m.location === pos && m.status !== 'fulfilled' && m.status !== 'cancelled')
+        : [];
+      cell.style.cssText = 'background:linear-gradient(135deg,#fdf2f8,#fce7f3);border:1.5px solid #db2777;border-radius:6px;min-height:84px;cursor:pointer;display:flex;flex-direction:column;padding:5px 6px;position:relative;overflow:hidden';
+      cell.dataset.pos = pos;
+      cell.innerHTML = `
+        <div style="font-size:9px;font-weight:800;color:#831843;letter-spacing:.05em;line-height:1">💍 ${pos}</div>
+        <div style="font-size:9px;color:#be185d;margin-top:4px;line-height:1.2">${items.length ? `${items.length} marriage(s)` : 'empty'}</div>`;
+      cell.title = `${pos} · Marriage Inventory · click to manage`;
+      cell.onclick = () => openMarriageInventoryPanel(pos);
+      return cell;
+    }
+    if(t === 'cf' || t === 'cb' || t === 'pstor'){
+      // Covers (front/back) and panel/cover storage — show a label
+      const cell = el('div','col-stor cell-cover');
+      const isBack = (t === 'cb');
+      cell.style.cssText = `background:${isBack?'#dbeafe':(t==='pstor'?'#fef3c7':'#eff6ff')};border:1.5px solid ${isBack?'#1e40af':(t==='pstor'?'#b45309':'#3b82f6')};border-radius:5px;min-height:84px;cursor:pointer;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:5px;position:relative`;
+      const label = (t === 'pstor' && P_LABELS_NEW[+rowKey]) ? P_LABELS_NEW[+rowKey]
+                  : (rowKey === '15A' || rowKey === '15B') ? coverTypeFor(colLetter)
+                  : pos;
+      cell.innerHTML = `<div style="font-size:11px;font-weight:700;color:${isBack?'#1e3a8a':(t==='pstor'?'#78350f':'#1e3a8a')};letter-spacing:.04em;text-align:center;line-height:1.1">${label}</div><div style="font-size:9px;font-family:var(--mono);color:${isBack?'#3b82f6':(t==='pstor'?'#b45309':'#60a5fa')};margin-top:3px">${pos}</div>
+        <div style="position:absolute;top:3px;right:4px;font-size:9px;color:${isBack?'#3b82f6':(t==='pstor'?'#b45309':'#60a5fa')};opacity:.6;cursor:pointer" onclick="event.stopPropagation();openCellEditor('${pos}')" title="Edit cell type">⚙</div>`;
+      cell.title = `${pos} · ${t==='cb'?'cover back':(t==='pstor'?'panel/cover storage':'cover front')} · click to view contents`;
+      cell.onclick = () => { selPosPanel(pos); };
+      cell.dataset.pos = pos;
+      if(isCellLocked(pos)){
+        cell.style.outline = '2px dashed #f59e0b';
+        cell.style.outlineOffset = '1px';
+      }
+      return cell;
+    }
+
+    // SPA storage cell — full interactive treatment
+    const cell = buildSpaStorageCell(pos);
+    // ── Drag-drop wiring: cells are both DROP TARGETS (accept queue/map drags)
+    // and DRAG SOURCES (drag the top unit out to another cell). validateDrop
+    // is checked at drop-time so swim/hot/extra rules are honored.
+    if(typeof setupDropExtended === 'function') setupDropExtended(cell, pos);
+    setupCellDragSource(cell, pos);
+    return cell;
   };
 
-  for(let c=1;c<=12;c++){
-    const cfg2=doorConfig[c];
-    const cell=el('div','');
+  // Helper: turn a cell into a drag source — picks up the TOP-of-stack
+  // unit at this position and lets it be dropped onto another cell.
+  const setupCellDragSource = (cell, pos) => {
+    const list = units.filter(u => u.pos === pos && isStackedType(u.type));
+    if(!list.length) return;   // nothing to drag from this cell
+    // Top-of-stack unit (highest level wins as the most accessible one)
+    const top = list.slice().sort((a,b) => (b.level||0) - (a.level||0))[0];
+    cell.setAttribute('draggable', 'true');
+    cell.style.cursor = 'grab';
+    cell.addEventListener('dragstart', e => {
+      // Row-level OR cell-level lock check
+      const p = parsePos(pos);
+      const rowLocked = (p.valid && p.rowKey && !p.rowKey.startsWith('15') && isRowLocked(+p.rowKey));
+      if(rowLocked || isCellLocked(pos)){
+        e.preventDefault();
+        toast(`${pos} is 🔒 locked — unlock it via Manage Rows or the cell ⚙ first`, 'warn');
+        return;
+      }
+      dragUnit = { unitId: top.id, fromPos: pos };
+      dragQueueItem = null;
+      cell.style.opacity = '0.45';
+      cell.style.cursor = 'grabbing';
+      e.dataTransfer.effectAllowed = 'move';
+      try { e.dataTransfer.setData('text/plain', `${top.sn || top.dealer}@${pos}`); } catch(err){}
+    });
+    cell.addEventListener('dragend', () => {
+      cell.style.opacity = '1';
+      cell.style.cursor = 'grab';
+      // Defensive: clear if drop didn't run
+      setTimeout(() => { if(dragUnit && dragUnit.fromPos === pos) dragUnit = null; }, 50);
+    });
+  };
 
-    if(cfg2.type==='door'){
-      cell.style.cssText='display:flex;flex-direction:column;align-items:center;justify-content:flex-end;padding-bottom:0';
-      // Door frame design
-      const doorFrame=el('div','');
-      doorFrame.style.cssText='width:70%;background:var(--dock-lt);border:2px solid var(--dock);border-bottom:none;border-radius:6px 6px 0 0;padding:4px 4px 0;display:flex;flex-direction:column;align-items:center;gap:2px';
-      doorFrame.innerHTML=`
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--dock)" stroke-width="1.8">
-          <rect x="3" y="2" width="18" height="20" rx="1"/><circle cx="17" cy="12" r="1.5" fill="var(--dock)"/>
-          <line x1="3" y1="6" x2="21" y2="6"/>
-        </svg>
-        <span style="font-size:8px;font-weight:700;color:var(--dock);white-space:nowrap;letter-spacing:.01em">${cfg2.label.replace('Dock ','')}</span>
+  // Helper: marriage-inventory cells accept drops from the queue or from
+  // the regular map. If a marriage record is being dragged (rare), assign
+  // its location. For spa drags, reject with a friendly toast.
+  window.setupMarriageInvDrop = (cell, pos) => {
+    cell.addEventListener('dragover', e => {
+      e.preventDefault();
+      cell.style.boxShadow = '0 0 0 2.5px #db2777';
+      e.dataTransfer.dropEffect = 'move';
+    });
+    cell.addEventListener('dragleave', () => { cell.style.boxShadow = ''; });
+    cell.addEventListener('drop', e => {
+      e.preventDefault();
+      cell.style.boxShadow = '';
+      if(dragUnit){
+        toast(`${pos} only holds marriage accessories — tinas go in storage rows`, 'warn');
+        dragUnit = null;
+        return;
+      }
+      if(dragQueueItem){
+        toast(`Queue items can't drop here. Use a marriage from the Marriages tab.`, 'warn');
+        dragQueueItem = null;
+        return;
+      }
+    });
+  };
+
+  // Helper: find which cover type a given col letter in row 15 belongs to
+  const coverTypeFor = (colLetter) => {
+    const ct = COVER_TYPES_NEW.find(c => c.a === colLetter || c.b === colLetter);
+    return ct ? ct.t : '—';
+  };
+
+  // ── Build a SPA storage cell with stack visualization, dealer color,
+  // swim-pair awareness, factory-request flag, search highlighting, and
+  // click-to-detail. Returns the DOM node.
+  const buildSpaStorageCell = (pos) => {
+    const cell = el('div','col-stor');
+    // Bigger, more info-dense cells (per Alberto's reference screenshot)
+    cell.style.cssText = 'background:#fff;border:1.5px solid #cbd5e1;border-radius:6px;min-height:84px;cursor:pointer;display:flex;flex-direction:column;padding:5px 6px;position:relative;overflow:hidden;transition:transform .12s,box-shadow .12s';
+    cell.dataset.pos = pos;
+
+    const { stacks, mode, pair, overflow } = cellStacks(pos);
+    const stack = stacks[0];
+    const filled = stack.filter(Boolean).length;
+    const maxLv = (mode === 'swim') ? MAX_LEVELS_SWIM : MAX_LEVELS_HOT;
+
+    // Detect swim-pair right-half: render a slim "→ part of pair" marker
+    const swimOwner = swimPairOwnerOf(pos);
+    const isPairRightHalf = swimOwner && swimOwner !== pos;
+
+    // Empty-cell prompt
+    if(filled === 0 && !isPairRightHalf){
+      cell.innerHTML = `<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;color:#94a3b8;font-size:10px;font-weight:600;gap:4px"><div style="font-size:11px;font-weight:700;letter-spacing:.04em">${pos}</div><div class="cell-empty-lbl" style="font-size:20px;color:#cbd5e1;font-weight:300;line-height:1">+</div></div>`;
+      cell.title = `${pos} · empty — click to place · click ⚙ to change cell type`;
+      cell.onclick = (e) => {
+        // Don't intercept gear clicks
+        if(e.target && e.target.closest('[data-cell-gear]')) return;
+        selPosPanel(pos);
+      };
+      // Gear icon — allows overriding empty cell to drive / minv / elev / etc
+      const gear = el('div','');
+      gear.setAttribute('data-cell-gear', '1');
+      gear.style.cssText = 'position:absolute;top:2px;right:3px;font-size:10px;color:#cbd5e1;opacity:.7;cursor:pointer;padding:2px 4px;line-height:1;z-index:2';
+      gear.textContent = '⚙';
+      gear.title = 'Override cell type (drive / minv / elev / cover / lock)';
+      gear.onclick = (e) => { e.stopPropagation(); openCellEditor(pos); };
+      cell.appendChild(gear);
+      // Apply cell-level lock outline
+      if(isCellLocked(pos)){
+        cell.style.outline = '2px dashed #f59e0b';
+        cell.style.outlineOffset = '1px';
+      }
+      return cell;
+    }
+
+    if(isPairRightHalf){
+      // Right half of a swim pair — render compact "linked" indicator
+      cell.style.background = 'linear-gradient(90deg,#ecfdf5,#ecfdf5 25%,#a7f3d0 50%,#ecfdf5 75%,#ecfdf5)';
+      cell.style.borderColor = '#10b981';
+      cell.innerHTML = `<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;color:#047857;font-size:10px;font-weight:700;letter-spacing:.04em;text-align:center;gap:2px"><div style="font-size:11px">${pos}</div><div style="font-size:18px;margin:1px 0">↔</div><div style="font-size:9px;line-height:1.1;font-weight:600">paired with<br><strong>${swimOwner}</strong></div></div>`;
+      cell.title = `${pos} · swim spa pair · click ${swimOwner} for details`;
+      cell.onclick = () => selPosPanel(swimOwner);
+      return cell;
+    }
+
+    // ── Cell has content: render top-of-stack preview + level pills ──
+    const top = (() => { for(let i = maxLv - 1; i >= 0; i--) if(stack[i]) return stack[i]; return null; })();
+    const dcol = top ? dealerColor(top.dealer) : { color:'#64748b', bg:'#f1f5f9', border:'#cbd5e1' };
+    cell.style.borderLeftWidth = '4px';
+    cell.style.borderLeftColor = dcol.border;
+    if(mode === 'swim'){
+      cell.style.background = '#ecfdf5';
+      cell.style.borderColor = '#10b981';
+      cell.style.borderLeftColor = dcol.border;
+    }
+
+    // Active factory request flag
+    const activeReq = (typeof findActiveFactoryRequest === 'function') ? findActiveFactoryRequest({ sn: top && top.sn, item: top }) : null;
+    if(activeReq){
+      cell.style.background = '#fff7ed';
+      cell.style.borderColor = '#f97316';
+    }
+
+    // Search highlight
+    if(q){
+      const matches = units.filter(u => u.pos === pos && (
+        String(u.sn||'').toLowerCase().includes(q) ||
+        String(u.dealer||'').toLowerCase().includes(q)
+      ));
+      if(matches.length){
+        cell.style.boxShadow = '0 0 0 2.5px #facc15, 0 4px 12px rgba(250,204,21,.4)';
+      }
+    }
+
+    // Header: pos code + count + (optional) "already in WH" amber pill
+    const hdr = el('div','');
+    hdr.style.cssText = 'display:flex;justify-content:space-between;align-items:baseline;font-size:9.5px;font-weight:700;color:#475569;letter-spacing:.04em;line-height:1;margin-bottom:3px';
+    const anyAlready = units.some(u => u.pos === pos && u.alreadyInWh);
+    const alreadyPill = anyAlready
+      ? `<span style="display:inline-flex;align-items:center;gap:2px;font-size:7.5px;font-weight:800;color:#854d0e;background:#fde68a;border:.5px solid #d97706;padding:1px 4px;border-radius:3px;letter-spacing:.05em;line-height:1;margin-left:4px" title="Pre-existing inventory">📍 WH</span>`
+      : '';
+    hdr.innerHTML = `<span style="color:#1e293b;font-size:10px">${pos}${mode==='swim'?'+'+pair.right:''}${alreadyPill}</span><span style="font-family:var(--mono);font-size:9px;color:#64748b">${filled}/${maxLv}</span>`;
+    cell.appendChild(hdr);
+
+    // Top spa preview (dealer + SN + type tag)
+    if(top){
+      const body = el('div','');
+      body.style.cssText = 'flex:1;display:flex;flex-direction:column;justify-content:center;min-height:0;gap:1px';
+      const typeTag = top.type === 'swim'
+        ? '<div style="font-size:8px;font-weight:800;color:#fff;background:#10b981;letter-spacing:.08em;padding:1px 5px;border-radius:3px;align-self:flex-start;margin-top:2px">SWIM SPA</div>'
+        : '<div style="font-size:8px;font-weight:800;color:#fff;background:#3b82f6;letter-spacing:.08em;padding:1px 5px;border-radius:3px;align-self:flex-start;margin-top:2px">HOT TUB</div>';
+      body.innerHTML = `
+        <div style="font-size:10.5px;font-weight:700;color:#1e293b;line-height:1.15;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHTML(top.dealer||'—')}</div>
+        <div style="font-size:11px;font-family:var(--mono);font-weight:700;color:${dcol.color};line-height:1.05">${escapeHTML(top.sn||'')}</div>
+        ${typeTag}
       `;
-      cell.appendChild(doorFrame);
-    } else if(cfg2.type==='office'){
-      cell.style.cssText='display:flex;flex-direction:column;align-items:stretch;justify-content:flex-end';
-      const room=el('div','');
-      room.style.cssText='background:#fefce8;border:1.5px solid #eab308;border-bottom:none;border-radius:6px 6px 0 0;padding:4px 4px 0;display:flex;flex-direction:column;align-items:center;gap:2px';
-      room.innerHTML=`<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#ca8a04" stroke-width="1.8"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/></svg><span style="font-size:8px;font-weight:700;color:#854d0e;white-space:nowrap">Office</span>`;
-      cell.appendChild(room);
-    } else if(cfg2.type==='bathroom'){
-      cell.style.cssText='display:flex;flex-direction:column;align-items:stretch;justify-content:flex-end';
-      const room=el('div','');
-      room.style.cssText='background:#f0fdf4;border:1.5px solid #22c55e;border-bottom:none;border-radius:6px 6px 0 0;padding:4px 4px 0;display:flex;flex-direction:column;align-items:center;gap:2px';
-      room.innerHTML=`<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#16a34a" stroke-width="1.8"><path d="M4 12h16M4 6a2 2 0 114 0v6H4V6z"/><path d="M4 18h16v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2z"/></svg><span style="font-size:8px;font-weight:700;color:#166534;white-space:nowrap">Bathroom</span>`;
-      cell.appendChild(room);
+      cell.appendChild(body);
+    }
+
+    // Level dots (one per occupied slot, bottom-up)
+    const dots = el('div','');
+    dots.style.cssText = 'position:absolute;right:4px;bottom:4px;display:flex;flex-direction:column-reverse;gap:2px';
+    for(let lv = 1; lv <= maxLv; lv++){
+      const d = el('div','');
+      const occ = stack[lv-1];
+      d.style.cssText = `width:6px;height:6px;border-radius:50%;background:${occ?dcol.border:'#e2e8f0'};border:0.5px solid ${occ?dcol.color:'#cbd5e1'}`;
+      dots.appendChild(d);
+    }
+    cell.appendChild(dots);
+
+    // Overflow warning
+    if(overflow.length){
+      const warn = el('div','');
+      warn.style.cssText = 'position:absolute;top:4px;right:4px;width:12px;height:12px;border-radius:50%;background:#dc2626;color:#fff;font-size:8px;font-weight:700;display:flex;align-items:center;justify-content:center;line-height:1';
+      warn.textContent = '!';
+      warn.title = `${overflow.length} unit(s) need review`;
+      cell.appendChild(warn);
+    }
+
+    cell.title = `${pos} · ${filled}/${maxLv} ${mode==='swim'?'swim spa(s)':'hot tub(s)'} — click for detail · drag to move`;
+    cell.onclick = (e) => {
+      // Don't intercept gear clicks
+      if(e.target && e.target.closest('[data-cell-gear]')) return;
+      selPosPanel(pos);
+    };
+    // Tiny ⚙ icon (top-right corner inside, behind dots) to open cell editor.
+    const gear = el('div','');
+    gear.setAttribute('data-cell-gear', '1');
+    gear.style.cssText = 'position:absolute;top:2px;right:18px;font-size:10px;color:#94a3b8;opacity:.5;cursor:pointer;padding:2px 4px;line-height:1';
+    gear.textContent = '⚙';
+    gear.title = 'Edit cell type / lock';
+    gear.onclick = (e) => { e.stopPropagation(); openCellEditor(pos); };
+    cell.appendChild(gear);
+    // Apply cell-level lock outline
+    if(isCellLocked(pos)){
+      cell.style.outline = '2px dashed #f59e0b';
+      cell.style.outlineOffset = '1px';
+    }
+    return cell;
+  };
+
+  // ═══════════════════════════════════════════════════════════════════
+  // RENDER: TRANSPOSED layout per Alberto.
+  // - Row labels (1, 2, ..., 14, 15A, 15B) HORIZONTAL across the top
+  // - Dock doors + Office + Bathroom above their corresponding row labels
+  // - Column letters (A-P) VERTICAL down the left edge
+  // Reads like the legacy column-based layout but with blueprint semantics:
+  // fila 1 a la izquierda, fila 15B a la derecha, puertas arriba.
+  // ═══════════════════════════════════════════════════════════════════
+
+  // 17-column grid: 34px label gutter + 16 row entities
+  // Combine built-in rows 1-14 + any custom rows the user has added
+  // through the Row Manager, then append cover hileras 15A/15B.
+  const customRowNums = ((cfg && Array.isArray(cfg.customRows)) ? cfg.customRows : [])
+    .map(r => r.n)
+    .filter(n => Number.isFinite(n) && n !== 15)   // never collide with cover labels
+    .sort((a,b) => a-b);
+  const ROW_KEYS = [...ROW_NUMBERS_NEW.map(String), ...customRowNums.map(String), '15A', '15B'];
+
+  // Which row each dock door / office / bath sits above. Each dock door
+  // spans TWO rows (its "from" row + the next row); office and bathroom
+  // are single-cell. skipRows hold the second row of each door pair so
+  // we don't append an extra cell underneath the spanning door.
+  const doorSpec = {
+    '1':  { label:'#1' },   // spans rows 1 + 2
+    '5':  { label:'#2' },   // spans rows 5 + 6
+    '7':  { label:'#3' },   // spans rows 7 + 8
+    '9':  { label:'#4' },   // spans rows 9 + 10
+    '11': { label:'#5' },   // spans rows 11 + 12
+  };
+  const skipRows  = new Set(['2','6','8','10','12']);  // covered by previous span-2 door
+  const officeRow = '15A';
+  const bathRow   = '15B';
+
+  // ── 1. Door bar at the very top ──
+  const dockBar = el('div','');
+  dockBar.style.cssText = `display:grid;gap:3px;grid-template-columns:${gridCols};margin-bottom:4px`;
+  dockBar.appendChild(el('div',''));
+  ROW_KEYS.forEach(rk => {
+    if(skipRows.has(rk)) return;   // second half of a span-2 door — auto-flow handles it
+    const cell = el('div','');
+    if(doorSpec[rk]){
+      const d = doorSpec[rk];
+      cell.style.cssText = 'grid-column:span 2;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:54px';
+      cell.innerHTML = `
+        <div style="width:78%;background:#fef3c7;border:1.5px solid #f59e0b;border-bottom:none;border-radius:8px 8px 0 0;padding:6px 6px 4px;display:flex;flex-direction:column;align-items:center;gap:3px">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#b45309" stroke-width="1.8">
+            <rect x="3" y="2" width="18" height="20" rx="1"/><circle cx="17" cy="12" r="1.4" fill="#b45309"/>
+            <line x1="3" y1="6" x2="21" y2="6"/>
+          </svg>
+          <span style="font-size:9.5px;font-weight:700;color:#78350f;letter-spacing:.02em">Dock ${d.label}</span>
+        </div>`;
+    } else if(rk === officeRow){
+      cell.style.cssText = 'display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:54px';
+      cell.innerHTML = `
+        <div style="width:90%;background:#fefce8;border:1.5px solid #eab308;border-bottom:none;border-radius:8px 8px 0 0;padding:6px 4px 4px;display:flex;flex-direction:column;align-items:center;gap:2px">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#ca8a04" stroke-width="1.8">
+            <rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/>
+          </svg>
+          <span style="font-size:8.5px;font-weight:700;color:#854d0e">Office</span>
+        </div>`;
+    } else if(rk === bathRow){
+      cell.style.cssText = 'display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:54px';
+      cell.innerHTML = `
+        <div style="width:90%;background:#f0fdf4;border:1.5px solid #22c55e;border-bottom:none;border-radius:8px 8px 0 0;padding:6px 4px 4px;display:flex;flex-direction:column;align-items:center;gap:2px">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#16a34a" stroke-width="1.8">
+            <path d="M4 12h16M4 6a2 2 0 114 0v6H4V6z"/><path d="M4 18h16v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2z"/>
+          </svg>
+          <span style="font-size:8.5px;font-weight:700;color:#166534">Bathroom</span>
+        </div>`;
+    }
+    // else: empty cell — keeps grid alignment for rows 3, 4, 13, 14
+    dockBar.appendChild(cell);
+  });
+  floor.appendChild(dockBar);
+
+  // ── 2. Front wall strip ──
+  const frontWall = el('div','');
+  frontWall.style.cssText = `display:grid;gap:3px;grid-template-columns:${gridCols};margin-bottom:5px`;
+  frontWall.appendChild(el('div',''));
+  ROW_KEYS.forEach(() => {
+    const w = el('div','');
+    w.style.cssText = 'height:5px;background:linear-gradient(90deg,#94a3b8,#64748b);border-radius:2px';
+    frontWall.appendChild(w);
+  });
+  floor.appendChild(frontWall);
+
+  // ── 3. Row-label header: 1, 2, ..., 14, [custom rows], 15A, 15B ──
+  // Each tag shows the row number + a colored zone sub-label (LOCAL,
+  // DEALERS, SWIM, EXTRA, COVERS) per Alberto's spec.
+  const ZONE_LABELS = {
+    '1':   { name:'LOCAL',   bg:'#fef3c7', fg:'#92400e', border:'#f59e0b' },
+    '4':   { name:'DEALERS', bg:'#dbeafe', fg:'#1e3a8a', border:'#3b82f6' },
+    '7':   { name:'DEALERS', bg:'#dbeafe', fg:'#1e3a8a', border:'#3b82f6' },
+    '8':   { name:'DEALERS', bg:'#dbeafe', fg:'#1e3a8a', border:'#3b82f6' },
+    '11':  { name:'SWIM',    bg:'#d1fae5', fg:'#065f46', border:'#10b981' },
+    '12':  { name:'EXTRA',   bg:'#ede9fe', fg:'#5b21b6', border:'#a855f7' },
+    '15A': { name:'COVERS',  bg:'#dbeafe', fg:'#1e3a8a', border:'#3b82f6' },
+    '15B': { name:'COVERS',  bg:'#dbeafe', fg:'#1e3a8a', border:'#3b82f6' },
+  };
+
+  // Honors getRowDef() so user overrides + lock state surface here.
+  const rowHeader = el('div','');
+  rowHeader.style.cssText = `display:grid;gap:3px;grid-template-columns:${gridCols};margin-bottom:3px`;
+  rowHeader.appendChild(el('div',''));
+  ROW_KEYS.forEach(rk => {
+    const isCover = rk.startsWith('15');
+    const def = isCover ? null : getRowDef(+rk);
+    const locked = isCover ? false : isRowLocked(+rk);
+    const zone = ZONE_LABELS[rk];
+    let tagBg = '#e2e8f0', tagFg = '#475569', tip = '';
+    if(isCover){
+      tagBg = rk === '15A' ? '#dbeafe' : '#c7d2fe';
+      tagFg = '#1e3a8a';
+      tip = `Cover hilera ${rk}`;
+    } else if(def){
+      tip = `Row ${rk} — ${def.label}${locked ? ' · 🔒 LOCKED' : ''}`;
+      if(def.type === 'spa'){      tagBg = '#dcfce7'; tagFg = '#166534'; }
+      else if(def.type === 'main'){ tagBg = '#cbd5e1'; tagFg = '#0f172a'; }
+    }
+    const tag = el('div','');
+    const leftSep = rk === '15A' ? ';border-left:2px dashed #cbd5e1;margin-left:3px;padding-left:5px' : '';
+    const lockBadge = locked ? ';outline:2px dashed #f59e0b;outline-offset:1px' : '';
+    tag.style.cssText = `font-size:12px;font-weight:700;color:${tagFg};background:${tagBg};border-radius:6px;padding:5px 2px;text-align:center;letter-spacing:.04em;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;cursor:pointer${leftSep}${lockBadge}`;
+    const numLine = locked ? `🔒 ${rk}` : rk;
+    const zoneLine = zone
+      ? `<div style="font-size:8.5px;font-weight:800;color:${zone.fg};background:${zone.bg};border:1px solid ${zone.border};border-radius:4px;padding:1px 5px;letter-spacing:.07em;line-height:1.1">${zone.name}</div>`
+      : '';
+    tag.innerHTML = `<div style="line-height:1">${numLine}</div>${zoneLine}`;
+    tag.title = tip;
+    tag.onclick = () => openRowManager();
+    rowHeader.appendChild(tag);
+  });
+  floor.appendChild(rowHeader);
+
+  // ── 3.5 MARRIAGE INVENTORY: ONE single cell spanning 2 grid columns
+  // (over row labels 13 + 14). Position is 'MINV' — not 13A/14A — and
+  // holds marriage accessories only.
+  migrateMarriageLocations();
+  const marriageStrip = el('div','');
+  marriageStrip.style.cssText = `display:grid;gap:3px;grid-template-columns:${gridCols};margin-bottom:5px;align-items:stretch`;
+  const minvLbl = el('div','');
+  minvLbl.style.cssText = 'font-size:9px;color:#831843;display:flex;align-items:center;justify-content:flex-end;padding-right:4px;font-weight:700;letter-spacing:.04em;line-height:1.1;text-align:right';
+  minvLbl.innerHTML = 'MARRIAGE<br/>SHELF';
+  minvLbl.title = 'Marriage inventory shelf — small staging area above the forklift route';
+  marriageStrip.appendChild(minvLbl);
+  // Skip row '14' (covered by span-2 at row '13'). Skip rows 1-12, 15A,
+  // 15B, and custom rows except 13 which has the cell.
+  const skipMinv = new Set(['14']);
+  ROW_KEYS.forEach(rk => {
+    if(skipMinv.has(rk)) return;   // covered by previous span-2
+    if(rk === '13'){
+      const pos = 'MINV';
+      const items = (typeof marriages !== 'undefined' && Array.isArray(marriages))
+        ? marriages.filter(m => m.location === pos && m.status !== 'fulfilled' && m.status !== 'cancelled')
+        : [];
+      const cell = el('div','');
+      cell.style.cssText = 'grid-column:span 2;background:linear-gradient(135deg,#fdf2f8,#fce7f3);border:1.5px solid #db2777;border-radius:8px;min-height:74px;cursor:pointer;display:flex;flex-direction:column;padding:8px 12px;position:relative;overflow:hidden';
+      cell.dataset.pos = pos;
+      const previewLine = items[0]
+        ? `<div style="font-size:11px;font-weight:700;color:#831843;line-height:1.2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:3px">${escapeHTML(items[0].accessoryName || '—')}</div>
+           <div style="font-size:10px;font-family:var(--mono);font-weight:700;color:#be185d;margin-top:1px">→ Tina ${escapeHTML(items[0].spaSn || '—')}</div>`
+        : `<div style="font-size:11px;color:#be185d;font-style:italic;margin-top:6px;line-height:1.2">empty marriage shelf</div>
+           <div style="font-size:9.5px;color:#db2777;margin-top:3px;line-height:1.2">click to view or assign a marriage</div>`;
+      cell.innerHTML = `
+        <div style="display:flex;justify-content:space-between;align-items:baseline;font-size:10px;font-weight:800;color:#831843;letter-spacing:.06em;line-height:1">
+          <span>💍 MARRIAGE INVENTORY</span>
+          <span style="font-family:var(--mono);font-size:10px;color:#be185d">${items.length}${items.length>5?' !':''}</span>
+        </div>
+        ${previewLine}
+        ${items.length > 1 ? `<div style="font-size:9px;color:#9d174d;margin-top:auto;font-weight:600">+${items.length-1} more · click to manage all</div>` : ''}
+      `;
+      cell.title = `Marriage Inventory · ${items.length} item(s) — click to open`;
+      cell.onclick = () => openMarriageInventoryPanel(pos);
+      // Drop target for marriage location assignments
+      if(typeof setupMarriageInvDrop === 'function') setupMarriageInvDrop(cell, pos);
+      marriageStrip.appendChild(cell);
     } else {
-      // gap — drive aisle above
-      cell.style.cssText='height:36px';
+      // Empty placeholder — keeps grid alignment without painting visuals
+      const ph = el('div','');
+      ph.style.cssText = 'min-height:74px';
+      marriageStrip.appendChild(ph);
     }
-    topWall.appendChild(cell);
-  }
-  floor.appendChild(topWall);
+  });
+  floor.appendChild(marriageStrip);
 
-  // ── ZONE LABEL ROW ──
-  const zoneRow=el('div');zoneRow.className='zone-row';zoneRow.style.gridTemplateColumns=gridCols;
-  zoneRow.appendChild(el('div',''));
-  const zoneClasses={local:'ztag z-local',dealer:'ztag z-dealer',swim:'ztag z-swim',extra:'ztag z-extra',misc:'ztag z-office',drive:''};
-  let lastZone='';
-  for(let c=1;c<=12;c++){
-    const cell=el('div','zcell');
-    const z=COL_ZONE[c];
-    if(z&&z!=='drive'&&z!==lastZone){
-      const zt=el('div',zoneClasses[z]);
-      zt.textContent=ZONE_LABELS[z];
-      cell.appendChild(zt);
-      lastZone=z;
+  // ── 4. FORKLIFT ROUTE: gray "road surface" with yellow dashed center
+  // line — looks like industrial floor markings. 2× the previous height
+  // per Alberto. The drive cells and this strip both use gray tones so
+  // they read as continuous floor surface.
+  const forkAisle = el('div','');
+  forkAisle.style.cssText = `display:grid;gap:3px;grid-template-columns:${gridCols};margin-bottom:8px;align-items:center`;
+  const aisleLbl = el('div','');
+  aisleLbl.style.cssText = 'font-size:11px;color:#475569;display:flex;align-items:center;justify-content:center';
+  aisleLbl.innerHTML = '<svg width="22" height="22" viewBox="0 0 24 24" fill="#475569"><path d="M4 12l8-8v6h8v4h-8v6z"/></svg>';
+  aisleLbl.title = 'Forklift route';
+  forkAisle.appendChild(aisleLbl);
+  ROW_KEYS.forEach((rk, idx) => {
+    const cell = el('div','');
+    // Gray road surface with a yellow dashed centerline running through
+    // the strip — repeating 18px gap, 8px dash.
+    cell.style.cssText = `
+      height:44px;
+      background:
+        repeating-linear-gradient(90deg, transparent 0, transparent 14px, #f59e0b 14px, #f59e0b 22px) center / 100% 4px no-repeat,
+        repeating-linear-gradient(45deg, #cbd5e1 0, #cbd5e1 6px, #94a3b8 6px, #94a3b8 12px);
+      border-radius:4px;
+      border:1.5px solid #64748b;
+      display:flex;
+      align-items:center;
+      padding:0 8px;
+      overflow:hidden;
+    `.replace(/\s+/g, ' ').trim();
+    cell.title = 'Forklift route — east-west corridor for forklift transit between dock doors and storage rows';
+    if(idx === 0){
+      cell.innerHTML = '<span style="font-size:10px;font-weight:800;color:#0f172a;letter-spacing:.1em;white-space:nowrap;background:rgba(255,255,255,.85);padding:2px 6px;border-radius:3px">→ FORKLIFT</span>';
     }
-    zoneRow.appendChild(cell);
-  }
-  floor.appendChild(zoneRow);
+    forkAisle.appendChild(cell);
+  });
+  floor.appendChild(forkAisle);
 
-  // ── COLUMN HEADERS ──
-  const hdrRow=el('div');hdrRow.className='col-hdr-row';hdrRow.style.gridTemplateColumns=gridCols;
-  hdrRow.appendChild(el('div',''));
-  for(let c=1;c<=12;c++){
-    const h=el('div','col-hdr');
-    if(COL_TYPE[c]==='drive'){h.textContent='';h.style.color='var(--fork)';h.style.opacity='.5';}
-    else{h.textContent=c;}
-    hdrRow.appendChild(h);
-  }
-  floor.appendChild(hdrRow);
-
-  // ── LETTER SECTIONS ──
-  for(const row of ROWS){
-    const section=el('div','section');
-
-    // ── ROW N = ELEVATOR ROW (all drive + elevators at ends) ──
-    if(row==='N'){
-      const dl=el('div','drive-lane');dl.style.gridTemplateColumns=gridCols;
-      const dll=el('div','drive-lane-label');
-      dll.innerHTML='<svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" style="opacity:.5"><path d="M4 8h8M10 5l3 3-3 3"/></svg>';
-      dl.appendChild(dll);
-      for(let c=1;c<=12;c++){dl.appendChild(el('div','drive-lane-cell'));}
-      section.appendChild(dl);
-      const nr=el('div','stor-row');nr.style.gridTemplateColumns=gridCols;
-      const nLbl=el('div','row-lbl');nLbl.textContent='N';nr.appendChild(nLbl);
-      for(let c=1;c<=12;c++){
-        const cell=el('div','');
-        if(c===1||c===12){
-          const ev=el('div','');
-          ev.style.cssText='background:linear-gradient(135deg,#e2e8f0,#f1f5f9);border:1.5px solid #94a3b8;border-radius:6px;min-height:44px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;box-shadow:0 1px 3px rgba(0,0,0,.08)';
-          ev.innerHTML=`<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#64748b" stroke-width="1.8"><path d="M6 9l6-6 6 6M6 15l6 6 6-6"/></svg><span style="font-size:8px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:#64748b">Elevator</span>`;
-          cell.appendChild(ev);
-        } else {
-          const dc=el('div','col-drive');dc.style.minHeight='44px';
-          const dlbl=el('div','drive-vert-label');dlbl.textContent='DRIVE';dc.appendChild(dlbl);
-          cell.appendChild(dc);
-        }
-        nr.appendChild(cell);
-      }
-      section.appendChild(nr);
-      floor.appendChild(section);
-      continue;
-    }
-
-    // ── ROW M = BACK WALL (last row) ──
-    const isBackWall=(row==='M');
-
-    // Drive lane
-    const driveLane=el('div','drive-lane');
-    driveLane.style.gridTemplateColumns=gridCols;
-    const dlLabel=el('div','drive-lane-label');
-    dlLabel.innerHTML='<svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" style="opacity:.5"><path d="M4 8h8M10 5l3 3-3 3"/></svg>';
-    driveLane.appendChild(dlLabel);
-    for(let c=1;c<=12;c++){
-      const dc=el('div','drive-lane-cell');
-      if(c===1){
-        const arr=document.createElement('div');
-        arr.style.cssText='position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);font-size:8px;font-weight:700;color:var(--amber);opacity:.5;white-space:nowrap;letter-spacing:.1em';
-        arr.textContent='→ FORKLIFT ROUTE →';
-        dc.style.position='relative';
-        dc.appendChild(arr);
-      }
-      driveLane.appendChild(dc);
-    }
-    section.appendChild(driveLane);
-
-    // STORAGE ROW — section header with drag-all button
-    const sectionHeader=el('div','');
-    sectionHeader.style.cssText='display:flex;align-items:center;gap:6px;margin-bottom:2px;padding-left:40px';
-    const rowBadge=el('div','');
-    rowBadge.style.cssText='font-family:var(--mono);font-size:10px;font-weight:700;color:var(--text3)';
-    rowBadge.textContent=`Row ${row}`;
-    sectionHeader.appendChild(rowBadge);
-    // Move section button
-    const moveSectionBtn=el('button','btn btn-sm');
-    moveSectionBtn.style.cssText='padding:2px 8px;font-size:9px;opacity:.65';
-    moveSectionBtn.innerHTML='Move section to aisle…';
-    moveSectionBtn.onclick=()=>moveSectionToAisle(row);
-    sectionHeader.appendChild(moveSectionBtn);
-    section.appendChild(sectionHeader);
-
-    const storRow=el('div','stor-row');
-    storRow.style.gridTemplateColumns=gridCols;
-    if(isBackWall) storRow.style.borderTop='3px solid #94a3b8';
-
-    const rowLbl=el('div','row-lbl');rowLbl.textContent=row;
-    if(isBackWall)rowLbl.style.cssText='font-size:11px;font-weight:700;color:#64748b;display:flex;align-items:center;justify-content:center;background:#e2e8f0;border-radius:5px';
-    storRow.appendChild(rowLbl);
-
-    for(let c=1;c<=12;c++){
-      const pos=c+row;
-      const cu=units.filter(u=>u.pos===pos);
-
-      if(COL_TYPE[c]==='drive'){
-        const dc=el('div','col-drive');
-        const dlbl=el('div','drive-vert-label');dlbl.textContent='FORKLIFT';dc.appendChild(dlbl);
-        // Accept drops into drive aisle
-        dc.addEventListener('dragover',e=>{e.preventDefault();dc.style.opacity='.7';});
-        dc.addEventListener('dragleave',()=>{dc.style.opacity='';});
-        dc.addEventListener('drop',e=>{
-          e.preventDefault();dc.style.opacity='';
-          if(!dragUnit)return;
-          // Move to nearest storage col
-          const targetCol=c===2?1:c===3?4:c===5?4:c===8?7:c===11?10:1;
-          const newPos=targetCol+row;
-          const u=units.find(x=>x.id===dragUnit.unitId);
-          if(u){
-            if(isStackedType(u.type)){
-              const slot=findNextSlot(newPos);
-              if(!slot){ toast(`${newPos} is full`,'err'); dragUnit=null; return; }
-              const old=u.pos;u.pos=newPos;u.stack=slot.stack;u.level=slot.level;
-              addAct(`${u.sn||u.dealer}: ${old}→${newPos} (S${slot.stack}-${LEVEL_SHORT(slot.level)})`,'var(--accent)');
-              toast(`→ ${newPos} · S${slot.stack}-${LEVEL_SHORT(slot.level)}`,'ok');
-            } else {
-              const old=u.pos;u.pos=newPos;
-              addAct(`${u.sn||u.dealer}: ${old}→${newPos}`,'var(--accent)');toast(`Moved to ${newPos}`,'ok');
-            }
-            drawMap();
-          }
-          dragUnit=null;
-        });
-        storRow.appendChild(dc);
-        continue;
-      }
-
-      const cell=el('div','col-stor');
-      cell.dataset.pos=pos;
-      if(isBackWall){cell.style.background='#f8fafc';cell.style.borderColor='#cbd5e1';}
-
-      const hasQ=cu.some(u=>(u.sn||'').toLowerCase().includes(q)||(u.dealer||'').toLowerCase().includes(q));
-      const passFilt=filt==='all'||(filt==='empty'&&cu.length===0)||(filt!=='empty'&&cu.some(u=>u.type===filt));
-      if((!passFilt)||(q&&!hasQ&&cu.length>0)){cell.style.opacity='0.09';setupDropExtended(cell,pos);storRow.appendChild(cell);continue;}
-
-      if(cu.length>0){
-        const m=cu[0];
-        const types=new Set(cu.map(u=>u.type));
-        const dominant=types.size>1?'mixed':m.type;
-        cell.classList.add('has-units','t-'+dominant);
-        // Stack-depth indicator (visible right-side ladder lines)
-        if(cu.length>=2)cell.classList.add('stack-'+Math.min(cu.length,4));
-        if(pos===selPos||(q&&hasQ))cell.classList.add('hl');
-
-        // ── STACK CAPACITY — flag full / overflow on hot/swim cells ──
-        const spaCount = cu.filter(u=>isStackedType(u.type)).length;
-        if(spaCount >= MAX_PER_CELL) cell.classList.add('cell-full');
-        // Mini stack badge: e.g. "S1: 3/3 · S2: 2/3" — only when there are spas
-        if(spaCount > 0){
-          const {stacks} = cellStacks(pos);
-          const s1 = stacks[0].filter(Boolean).length;
-          const s2 = stacks[1].filter(Boolean).length;
-          const stackBadge = el('div','');
-          stackBadge.style.cssText='position:absolute;bottom:3px;left:5px;font-family:var(--mono);font-size:7.5px;font-weight:700;color:var(--text2);background:rgba(255,255,255,.9);padding:1px 4px;border-radius:4px;border:1px solid var(--line);letter-spacing:.04em;z-index:3;line-height:1.3';
-          stackBadge.innerHTML = `<span style="color:${s1>=MAX_LEVELS?'#92400e':s1>0?'#0d9e78':'var(--text3)'}">S1·${s1}</span> <span style="color:${s2>=MAX_LEVELS?'#92400e':s2>0?'#0d9e78':'var(--text3)'}">S2·${s2}</span>`;
-          stackBadge.title = `Stack 1: ${s1}/${MAX_LEVELS} · Stack 2: ${s2}/${MAX_LEVELS}`;
-          cell.appendChild(stackBadge);
-        }
-
-        // ── MARRIAGE FLAG — any unit at this position with a pending marriage? ──
-        const cellPendingMar = cu.reduce((n,u)=>n + marriagesPendingForSn(u.sn).length, 0);
-        const cellDeliveredMar = cu.reduce((n,u)=>n + marriagesDeliveredForSn(u.sn).length, 0);
-        if(cellPendingMar > 0){
-          cell.classList.add('has-marriage-pending');
-          const flag = el('div','marriage-flag');
-          flag.innerHTML = `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><path d="M5.5 8.5l-2 2a2.5 2.5 0 003.5 3.5l2-2M10.5 7.5l2-2a2.5 2.5 0 00-3.5-3.5l-2 2M5 11l6-6"/></svg>${cellPendingMar}`;
-          flag.title = `${cellPendingMar} married accessor${cellPendingMar>1?'ies':'y'} still at factory — cannot dispatch`;
-          cell.appendChild(flag);
-        } else if(cellDeliveredMar > 0){
-          const flag = el('div','marriage-flag delivered');
-          flag.innerHTML = `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 4L6 12l-3-3"/></svg>${cellDeliveredMar}`;
-          flag.title = `${cellDeliveredMar} married accessor${cellDeliveredMar>1?'ies':'y'} ready — ship together`;
-          cell.appendChild(flag);
-        }
-
-        const posTag=el('div','pos-tag');posTag.textContent=pos;cell.appendChild(posTag);
-
-        // ── COVER/INVENTORY block — show count with +/- ──
-        const isCoverBlock = cu.every(u=>u.type==='misc'&&((u.dealer||'').toLowerCase().includes('cover')||(u.dealer||'').toLowerCase().includes('swim')||(u.dealer||'').toLowerCase().includes('sauna')));
-        if(isCoverBlock){
-          const totalQty=cu.reduce((s,u)=>s+(u.qty||1),0);
-          const coverName=m.dealer;
-          const coverColor=m.color||'';
-          const countBadge=el('div','');
-          countBadge.style.cssText='background:#e0f2fe;border:1px solid #7dd3fc;border-radius:6px;padding:5px 6px;text-align:center;margin-top:8px';
-          countBadge.innerHTML=`
-            <div style="font-size:8px;font-weight:600;color:#0369a1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-bottom:3px">${coverName}</div>
-            ${coverColor?`<div style="display:inline-flex;align-items:center;gap:3px;background:#fff;border-radius:3px;padding:1px 5px;margin-bottom:3px;font-size:8px;color:#0369a1;font-weight:500">${coverColor}</div>`:''}
-            <div style="display:flex;align-items:center;justify-content:center;gap:4px">
-              <button onclick="event.stopPropagation();adjustQty('${pos}',-1)" style="width:16px;height:16px;border-radius:50%;border:1px solid #7dd3fc;background:#fff;font-size:11px;cursor:pointer;display:flex;align-items:center;justify-content:center;color:#0369a1;font-weight:700;line-height:1;padding:0">−</button>
-              <span style="font-family:var(--mono);font-size:13px;font-weight:700;color:#0369a1;min-width:20px;text-align:center">${totalQty}</span>
-              <button onclick="event.stopPropagation();adjustQty('${pos}',1)" style="width:16px;height:16px;border-radius:50%;border:1px solid #7dd3fc;background:#fff;font-size:11px;cursor:pointer;display:flex;align-items:center;justify-content:center;color:#0369a1;font-weight:700;line-height:1;padding:0">+</button>
-            </div>
-            <div style="font-size:7px;color:#7dd3fc;margin-top:1px">in stock</div>
-          `;
-          cell.appendChild(countBadge);
-        } else {
-          // Stack count badge (top-left) — shows ⏶ N when stacked
-          if(cu.length>1){const badge=el('div','unit-count-badge');badge.textContent=cu.length;cell.appendChild(badge);}
-          // Show TOP of stack (what's visible from above) — that's the last placed
-          const topUnit = cu.length>1 ? cu[cu.length-1] : m;
-          const dealer=el('div','cell-dealer');dealer.textContent=topUnit.dealer||'—';cell.appendChild(dealer);
-          if(topUnit.sn){const sn=el('div','cell-sn');sn.textContent=topUnit.sn;cell.appendChild(sn);}
-          const tBadge=el('div','tbadge tb'+(topUnit.type||'h')[0]);tBadge.textContent=tl(topUnit.type||'?');cell.appendChild(tBadge);
-          // Bottom-right corner stack indicator
-          if(cu.length>1){
-            const stackInfo=el('div','cell-stack-info');
-            stackInfo.textContent=`${cu.length} stacked`;
-            cell.appendChild(stackInfo);
-          }
-          // ── FACTORY REQUEST BADGE ──
-          // Highlight cells holding items the factory has requested (reverse logistics)
-          // Loud orange treatment so warehouse mgr can find the item visually from across the map
-          const hasReq = cu.some(u => u.sn && dispatchRequests.some(r =>
-            r.type==='tub' && r.sn === u.sn &&
-            ['pending','approved'].includes(r.status)
-          ));
-          if(hasReq){
-            cell.classList.add('cell-has-request');
-            const reqBadge = el('div','cell-req-badge');
-            reqBadge.innerHTML = '📤';
-            reqBadge.title = 'Factory has requested an item from this position — scan to dispatch';
-            cell.appendChild(reqBadge);
-          }
-        }
-
-        cell.draggable=true;
-        cell.addEventListener('dragstart',e=>{
-          dragUnit={fromPos:pos,unitId:m.id};
-          cell.classList.add('dragging');
-          e.dataTransfer.effectAllowed='move';
-        });
-        cell.addEventListener('dragend',()=>cell.classList.remove('dragging'));
-        cell.onclick=e=>{if(!e.defaultPrevented)showCellPanel(pos,cu);};
-      } else {
-        cell.classList.add('empty');
-        const emp=el('div','cell-empty-lbl');emp.textContent='+';cell.appendChild(emp);
-      }
-      setupDropExtended(cell,pos);
-      storRow.appendChild(cell);
-    }
-    section.appendChild(storRow);
-
-    // Back wall bottom border
-    if(isBackWall){
-      const bwBar=el('div','');
-      bwBar.style.cssText=`display:grid;gap:3px;margin-top:3px;grid-template-columns:${gridCols}`;
-      bwBar.appendChild(el('div',''));
-      for(let c=1;c<=12;c++){
-        const bw=el('div','');bw.style.cssText='height:7px;background:#94a3b8;border-radius:0 0 3px 3px';
-        bwBar.appendChild(bw);
-      }
-      section.appendChild(bwBar);
-    }
-
-    floor.appendChild(section);
-  }
+  // ── 5. For each col letter A-P render one HORIZONTAL grid row ──
+  // Each grid row spans all 16 row entities: 1X, 2X, 3X, ..., 14X, 15A-X, 15B-X
+  COLS_NEW.forEach(colLetter => {
+    const gridRow = el('div','');
+    gridRow.style.cssText = `display:grid;gap:3px;grid-template-columns:${gridCols};margin-bottom:2px`;
+    // Col letter label on the left
+    const lbl = el('div','');
+    lbl.style.cssText = 'font-size:11px;font-weight:700;color:#475569;background:#f1f5f9;border-radius:4px;display:flex;align-items:center;justify-content:center;letter-spacing:.06em';
+    lbl.textContent = colLetter;
+    gridRow.appendChild(lbl);
+    // Cells across all row entities
+    ROW_KEYS.forEach(rk => {
+      gridRow.appendChild(buildCell(rk, colLetter));
+    });
+    floor.appendChild(gridRow);
+  });
 
   // If 3D view is the active mode, also refresh it
   if (typeof mapView !== 'undefined' && mapView === '3d' && W3D && W3D.state && W3D.state.inited) update3D();
 }
 
 function el(tag,cls=''){const e=document.createElement(tag||'div');if(cls)e.className=cls;return e;}
+
+// ═══════════════════════════════════════════════════════════════════
+// MARRIAGE INVENTORY — UI for the 13A / 14A staging cells
+// ───────────────────────────────────────────────────────────────────
+// Each cell can hold multiple pending marriages. The panel shows them
+// in a list with: accessory name, target spa SN, status, and actions
+// (move/fulfill/cancel). Pending marriages with no location can be
+// assigned to a free cell here.
+// ═══════════════════════════════════════════════════════════════════
+function openMarriageInventoryPanel(pos){
+  // Validate: pos must be either the merged MINV cell or a user-overridden minv cell
+  const isOverrideMinv = (() => {
+    const ov = getCellOverride(pos);
+    return !!(ov && ov.type === 'minv');
+  })();
+  if(pos !== 'MINV' && !isOverrideMinv && !MARRIAGE_INVENTORY_CELLS.has(pos)){
+    toast(`${pos} is not a marriage inventory cell`, 'warn');
+    return;
+  }
+  // Reuse the existing details panel container if it exists
+  let panel = document.getElementById('cellDetails');
+  if(!panel){
+    panel = el('div','');
+    panel.id = 'cellDetails';
+    panel.style.cssText = 'background:var(--bg2);border:1px solid var(--border);border-radius:14px;padding:18px;margin-top:14px';
+    const floorBox = document.getElementById('floor');
+    floorBox.parentElement.appendChild(panel);
+  }
+  const stored = marriages.filter(m =>
+    m.location === pos && m.status !== 'fulfilled' && m.status !== 'cancelled'
+  );
+  const unstored = marriages.filter(m =>
+    !m.location && (m.status === 'pending' || m.status === 'in_progress')
+  );
+  panel.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:14px;gap:12px;flex-wrap:wrap">
+      <div>
+        <div style="display:flex;align-items:center;gap:8px">
+          <span style="background:#fce7f3;color:#831843;border:1.5px solid #db2777;border-radius:5px;padding:2px 8px;font-size:11px;font-weight:800;letter-spacing:.06em">MARRIAGE INVENTORY</span>
+          <span style="font-size:16px;font-weight:700;color:var(--text1)">${pos}</span>
+        </div>
+        <div style="font-size:12px;color:var(--text2);margin-top:5px">
+          ${stored.length} marriage${stored.length===1?'':'s'} stored here · waiting to be paired with their tina
+        </div>
+      </div>
+      <button class="btn" onclick="document.getElementById('cellDetails').remove()" style="padding:6px 14px">× Close</button>
+    </div>
+    ${stored.length === 0
+      ? `<div style="text-align:center;padding:24px;color:var(--text2);font-size:13px;background:var(--bg1);border-radius:10px">
+           <div style="font-size:32px;margin-bottom:8px">💍</div>
+           <div>No marriages stored at ${pos} yet.</div>
+           <div style="font-size:11px;margin-top:4px">When a marriage arrives, it will be suggested here.</div>
+         </div>`
+      : `<div style="display:flex;flex-direction:column;gap:8px">
+           ${stored.map(m => `
+             <div style="background:var(--bg1);border:1px solid var(--border);border-radius:10px;padding:12px;display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
+               <div style="flex:1;min-width:200px">
+                 <div style="font-size:13px;font-weight:700;color:var(--text1)">${escapeHTML(m.accessoryName || 'Accessory')} × ${m.accessoryQty || 1}</div>
+                 <div style="font-size:11px;color:var(--text2);margin-top:3px;font-family:var(--mono)">→ Tina ${escapeHTML(m.spaSn || '?')} · ${escapeHTML(m.spaDealer || '?')}</div>
+                 ${m.notes ? `<div style="font-size:10.5px;color:var(--text2);margin-top:4px;font-style:italic">"${escapeHTML(m.notes)}"</div>` : ''}
+               </div>
+               <div style="display:flex;gap:6px;align-items:center">
+                 <span style="font-size:10px;background:${m.status==='in_progress'?'#fef3c7':'#dbeafe'};color:${m.status==='in_progress'?'#92400e':'#1e40af'};padding:3px 8px;border-radius:4px;font-weight:700;letter-spacing:.04em">${(m.status||'pending').toUpperCase()}</span>
+                 <button class="btn" onclick="moveMarriageLocation(${m.id})" style="padding:5px 10px;font-size:11px">Move</button>
+                 <button class="btn" onclick="fulfillMarriage(${m.id})" style="padding:5px 10px;font-size:11px;background:#15803d;color:#fff;border-color:#166534">✓ Fulfill</button>
+               </div>
+             </div>
+           `).join('')}
+         </div>`
+    }
+    ${unstored.length > 0 ? `
+      <div style="margin-top:18px;padding-top:14px;border-top:1px dashed var(--border)">
+        <div style="font-size:12px;font-weight:700;color:var(--text1);margin-bottom:8px">
+          📥 ${unstored.length} marriage${unstored.length===1?'':'s'} waiting to be placed
+        </div>
+        <div style="display:flex;flex-direction:column;gap:6px">
+          ${unstored.slice(0,5).map(m => `
+            <div style="background:var(--bg1);border:1px dashed var(--border);border-radius:8px;padding:8px 12px;display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+              <div style="flex:1;min-width:200px;font-size:12px;color:var(--text1)">
+                <strong>${escapeHTML(m.accessoryName || 'Accessory')}</strong>
+                <span style="color:var(--text2);font-family:var(--mono);font-size:11px"> · → ${escapeHTML(m.spaSn || '?')}</span>
+              </div>
+              <button class="btn" onclick="assignMarriageHere(${m.id},'${pos}')" style="padding:4px 10px;font-size:11px;background:#db2777;color:#fff;border-color:#9d174d">Place at ${pos}</button>
+            </div>
+          `).join('')}
+          ${unstored.length > 5 ? `<div style="font-size:10.5px;color:var(--text2);text-align:center;margin-top:4px">+${unstored.length-5} more in Marriages tab</div>` : ''}
+        </div>
+      </div>
+    ` : ''}
+  `;
+  // Scroll to it
+  setTimeout(() => panel.scrollIntoView({ behavior:'smooth', block:'nearest' }), 50);
+}
+window.openMarriageInventoryPanel = openMarriageInventoryPanel;
+
+function assignMarriageHere(id, pos){
+  const m = marriages.find(x => x.id === id);
+  if(!m) return;
+  snapshot('marriage-assign-loc');
+  m.location = pos;
+  if(typeof addAct === 'function') addAct(`💍 Marriage #${id} assigned to ${pos} (${m.accessoryName || ''})`, '#db2777');
+  if(typeof saveState === 'function') saveState();
+  if(typeof drawMap === 'function') drawMap();
+  openMarriageInventoryPanel(pos);
+  toast(`Marriage placed at ${pos}`, 'ok');
+}
+window.assignMarriageHere = assignMarriageHere;
+
+function moveMarriageLocation(id){
+  const m = marriages.find(x => x.id === id);
+  if(!m) return;
+  // Available minv cells = the base MINV + any user-overridden 'minv' cells
+  const cells = ['MINV'];
+  if(cfg && cfg.cellOverrides){
+    Object.entries(cfg.cellOverrides).forEach(([pos, ov]) => {
+      if(ov && ov.type === 'minv' && !cells.includes(pos)) cells.push(pos);
+    });
+  }
+  const choices = cells.filter(c => c !== m.location);
+  if(!choices.length){
+    toast('No other marriage-inventory cells available. Create one in cell editor.', 'warn');
+    return;
+  }
+  const dest = prompt(`Move marriage to which cell? (Available: ${choices.join(', ')})`, choices[0]);
+  if(!dest) return;
+  if(!cells.includes(dest)){ toast(`${dest} is not a marriage inventory cell`, 'warn'); return; }
+  snapshot('marriage-move-loc');
+  const oldLoc = m.location;
+  m.location = dest;
+  if(typeof addAct === 'function') addAct(`💍 Marriage #${id} moved ${oldLoc}→${dest}`, '#db2777');
+  if(typeof saveState === 'function') saveState();
+  if(typeof drawMap === 'function') drawMap();
+  openMarriageInventoryPanel(dest);
+}
+window.moveMarriageLocation = moveMarriageLocation;
+
+function fulfillMarriage(id){
+  const m = marriages.find(x => x.id === id);
+  if(!m) return;
+  if(!confirm(`Mark marriage for ${m.spaSn} (${m.accessoryName}) as fulfilled?`)) return;
+  snapshot('marriage-fulfill');
+  m.status = 'fulfilled';
+  m.fulfilledAt = new Date().toISOString().slice(0,10);
+  if(typeof addAct === 'function') addAct(`💍 Marriage #${id} fulfilled — ${m.accessoryName} delivered with ${m.spaSn}`, 'var(--accent)');
+  if(typeof saveState === 'function') saveState();
+  if(typeof drawMap === 'function') drawMap();
+  if(typeof renderMarriages === 'function') renderMarriages();
+  const loc = m.location;
+  if(loc) openMarriageInventoryPanel(loc);
+  toast(`Marriage fulfilled · accessory removed from ${loc}`, 'ok');
+}
+window.fulfillMarriage = fulfillMarriage;
+
+// Auto-suggest a marriage-inventory location when a new marriage is added.
+// Returns 'MINV' (the single merged shelf position) unless overrides exist.
+function suggestMarriageLocation(){
+  // If the user has set up additional minv cells via cell overrides,
+  // pick whichever has the fewest pending marriages. Default is 'MINV'.
+  const cells = ['MINV'];
+  if(cfg && cfg.cellOverrides){
+    Object.entries(cfg.cellOverrides).forEach(([pos, ov]) => {
+      if(ov && ov.type === 'minv' && !cells.includes(pos)) cells.push(pos);
+    });
+  }
+  const counts = cells.map(pos => ({
+    pos,
+    n: marriages.filter(m =>
+      m.location === pos &&
+      m.status !== 'fulfilled' && m.status !== 'cancelled'
+    ).length
+  }));
+  counts.sort((a,b) => a.n - b.n);   // least-loaded first
+  return counts[0].pos;
+}
+window.suggestMarriageLocation = suggestMarriageLocation;
+
+// ═══════════════════════════════════════════════════════════════════
+// ROW MANAGER — edit existing rows + add new rows + lock rows
+// ───────────────────────────────────────────────────────────────────
+// Modal that lets the warehouse manager change row labels, switch a
+// row's type (drv ↔ spa ↔ main), lock a row (read-only), and append
+// brand-new rows after row 14 (for warehouse expansion).
+// All changes persist to cfg.rowOverrides + cfg.customRows.
+// ═══════════════════════════════════════════════════════════════════
+function openRowManager(){
+  let modal = document.getElementById('rowManagerModal');
+  if(modal){ modal.remove(); }
+  modal = el('div','');
+  modal.id = 'rowManagerModal';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(15,23,42,.55);backdrop-filter:blur(4px);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px';
+  modal.innerHTML = `
+    <div style="background:var(--bg2);border:1px solid var(--border);border-radius:16px;max-width:780px;width:100%;max-height:90vh;overflow:auto;padding:24px;box-shadow:0 20px 60px rgba(0,0,0,.3)">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:18px">
+        <div>
+          <div style="font-size:18px;font-weight:800;color:var(--text1)">🛠 Manage Rows</div>
+          <div style="font-size:12px;color:var(--text2);margin-top:3px">Edit row labels, change type, lock for read-only, or add a brand-new row to expand the warehouse.</div>
+        </div>
+        <button class="btn" onclick="document.getElementById('rowManagerModal').remove()" style="padding:6px 14px">× Close</button>
+      </div>
+      <div id="rowMgrBody"></div>
+      <div style="display:flex;justify-content:space-between;gap:10px;margin-top:20px;padding-top:16px;border-top:1px solid var(--border);flex-wrap:wrap">
+        <button class="btn" onclick="addCustomRow()" style="background:#3b82f6;color:#fff;border-color:#1d4ed8;font-weight:700;padding:8px 16px">+ Add New Row</button>
+        <div style="display:flex;gap:10px">
+          <button class="btn" onclick="resetRowOverrides()" style="padding:8px 16px">Reset to Blueprint Default</button>
+          <button class="btn" onclick="saveRowManager()" style="background:#15803d;color:#fff;border-color:#166534;font-weight:700;padding:8px 16px">✓ Save</button>
+        </div>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(modal);
+  renderRowManagerBody();
+}
+window.openRowManager = openRowManager;
+
+function renderRowManagerBody(){
+  const body = document.getElementById('rowMgrBody');
+  if(!body) return;
+  const overrides = getRowOverrides();
+  const customRows = (cfg && cfg.customRows) || [];
+  // Combined list: built-in rows 1-14 + custom rows
+  const allRows = [
+    ...Object.keys(ROW_DEFS_NEW).map(n => ({ n:+n, builtIn:true })),
+    ...customRows.map(r => ({ n:r.n, builtIn:false })),
+  ].sort((a,b) => a.n - b.n);
+  body.innerHTML = `
+    <div style="display:grid;grid-template-columns:60px 1fr 160px 90px 60px;gap:8px;font-size:10px;font-weight:700;color:var(--text2);letter-spacing:.06em;padding:6px 10px;border-bottom:1px solid var(--border);text-transform:uppercase">
+      <div>Row</div><div>Label</div><div>Type</div><div>Lock</div><div></div>
+    </div>
+    ${allRows.map(({n, builtIn}) => {
+      const def  = getRowDef(n);
+      const ov   = overrides[n] || {};
+      const locked = !!ov.locked;
+      return `
+        <div style="display:grid;grid-template-columns:60px 1fr 160px 90px 60px;gap:8px;padding:8px 10px;border-bottom:1px solid var(--border);align-items:center">
+          <div style="font-size:14px;font-weight:800;color:var(--text1)">${n}</div>
+          <input type="text" id="rowmgr-lbl-${n}" value="${escapeHTML(def.label || '')}" style="background:var(--bg1);border:1px solid var(--border);border-radius:6px;padding:6px 10px;font-size:12px;color:var(--text1)">
+          <select id="rowmgr-type-${n}" style="background:var(--bg1);border:1px solid var(--border);border-radius:6px;padding:6px 10px;font-size:12px;color:var(--text1)">
+            <option value="spa"  ${def.type==='spa'?'selected':''}>SPA storage</option>
+            <option value="drv"  ${def.type==='drv'?'selected':''}>Drive aisle</option>
+            <option value="main" ${def.type==='main'?'selected':''}>Main drive</option>
+          </select>
+          <label style="display:flex;align-items:center;gap:6px;font-size:11.5px;color:var(--text1);cursor:pointer">
+            <input type="checkbox" id="rowmgr-lock-${n}" ${locked?'checked':''} style="width:16px;height:16px;cursor:pointer">
+            ${locked ? '🔒 Locked' : 'Open'}
+          </label>
+          ${builtIn
+            ? `<span style="font-size:9.5px;color:var(--text2);letter-spacing:.04em">built-in</span>`
+            : `<button class="btn" onclick="removeCustomRow(${n})" style="padding:4px 8px;font-size:11px;background:#dc2626;color:#fff;border-color:#991b1b">Delete</button>`}
+        </div>
+      `;
+    }).join('')}
+  `;
+}
+
+function saveRowManager(){
+  if(!cfg) cfg = {};
+  cfg.rowOverrides = cfg.rowOverrides || {};
+  const overrides = {};
+  const customRows = (cfg.customRows || []);
+  const allRowNums = [
+    ...Object.keys(ROW_DEFS_NEW).map(n => +n),
+    ...customRows.map(r => r.n),
+  ];
+  allRowNums.forEach(n => {
+    const lbl = document.getElementById(`rowmgr-lbl-${n}`)?.value || '';
+    const type = document.getElementById(`rowmgr-type-${n}`)?.value || 'drv';
+    const locked = document.getElementById(`rowmgr-lock-${n}`)?.checked || false;
+    const baseDef = ROW_DEFS_NEW[n];
+    // Only save deltas vs built-in
+    const ov = {};
+    if(baseDef && lbl !== baseDef.label) ov.label = lbl;
+    if(baseDef && type !== baseDef.type) ov.type  = type;
+    if(!baseDef){ ov.label = lbl; ov.type = type; }   // custom row: store all
+    if(locked) ov.locked = true;
+    if(Object.keys(ov).length) overrides[n] = ov;
+  });
+  cfg.rowOverrides = overrides;
+  if(typeof saveState === 'function') saveState();
+  document.getElementById('rowManagerModal').remove();
+  if(typeof drawMap === 'function') drawMap();
+  toast('Row settings saved', 'ok');
+  if(typeof addAct === 'function') addAct('🛠 Row Manager: saved row overrides', 'var(--accent)');
+}
+window.saveRowManager = saveRowManager;
+
+function resetRowOverrides(){
+  if(!confirm('Reset ALL row settings back to the blueprint default? Custom rows you added will also be removed.')) return;
+  if(!cfg) cfg = {};
+  cfg.rowOverrides = {};
+  cfg.customRows = [];
+  if(typeof saveState === 'function') saveState();
+  document.getElementById('rowManagerModal').remove();
+  if(typeof drawMap === 'function') drawMap();
+  toast('Row settings reset', 'ok');
+}
+window.resetRowOverrides = resetRowOverrides;
+
+function addCustomRow(){
+  if(!cfg) cfg = {};
+  cfg.customRows = cfg.customRows || [];
+  const existing = [
+    ...Object.keys(ROW_DEFS_NEW).map(n => +n),
+    ...cfg.customRows.map(r => r.n),
+  ];
+  // Next sequential number after the highest existing — skip 15 (reserved for 15A/15B cover labels)
+  let n = Math.max(...existing) + 1;
+  if(n === 15) n = 16;
+  cfg.customRows.push({ n, type:'spa', label:`SPA · Row ${n}`, locked:false });
+  if(typeof saveState === 'function') saveState();
+  renderRowManagerBody();
+  toast(`Row ${n} added — set its label/type below and Save`, 'ok');
+}
+window.addCustomRow = addCustomRow;
+
+function removeCustomRow(n){
+  if(!confirm(`Delete custom row ${n}? Any tinas placed there will be sent back to Incoming.`)) return;
+  if(!cfg) cfg = {};
+  cfg.customRows = (cfg.customRows || []).filter(r => r.n !== n);
+  // Bump any units placed in this row back to Incoming
+  const toBump = units.filter(u => {
+    const p = parsePos(u.pos);
+    return p.valid && p.rowKey === String(n);
+  });
+  toBump.forEach(u => {
+    if(typeof addIncomingFromMigrated === 'function') addIncomingFromMigrated(u, 'row-removed');
+  });
+  if(typeof saveState === 'function') saveState();
+  renderRowManagerBody();
+  if(typeof drawMap === 'function') drawMap();
+  toast(`Row ${n} removed${toBump.length ? ` · ${toBump.length} unit(s) sent to Incoming` : ''}`, 'ok');
+}
+window.removeCustomRow = removeCustomRow;
+
+// ═══════════════════════════════════════════════════════════════════
+// CELL EDITOR — change the type of any individual cell + lock it
+// ───────────────────────────────────────────────────────────────────
+// Opens a small modal when the user clicks a non-storage cell (drv,
+// main, elev) or the ⚙ gear on a storage cell. The override is stored
+// in cfg.cellOverrides keyed by position. cellTypeNew honors this on
+// every redraw so the map reflects the change immediately.
+// ═══════════════════════════════════════════════════════════════════
+function openCellEditor(pos){
+  const existing = document.getElementById('cellEditorModal');
+  if(existing) existing.remove();
+
+  // Resolve current type and override state
+  const parsed = parsePos(pos);
+  let currentType = 'drv';
+  if(parsed.valid) currentType = parsed.type;
+  // For the special MINV position
+  if(pos === 'MINV') currentType = 'minv';
+  const override = getCellOverride(pos);
+  const overrideType = (override && override.type) || '';
+  const locked = !!(override && override.locked);
+  // Pull units currently at this cell (used in the warning if changing type)
+  const unitsAtCell = (typeof units !== 'undefined' ? units : []).filter(u => u.pos === pos);
+
+  const typeOptions = [
+    { v:'',      label:`— Use blueprint default (${currentType.toUpperCase()}) —` },
+    { v:'spa',   label:'🛁 SPA storage (hot tubs / swim spas)' },
+    { v:'drv',   label:'═══ Drive aisle (no storage)' },
+    { v:'main',  label:'⬇ Main drive aisle' },
+    { v:'minv',  label:'💍 Marriage inventory (accessories only)' },
+    { v:'cf',    label:'🪣 Cover front' },
+    { v:'cb',    label:'🪣 Cover back' },
+    { v:'pstor', label:'📦 Panel / cover storage' },
+    { v:'elev',  label:'🚪 Elevator (no storage, no transit)' },
+  ];
+
+  const modal = el('div','');
+  modal.id = 'cellEditorModal';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(15,23,42,.55);backdrop-filter:blur(4px);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px';
+  modal.innerHTML = `
+    <div style="background:var(--bg2);border:1px solid var(--border);border-radius:14px;max-width:520px;width:100%;padding:22px;box-shadow:0 20px 60px rgba(0,0,0,.3)">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:14px">
+        <div>
+          <div style="font-size:17px;font-weight:800;color:var(--text1)">⚙ Edit cell ${pos}</div>
+          <div style="font-size:12px;color:var(--text2);margin-top:3px">Override what this individual cell holds — or lock it from edits.</div>
+        </div>
+        <button class="btn" onclick="document.getElementById('cellEditorModal').remove()" style="padding:6px 14px">× Close</button>
+      </div>
+
+      <div style="background:var(--bg1);border:1px solid var(--border);border-radius:10px;padding:12px;margin-bottom:14px">
+        <div style="font-size:10.5px;color:var(--text2);text-transform:uppercase;letter-spacing:.06em;font-weight:700">Current</div>
+        <div style="font-size:14px;font-weight:700;color:var(--text1);margin-top:3px">${currentType.toUpperCase()}${overrideType ? ` <span style="font-size:10px;background:#fef3c7;color:#92400e;padding:1px 6px;border-radius:4px;font-weight:700;margin-left:6px">OVERRIDDEN</span>` : ''}</div>
+        ${unitsAtCell.length ? `<div style="font-size:11px;color:#92400e;margin-top:8px"><strong>⚠ ${unitsAtCell.length} unit(s) currently stored here.</strong> Changing the type will send them back to Incoming.</div>` : ''}
+      </div>
+
+      <div class="fg" style="margin-bottom:14px">
+        <label class="fl" style="font-size:10.5px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.06em">Override cell type</label>
+        <select class="fsel" id="ce-type" style="font-size:13px;padding:9px 11px;width:100%;margin-top:5px;border-radius:7px">
+          ${typeOptions.map(o => `<option value="${o.v}" ${overrideType === o.v ? 'selected' : ''}>${o.label}</option>`).join('')}
+        </select>
+      </div>
+
+      <label style="display:flex;align-items:center;gap:10px;cursor:pointer;padding:10px 12px;background:var(--bg1);border-radius:9px;margin-bottom:18px;border:1px solid var(--border)">
+        <input type="checkbox" id="ce-lock" ${locked?'checked':''} style="width:18px;height:18px;cursor:pointer">
+        <span style="font-size:12.5px;font-weight:700;color:var(--text1)">🔒 Lock this cell (no edits, no drag in or out)</span>
+      </label>
+
+      <div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap">
+        <button class="btn" onclick="resetCellOverride('${pos}')" style="padding:8px 14px;font-size:11.5px" ${!override?'disabled':''}>Reset to blueprint default</button>
+        <div style="display:flex;gap:8px">
+          <button class="btn" onclick="document.getElementById('cellEditorModal').remove()" style="padding:8px 14px">Cancel</button>
+          <button class="btn" onclick="saveCellOverride('${pos}')" style="background:#15803d;color:#fff;border-color:#166534;font-weight:700;padding:8px 18px">✓ Save</button>
+        </div>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(modal);
+}
+window.openCellEditor = openCellEditor;
+
+function saveCellOverride(pos){
+  const type   = document.getElementById('ce-type').value;
+  const locked = document.getElementById('ce-lock').checked;
+  // If changing to a non-storage type while there are units here, warn.
+  const unitsAt = units.filter(u => u.pos === pos);
+  if(unitsAt.length && type && type !== 'spa' && type !== 'minv'){
+    if(!confirm(`${unitsAt.length} unit(s) are at ${pos}. Switching to ${type.toUpperCase()} will move them to Incoming. Continue?`)) return;
+    snapshot('cell-type-bump');
+    unitsAt.slice().forEach(u => {
+      if(typeof addIncomingFromMigrated === 'function') addIncomingFromMigrated(u, 'cell-type-changed');
+    });
+  } else {
+    snapshot('cell-override');
+  }
+  const ov = {};
+  if(type)   ov.type   = type;
+  if(locked) ov.locked = true;
+  setCellOverride(pos, Object.keys(ov).length ? ov : null);
+  document.getElementById('cellEditorModal').remove();
+  if(typeof drawMap === 'function') drawMap();
+  if(typeof addAct === 'function') addAct(`⚙ Cell ${pos} updated${type?` → ${type}`:''}${locked?' (locked)':''}`, 'var(--accent)');
+  toast(`Cell ${pos} updated`, 'ok');
+}
+window.saveCellOverride = saveCellOverride;
+
+function resetCellOverride(pos){
+  if(!confirm(`Reset ${pos} back to the blueprint default?`)) return;
+  snapshot('cell-override-reset');
+  setCellOverride(pos, null);
+  document.getElementById('cellEditorModal').remove();
+  if(typeof drawMap === 'function') drawMap();
+  if(typeof addAct === 'function') addAct(`⚙ Cell ${pos} reset to default`, 'var(--accent)');
+  toast(`Cell ${pos} reset`, 'ok');
+}
+window.resetCellOverride = resetCellOverride;
 
 // Adjust quantity of cover/inventory items at a position
 function adjustQty(pos, delta){
@@ -8684,12 +10109,18 @@ function confirmMoveSection(fromRow){
   let moved=0;
   units.filter(u=>u.pos && u.pos.endsWith(fromRow)).forEach(u=>{
     const oldPos=u.pos;
-    if(specificPos&&specificPos.match(/^\d{1,2}[A-N]$/i)){
+    if(specificPos && isValidPosFormat(specificPos)){
       u.pos=specificPos;
     } else {
-      // Keep column, change row
-      const col=(u.pos||"").replace(/[A-N]$/,'');
-      u.pos=col+targetRow;
+      // Keep column letter, change row number. Handle both standard
+      // ("4C" → "<target>C") and cover ("15A-N" → unsupported here).
+      const m = (u.pos||'').match(/^\d{1,2}([A-P])$/);
+      if(m){
+        u.pos = targetRow + m[1];
+      } else {
+        // skip unrecognized format
+        return;
+      }
     }
     moved++;
     addAct(`${u.sn||u.dealer}: ${oldPos}→${u.pos}`,'var(--accent)');
@@ -8845,7 +10276,7 @@ function showCellPanel(pos,cu){
     const dealerC = dealerColor(u.dealer);
     return `<div class="uc" style="position:relative;${isCover?'border-left:3px solid #7dd3fc;background:#f0f9ff;':isMaterial?'border-left:3px solid var(--orange);background:#fff7ed;':marPending.length?'border-left:3px solid var(--red);':`border-left:4px solid ${dealerC.border};`}">
       ${!isCover && !isMaterial && !marPending.length ? `<div style="position:absolute;left:-4px;top:8px;bottom:8px;width:4px;background:${dealerC.border};border-radius:2px"></div>` : ''}
-      <div class="uc-dealer">${u.dealer}${ageBadge}${(()=>{
+      <div class="uc-dealer">${u.dealer}${ageBadge}${u.alreadyInWh?` <span style="display:inline-block;font-size:8.5px;font-weight:800;color:#854d0e;background:#fde68a;border:.5px solid #d97706;padding:1px 5px;border-radius:3px;letter-spacing:.04em;margin-left:6px;vertical-align:middle" title="Pre-existing inventory">📍 WH</span>`:''}${(()=>{
         if(!isStackedType(u.type)) return '';
         const blockers = unitsAbove(u);
         const isTop = blockers.length === 0;
@@ -8921,7 +10352,11 @@ function showCellPanel(pos,cu){
             </select>
           </div>
         </div>
-        <div class="fg" style="max-width:180px;margin-bottom:10px"><label class="fl">Entry Date</label><input class="fi" type="date" id="q-entry" value="${toISO()}" style="font-size:12px"></div>
+        <div class="fg" style="max-width:180px;margin-bottom:8px"><label class="fl">Entry Date</label><input class="fi" type="date" id="q-entry" value="${toISO()}" style="font-size:12px"></div>
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;padding:6px 10px;background:#fef3c7;border:1px solid #fbbf24;border-radius:6px;margin-bottom:10px;font-size:11.5px;font-weight:600;color:#854d0e;max-width:fit-content">
+          <input type="checkbox" id="q-already" style="width:14px;height:14px;cursor:pointer;accent-color:#d97706">
+          📍 Already in warehouse (pre-existing inventory)
+        </label>
         <button class="btn btn-p btn-sm" onclick="quickAddSpa('${pos}')">
           <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 2v12M2 8h12"/></svg>
           Add Spa
@@ -9041,18 +10476,35 @@ function quickAddSpa(pos){
   const dealer=(document.getElementById('q-dealer').value||'').trim();
   const type=document.getElementById('q-type').value;
   const entry=document.getElementById('q-entry').value;
+  const alreadyEl = document.getElementById('q-already');
+  const alreadyInWh = !!(alreadyEl && alreadyEl.checked);
   if(!dealer){toast('Enter a dealer name','err');return;}
+  // ── S/N duplicate check (skip when "already in warehouse" since
+  // a pre-existing tina may legitimately have its S/N already on file) ──
+  if(sn && !alreadyInWh){
+    const dup = factory.find(f => f.sn === sn && f.type !== 'accessory')
+             || units.find(u => u.sn === sn)
+             || incoming.find(i => i.sn === sn);
+    if(dup){
+      const where = factory.includes(dup) ? 'Factory'
+                  : units.includes(dup) ? `Warehouse @ ${dup.pos}`
+                  : 'Incoming';
+      const dealerInfo = dup.dealer ? ` (${dup.dealer})` : '';
+      toast(`S/N ${sn} already exists in ${where}${dealerInfo}.`,'err');
+      return;
+    }
+  }
   // If user clicked a specific slot, _slotHint holds {stack,level}
   let slot = null;
   if(isStackedType(type)){
     if(_slotHint && _slotHint.pos === pos){
-      const v = validateSlot(pos, _slotHint.stack, _slotHint.level);
+      const v = validateSlot(pos, _slotHint.stack, _slotHint.level, null, type);
       if(!v.ok){ toast(v.reason,'err'); return; }
       slot = {stack:_slotHint.stack, level:_slotHint.level};
     } else {
-      slot = findNextSlot(pos);
+      slot = findNextSlot(pos, null, type);
       if(!slot){
-        toast(`${pos} is full (${MAX_PER_CELL} max). Move one out first.`,'err');
+        toast(`${pos} is full (max ${type==='swim'?MAX_LEVELS_SWIM:MAX_LEVELS_HOT}). Move one out first.`,'err');
         return;
       }
     }
@@ -9060,10 +10512,12 @@ function quickAddSpa(pos){
   snapshot(`add ${sn||dealer}`);
   const newU = {id:nid++,pos,sn,dealer,type,entry};
   if(slot){ newU.stack=slot.stack; newU.level=slot.level; }
+  if(alreadyInWh) newU.alreadyInWh = true;
   units.push(newU);
   _slotHint = null;
-  addAct(`Spa ${sn||dealer} added at ${pos}${slot?` (S${slot.stack}-${LEVEL_SHORT(slot.level)})`:''}`,'var(--accent)');
-  toast(`${sn||dealer} → ${pos}${slot?` · S${slot.stack}-${LEVEL_SHORT(slot.level)}`:''}`,'ok');
+  const tag = alreadyInWh ? ' (pre-existing)' : '';
+  addAct(`Spa ${sn||dealer} added at ${pos}${slot?` (S${slot.stack}-${LEVEL_SHORT(slot.level)})`:''}${tag}`,'var(--accent)');
+  toast(`${sn||dealer} → ${pos}${slot?` · S${slot.stack}-${LEVEL_SHORT(slot.level)}`:''}${tag}`,'ok');
   const cu=units.filter(u=>u.pos===pos);
   showCellPanel(pos,cu);
   drawMap();updBadges();
@@ -9740,7 +11194,7 @@ function buildAddForm(pos,sn,dealer,type,inIdx){
   return `<div class="det-panel">
     <div class="dp-hd"><div class="dp-pos">Add Unit to Warehouse</div><button class="btn btn-sm" onclick="document.getElementById('float-panel').innerHTML=''">✕</button></div>
     <div class="fgrid fgrid3">
-      <div class="fg"><label class="fl">Position</label><input class="fi" id="a-pos" value="${pos}" placeholder="e.g. 4C" style="text-transform:uppercase"></div>
+      <div class="fg"><label class="fl">Position</label><input class="fi" id="a-pos" value="${pos}" placeholder="e.g. 4C, 12P, or 15A-N" style="text-transform:uppercase"></div>
       <div class="fg"><label class="fl">Serial No.</label><input class="fi" id="a-sn" value="${sn}" placeholder="30700"></div>
       <div class="fg"><label class="fl">Type</label><select class="fsel" id="a-type"><option value="hot" ${type==='hot'?'selected':''}>Hot Tub</option><option value="swim" ${type==='swim'?'selected':''}>Swim Spa</option><option value="extra" ${type==='extra'?'selected':''}>Extra/Stock</option></select></div>
     </div>
@@ -9748,6 +11202,10 @@ function buildAddForm(pos,sn,dealer,type,inIdx){
       <div class="fg"><label class="fl">Dealer</label><input class="fi" id="a-dealer" value="${dealer}" placeholder="e.g. Pool People"></div>
       <div class="fg"><label class="fl">Entry Date</label><input class="fi" type="date" id="a-entry" value="${toISO()}"></div>
     </div>
+    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;padding:8px 12px;background:#fef3c7;border:1px solid #fbbf24;border-radius:7px;margin:8px 0 12px;font-size:12px;font-weight:600;color:#854d0e">
+      <input type="checkbox" id="a-already" style="width:15px;height:15px;cursor:pointer;accent-color:#d97706">
+      📍 Already in warehouse (pre-existing inventory — skip duplicate-SN check)
+    </label>
     <div class="faction">
       <button class="btn btn-p" onclick="addUnit(${inIdx})">Save Unit</button>
       <button class="btn" onclick="document.getElementById('float-panel').innerHTML=''">Cancel</button>
@@ -9761,10 +11219,12 @@ function addUnit(inIdx){
   const dealer=(document.getElementById('a-dealer').value||'').trim();
   const type=document.getElementById('a-type').value;
   const entry=document.getElementById('a-entry').value;
-  if(!pos.match(/^\d{1,2}[A-N]$/i)){toast('Invalid position (e.g. 4C)','err');return;}
+  const alreadyEl = document.getElementById('a-already');
+  const alreadyInWh = !!(alreadyEl && alreadyEl.checked);
+  if(!isValidPosFormat(pos)){toast('Invalid position (e.g. 4C, 12P, or 15A-N)','err');return;}
   if(!dealer){toast('Please enter a dealer name','err');return;}
-  // ── S/N duplicate check ──
-  if(sn){
+  // ── S/N duplicate check (skipped when "already in warehouse") ──
+  if(sn && !alreadyInWh){
     const activeDup = factory.find(f => f.sn === sn && f.type !== 'accessory')
                   || units.find(u => u.sn === sn)
                   || incoming.find(i => i.sn === sn);
@@ -9792,15 +11252,18 @@ function addUnit(inIdx){
   }
   let slot = null;
   if(isStackedType(type)){
-    slot = findNextSlot(pos);
-    if(!slot){ toast(`${pos} is full (${MAX_PER_CELL} max)`,'err'); return; }
+    slot = findNextSlot(pos, null, type);
+    if(!slot){ toast(`${pos} is full (max ${type==='swim'?MAX_LEVELS_SWIM:MAX_LEVELS_HOT})`,'err'); return; }
   }
+  snapshot(`add ${sn||dealer}`);
   const newU = {id:nid++,pos,sn,dealer,type,entry};
   if(slot){ newU.stack=slot.stack; newU.level=slot.level; }
+  if(alreadyInWh) newU.alreadyInWh = true;
   units.push(newU);
   if(inIdx>=0)incoming[inIdx].status='stored';
-  addAct(`Unit ${sn||dealer} stored at ${pos}${slot?` (S${slot.stack}-${LEVEL_SHORT(slot.level)})`:''}`,'var(--accent)');
-  toast(`Unit stored at ${pos}`,'ok');
+  const tag = alreadyInWh ? ' (already in WH)' : '';
+  addAct(`Unit ${sn||dealer} stored at ${pos}${slot?` (S${slot.stack}-${LEVEL_SHORT(slot.level)})`:''}${tag}`,'var(--accent)');
+  toast(`Unit stored at ${pos}${tag}`,'ok');
   document.getElementById('float-panel').innerHTML='';
   drawMap();updBadges();
 }
@@ -9834,6 +11297,10 @@ function openEditUnit(id){
     </div>
     <div class="fg" style="margin-bottom:10px"><label class="fl">Dealer</label><input class="fi" id="e-dealer" value="${u.dealer}"></div>
     ${stackBlock}
+    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;padding:8px 12px;background:#fef3c7;border:1px solid #fbbf24;border-radius:7px;margin-bottom:12px;font-size:12px;font-weight:600;color:#854d0e">
+      <input type="checkbox" id="e-already" ${u.alreadyInWh?'checked':''} style="width:15px;height:15px;cursor:pointer;accent-color:#d97706">
+      📍 Already in warehouse (pre-existing inventory tag)
+    </label>
     <div class="faction">
       <button class="btn btn-p" onclick="saveEdit(${id})">Save</button>
       <button class="btn btn-r" onclick="rmUnit(${id})">Delete</button>
@@ -9846,7 +11313,7 @@ function openEditUnit(id){
 function saveEdit(id){
   const u=units.find(x=>x.id===id);if(!u)return;
   const pos=(document.getElementById('e-pos').value||'').toUpperCase().trim();
-  if(!pos.match(/^\d{1,2}[A-N]$/i)){toast('Invalid position','err');return;}
+  if(!isValidPosFormat(pos)){toast('Invalid position (use e.g. 4C, 12P, or 15A-N)','err');return;}
   const newType = document.getElementById('e-type').value;
   const wasStacked = isStackedType(u.type);
   const willBeStacked = isStackedType(newType);
@@ -9856,7 +11323,7 @@ function saveEdit(id){
   let newLevel = levelEl ? parseInt(levelEl.value) : u.level;
   // Validate slot if hot/swim
   if(willBeStacked){
-    const v = validateSlot(pos, newStack, newLevel, id);
+    const v = validateSlot(pos, newStack, newLevel, id, newType);
     if(!v.ok){ toast(v.reason, 'err'); return; }
   } else if(wasStacked && !willBeStacked){
     // Type changed away from stacked — clear slot
@@ -9864,8 +11331,8 @@ function saveEdit(id){
     newLevel = undefined;
   } else if(!wasStacked && willBeStacked){
     // Type changed TO stacked — auto-assign slot
-    const slot = findNextSlot(pos);
-    if(!slot){ toast(`${pos} is full (${MAX_PER_CELL} max)`,'err'); return; }
+    const slot = findNextSlot(pos, null, newType);
+    if(!slot){ toast(`${pos} is full (max ${newType==='swim'?MAX_LEVELS_SWIM:MAX_LEVELS_HOT})`,'err'); return; }
     newStack = slot.stack; newLevel = slot.level;
   }
   snapshot(`edit ${u.sn||u.dealer}`);
@@ -9874,6 +11341,12 @@ function saveEdit(id){
   u.type=newType;
   if(willBeStacked){ u.stack=newStack; u.level=newLevel; }
   else { delete u.stack; delete u.level; }
+  // Already-in-warehouse flag
+  const alreadyEl = document.getElementById('e-already');
+  if(alreadyEl){
+    if(alreadyEl.checked) u.alreadyInWh = true;
+    else delete u.alreadyInWh;
+  }
   toast('Unit updated','ok');document.getElementById('float-panel').innerHTML='';closePanel();drawMap();updBadges();
 }
 
@@ -9903,8 +11376,8 @@ function doMove(id){
     if(blockers.length){
       if(!confirm(`⚠ ${blockers.length} tub${blockers.length>1?'s are':' is'} stacked on top of this one (${blockers.map(b=>b.sn||b.dealer).join(', ')}).\n\nMove them aside first or this will create a slot conflict. Continue anyway?`)) return;
     }
-    const slot = findNextSlot(v.pos);
-    if(!slot){ toast(`${v.pos} is full (${MAX_PER_CELL} max)`,'err'); return; }
+    const slot = findNextSlot(v.pos, null, u.type);
+    if(!slot){ toast(`${v.pos} is full (max ${u.type==='swim'?MAX_LEVELS_SWIM:MAX_LEVELS_HOT})`,'err'); return; }
     snapshot(`move ${u.sn||u.dealer}`);
     const old=u.pos; u.pos=v.pos; u.stack=slot.stack; u.level=slot.level;
     addAct(`${u.sn||u.dealer}: ${old} → ${v.pos} (S${slot.stack}-${LEVEL_SHORT(slot.level)})`,'var(--accent)');
@@ -10422,44 +11895,56 @@ function markAsArrived(id){
 }
 
 // Compute smart position suggestions based on item type and current warehouse occupancy.
-// Prefers empty positions in the right zone (hot tub → dealer/local, swim → swim, extra → extra),
-// then same-type stacking opportunities. Returns array of {pos, occupied, sameType, zone}.
-// Excludes drive aisles, invalid cells, and positions already at MAX_PER_CELL capacity for stacked types.
+// Prefers empty cells in the matching blueprint row (hot tub → dealer rows 4/7/8,
+// swim → row 11, extra → row 12, local → row 1), then same-type stacking opportunities.
+// Returns array of {pos, occupied, sameType, zone}.
 function getSuggestedPositions(type, n){
   const posMap = {};
   units.forEach(u => {
     if(!posMap[u.pos]) posMap[u.pos] = [];
     posMap[u.pos].push(u);
   });
-  // Type → preferred zones (in order of preference)
-  const zonePref = {
-    hot:   ['local','dealer'],
-    swim:  ['swim'],
-    extra: ['extra','misc']
-  }[type] || ['local','dealer','swim','extra','misc'];
-  // Build candidate positions in zone-preferred order
+  // Type → preferred blueprint rows (in order of preference)
+  // hot tubs → Local first (row 1), then Dealer rows (4, 7, 8), then anywhere
+  // swim spas → Swim row (11) first, then Dealer/Sw row (8), then Extra (12)
+  // extra/misc → Extra row (12), then anywhere
+  const rowPref = {
+    hot:   [1, 4, 7, 8, 12],
+    swim:  [11, 8, 12],
+    extra: [12, 1, 4, 7, 8],
+    misc:  [12, 1, 4, 7, 8]
+  }[type] || [1, 4, 7, 8, 11, 12];
+
   const positions = [];
-  zonePref.forEach(zone => {
-    const cols = Object.keys(COL_ZONE).filter(c => COL_ZONE[c] === zone).map(Number).sort((a,b)=>a-b);
-    cols.forEach(col => {
-      ROWS.forEach(row => {
-        if(row === ELEVATOR_ROW && col !== 1 && col !== 12) return;
-        if(COL_TYPE[col] === 'drive') return;
-        const pos = col + row;
-        const v = validatePos(pos);
-        if(!v.ok) return;
-        const items = posMap[pos] || [];
-        // For stacked types: skip cells already at capacity
-        if(isStackedType(type)){
-          const stackedCount = items.filter(u => isStackedType(u.type)).length;
-          if(stackedCount >= MAX_PER_CELL) return;
-        }
-        const occupied = items.length;
-        const sameType = items.length > 0 && items[0].type === type;
-        // Skip already-suggested
-        if(positions.find(p => p.pos === pos)) return;
-        positions.push({pos, occupied, sameType, zone});
-      });
+  rowPref.forEach(rowN => {
+    COLS_NEW.forEach(colLetter => {
+      if(!isSpaStorageCell(String(rowN), colLetter)) return;
+      const pos = rowN + colLetter;
+      // For swim spas: also need a valid partner cell to the right
+      if(type === 'swim'){
+        const partner = partnerCell(pos);
+        if(!partner) return;
+        const p = parsePos(partner);
+        if(!p.valid || !isSpaStorageCell(p.rowKey, p.colLetter)) return;
+        // Partner must not have hot tubs
+        const hotInPartner = (posMap[partner] || []).some(u => u.type === 'hot');
+        if(hotInPartner) return;
+      }
+      // Hot tubs can't go into a cell that's part of an existing swim pair
+      if(type === 'hot' && swimPairOwnerOf(pos)) return;
+
+      const items = posMap[pos] || [];
+      // Stacking capacity check
+      if(isStackedType(type)){
+        const maxLv = (type === 'swim') ? MAX_LEVELS_SWIM : MAX_LEVELS_HOT;
+        const stackedCount = items.filter(u => isStackedType(u.type)).length;
+        if(stackedCount >= maxLv) return;
+      }
+      const occupied = items.length;
+      const sameType = items.length > 0 && items[0].type === type;
+      // Skip already-suggested
+      if(positions.find(p => p.pos === pos)) return;
+      positions.push({pos, occupied, sameType, zone: ROW_DEFS_NEW[rowN].zone});
     });
   });
   // Sort: empty first, then same-type stacking, then alphabetical
@@ -13312,6 +14797,7 @@ function saveCreateDispatch(){
     });
     // Auto-create a marriage record so the factory request system tracks it
     if(r.marriedTo){
+      const suggestedLoc = (typeof suggestMarriageLocation === 'function') ? suggestMarriageLocation() : null;
       marriages.push({
         id: ++nid,
         spaSn: r.marriedTo,
@@ -13321,7 +14807,9 @@ function saveCreateDispatch(){
         status: 'pending',
         createdDate: toISO(),
         notes: `From BOL dispatch on ${date} (group ${groupId})`,
-        groupId
+        groupId,
+        location: suggestedLoc,   // auto-place in marriage inventory (13A or 14A)
+        locationSuggested: !!suggestedLoc
       });
     }
   });
@@ -13456,10 +14944,11 @@ function toast(msg,type='ok'){
 // ═══════════════════════════════════════════════════════════════
 let mapView = '2d';
 const W3D = {
-  COL: 12,
-  CELL_W: 4,    // meters per column
-  CELL_D: 3.2,  // meters per row depth
-  UNIT_H: 1,    // meters per stacked unit
+  COL: 16,        // blueprint v2: 16 cols (A-P)
+  ROW: 14,        // blueprint v2: 14 numbered rows (1-14)
+  CELL_W: 2.7,    // meters per column (7' ≈ 2.13m; padded slightly for visual breathing)
+  CELL_D: 2.7,    // meters per row depth (cells are 7'×7' square)
+  UNIT_H: 1,      // meters per stacked unit
   STACK_GAP: 0.15,
   COLORS: {
     hot:      0x3b82f6,
@@ -13512,15 +15001,61 @@ function setMapView(mode, btn){
   }
 }
 
-function pos2World(col,rowLetter,stackIdx){
-  const rowIdx = ROWS.indexOf(rowLetter);
-  if(rowIdx===-1) return null;
-  const totalW = W3D.COL * W3D.CELL_W;
-  const totalD = ROWS.length * W3D.CELL_D;
+// ─────────────────────────────────────────────────────────────────
+// 3D AXIS MAPPING (post-transpose — synchronized with 2D layout):
+//
+//   2D map (transposed): row 1 left → row 14 right → 15A → 15B further right
+//                        col A top, col P bottom
+//                        doors at TOP (above row labels)
+//
+//   3D world:  ROW axis → X     (row 1 at -X, 15B at +X)
+//              COL axis → Z     (col A at -Z, col P at +Z)
+//              UP       → +Y
+//              doors    → on -Z wall (col A side, "top" of 2D)
+//
+// Pos2World accepts two calling conventions:
+//   1) NEW: pos2World(pos, stackIdx)  with pos like "7B" or "15A-N"
+//   2) LEGACY: pos2World(col, rowLetter, stackIdx) for ancient callers
+//
+// 16 row-positions total (rows 1..14 + 15A + 15B) and 16 col-positions
+// (A..P). Warehouse is therefore a 16×16 square footprint in world.
+// ─────────────────────────────────────────────────────────────────
+const W3D_TOTAL_POS = 16;   // both axes have 16 cell positions
+
+function rowKeyToIndex(rowKey){
+  if(rowKey === '15A') return 14;
+  if(rowKey === '15B') return 15;
+  const n = +rowKey;
+  return (isNaN(n) || n < 1 || n > 14) ? -1 : (n - 1);
+}
+
+function pos2World(arg1, arg2, arg3){
+  let rowKey, colLetter, stackIdx;
+  if(typeof arg1 === 'string' && arg2 != null && typeof arg2 === 'number' && arg3 === undefined){
+    // NEW: (pos, stackIdx)
+    const p = parsePos(arg1);
+    if(!p.valid) return null;
+    rowKey = p.rowKey;
+    colLetter = p.colLetter;
+    stackIdx = arg2;
+  } else if(typeof arg1 === 'number' && typeof arg2 === 'string'){
+    // LEGACY: (col, rowLetter, stackIdx) — interpret as col index + row letter as row number.
+    colLetter = COLS_NEW[arg1 - 1] || 'A';
+    const mapLetterToRow = {A:1,B:2,C:3,D:4,E:5,F:6,G:7,H:8,I:9,J:10,K:11,L:12,M:13,N:14};
+    rowKey = String(mapLetterToRow[arg2] || 1);
+    stackIdx = arg3 || 0;
+  } else {
+    return null;
+  }
+  const rowIdx = rowKeyToIndex(rowKey);
+  const colIdx = COLS_NEW.indexOf(colLetter);
+  if(rowIdx === -1 || colIdx === -1) return null;
+  const totalX = W3D_TOTAL_POS * W3D.CELL_W;
+  const totalZ = W3D_TOTAL_POS * W3D.CELL_D;
   return {
-    x: (col - 0.5) * W3D.CELL_W - totalW/2,
+    x: (rowIdx + 0.5) * W3D.CELL_W - totalX/2,
     y: W3D.UNIT_H/2 + (stackIdx||0) * (W3D.UNIT_H + W3D.STACK_GAP),
-    z: (rowIdx + 0.5) * W3D.CELL_D - totalD/2
+    z: (colIdx + 0.5) * W3D.CELL_D - totalZ/2
   };
 }
 
@@ -13590,6 +15125,8 @@ function init3D(){
   build3DDockDoors(scene);
   build3DRooms(scene);
   build3DLabels(scene);
+  build3DMarriageShelf(scene);
+  build3DZoneLabels(scene);
 
   // Group for dynamic units
   const unitGroup = new THREE.Group();
@@ -13643,17 +15180,18 @@ function init3D(){
 }
 
 function build3DFloor(scene){
-  const totalW = W3D.COL * W3D.CELL_W + 6;
-  const totalD = ROWS.length * W3D.CELL_D + 10;
+  // Square 16×16 footprint after the transpose.
+  const totalX = W3D_TOTAL_POS * W3D.CELL_W + 6;
+  const totalZ = W3D_TOTAL_POS * W3D.CELL_D + 10;
   // Concrete floor
   const floorMat = new THREE.MeshStandardMaterial({color:0xb6bac3, roughness:0.95, metalness:0.02});
-  const floor = new THREE.Mesh(new THREE.PlaneGeometry(totalW, totalD), floorMat);
+  const floor = new THREE.Mesh(new THREE.PlaneGeometry(totalX, totalZ), floorMat);
   floor.rotation.x = -Math.PI/2;
   floor.receiveShadow = true;
   scene.add(floor);
 
   // Subtle grid
-  const grid = new THREE.GridHelper(Math.max(totalW,totalD), Math.max(totalW,totalD)/2, 0x404654, 0x404654);
+  const grid = new THREE.GridHelper(Math.max(totalX,totalZ), Math.max(totalX,totalZ)/2, 0x404654, 0x404654);
   grid.material.opacity = 0.18;
   grid.material.transparent = true;
   grid.position.y = 0.005;
@@ -13661,74 +15199,140 @@ function build3DFloor(scene){
 }
 
 function build3DAisles(scene){
-  // Yellow forklift aisle paint at drive cols and horizontal lanes
-  const totalW = W3D.COL * W3D.CELL_W;
-  const totalD = ROWS.length * W3D.CELL_D;
-  const yellowMat = new THREE.MeshStandardMaterial({
-    color:0xfbbf24, roughness:0.7, transparent:true, opacity:0.5
+  // After the transpose, drive ROWS are positioned at constant X (the row
+  // index) and SPAN the Z axis (across all cols A..P). Each drive row
+  // becomes a vertical stripe on the floor — matching exactly how the
+  // 2D rows-horizontal layout would lay them out.
+  const totalX = W3D_TOTAL_POS * W3D.CELL_W;
+  const totalZ = W3D_TOTAL_POS * W3D.CELL_D;
+  // Where storage cells actually live (cols A..P, no extra padding)
+  const stripeLen = totalZ - 0.6;
+  const stripeWidth = W3D.CELL_D * 0.86;
+  // Materials
+  const roadMat = new THREE.MeshStandardMaterial({
+    color:0x94a3b8, roughness:0.85, metalness:0.05, transparent:true, opacity:0.55
+  });
+  const mainRoadMat = new THREE.MeshStandardMaterial({
+    color:0x64748b, roughness:0.8, metalness:0.05, transparent:true, opacity:0.70
+  });
+  const dashMat = new THREE.MeshStandardMaterial({
+    color:0xf59e0b, roughness:0.55, metalness:0.1, transparent:true, opacity:0.95
   });
 
-  // Vertical aisles at drive columns
-  [2,3,5,8,11].forEach(col=>{
-    const x = (col - 0.5) * W3D.CELL_W - totalW/2;
-    const stripe = new THREE.Mesh(new THREE.PlaneGeometry(W3D.CELL_W*0.65, totalD-1), yellowMat);
+  // Helper: lay a yellow dashed centerline along the Z axis at constant X
+  const layDashesZ = (x, yOff, dashLen, gapLen, dashWidth) => {
+    let zStart = -totalZ/2 + 1.0;
+    const zEnd  = totalZ/2 - 1.0;
+    while(zStart < zEnd){
+      const dLen = Math.min(dashLen, zEnd - zStart);
+      const dash = new THREE.Mesh(new THREE.PlaneGeometry(dashWidth, dLen), dashMat);
+      dash.rotation.x = -Math.PI/2;
+      dash.position.set(x, yOff, zStart + dLen/2);
+      scene.add(dash);
+      zStart += dashLen + gapLen;
+    }
+  };
+  // Helper: lay a yellow dashed centerline along the X axis at constant Z
+  const layDashesX = (z, yOff, dashLen, gapLen, dashWidth) => {
+    let xStart = -totalX/2 + 1.0;
+    const xEnd  = totalX/2 - 1.0;
+    while(xStart < xEnd){
+      const dLen = Math.min(dashLen, xEnd - xStart);
+      const dash = new THREE.Mesh(new THREE.PlaneGeometry(dLen, dashWidth), dashMat);
+      dash.rotation.x = -Math.PI/2;
+      dash.position.set(xStart + dLen/2, yOff, z);
+      scene.add(dash);
+      xStart += dashLen + gapLen;
+    }
+  };
+
+  // Drive rows from blueprint: 2, 3, 5, 6, 10, 13, 14 — each a Z-axis stripe
+  [2, 3, 5, 6, 10, 13, 14].forEach(rowN => {
+    const x = ((rowN - 1) + 0.5) * W3D.CELL_W - totalX/2;
+    const stripe = new THREE.Mesh(new THREE.PlaneGeometry(stripeWidth, stripeLen), roadMat);
     stripe.rotation.x = -Math.PI/2;
     stripe.position.set(x, 0.012, 0);
     scene.add(stripe);
+    layDashesZ(x, 0.014, 0.85, 0.45, 0.14);
   });
+  // Main drive (row 9) — thicker, brighter
+  const xMain = ((9 - 1) + 0.5) * W3D.CELL_W - totalX/2;
+  const mainStripe = new THREE.Mesh(new THREE.PlaneGeometry(W3D.CELL_W * 0.95, stripeLen), mainRoadMat);
+  mainStripe.rotation.x = -Math.PI/2;
+  mainStripe.position.set(xMain, 0.013, 0);
+  scene.add(mainStripe);
+  layDashesZ(xMain, 0.015, 1.0, 0.4, 0.18);
 
-  // Horizontal lanes between rows (one per row, shown as slim stripes)
-  ROWS.forEach((row, idx)=>{
-    const z = (idx) * W3D.CELL_D - totalD/2;
-    const stripe = new THREE.Mesh(new THREE.PlaneGeometry(totalW-1, W3D.CELL_D*0.16), yellowMat);
+  // Column O is drive (except row 1) — now an X-axis stripe at constant Z
+  const colOIdx = COLS_NEW.indexOf('O');
+  if(colOIdx >= 0){
+    const z = (colOIdx + 0.5) * W3D.CELL_D - totalZ/2;
+    // Length covers rows 2..14 (skip the row-1 spa cell)
+    const xFrom = (1 + 0.5) * W3D.CELL_W - totalX/2;   // row 2
+    const xTo   = (13 + 0.5) * W3D.CELL_W - totalX/2;  // row 14
+    const xMid  = (xFrom + xTo) / 2;
+    const xLen  = xTo - xFrom + W3D.CELL_W * 0.5;
+    const stripe = new THREE.Mesh(new THREE.PlaneGeometry(xLen, W3D.CELL_D * 0.55), roadMat);
     stripe.rotation.x = -Math.PI/2;
-    stripe.position.set(0, 0.011, z);
+    stripe.position.set(xMid, 0.012, z);
     scene.add(stripe);
-  });
+    layDashesX(z, 0.014, 0.85, 0.45, 0.14);
+  }
 }
 
 function build3DWalls(scene){
-  const totalW = W3D.COL * W3D.CELL_W;
-  const totalD = ROWS.length * W3D.CELL_D;
+  // Walls along the 4 boundaries of the square 16×16 footprint.
+  // Dock doors are on the -Z wall ("front" in 2D-top orientation) and
+  // build3DDockDoors carves the openings into that wall itself, so this
+  // function only paints the other three walls — back (+Z), left (-X)
+  // and right (+X). The front wall is intentionally omitted here.
+  const totalX = W3D_TOTAL_POS * W3D.CELL_W;
+  const totalZ = W3D_TOTAL_POS * W3D.CELL_D;
   const wallMat = new THREE.MeshStandardMaterial({
     color:0x6b7280, transparent:true, opacity:0.18, roughness:0.7, side:THREE.DoubleSide
   });
   const H = 5.5;
-  // Back wall
-  const back = new THREE.Mesh(new THREE.BoxGeometry(totalW+3, H, 0.3), wallMat);
-  back.position.set(0, H/2, totalD/2 + 0.5);
+  // Back wall (+Z): far side opposite the dock doors (col P side, "bottom" in 2D)
+  const back = new THREE.Mesh(new THREE.BoxGeometry(totalX+3, H, 0.3), wallMat);
+  back.position.set(0, H/2, totalZ/2 + 0.5);
   scene.add(back);
-  // Left wall
-  const left = new THREE.Mesh(new THREE.BoxGeometry(0.3, H, totalD+3), wallMat);
-  left.position.set(-totalW/2 - 0.5, H/2, 0);
+  // Left wall (-X): where row 1 is
+  const left = new THREE.Mesh(new THREE.BoxGeometry(0.3, H, totalZ+3), wallMat);
+  left.position.set(-totalX/2 - 0.5, H/2, 0);
   scene.add(left);
-  // Right wall
-  const right = new THREE.Mesh(new THREE.BoxGeometry(0.3, H, totalD+3), wallMat);
-  right.position.set(totalW/2 + 0.5, H/2, 0);
+  // Right wall (+X): where 15A / 15B are
+  const right = new THREE.Mesh(new THREE.BoxGeometry(0.3, H, totalZ+3), wallMat);
+  right.position.set(totalX/2 + 0.5, H/2, 0);
   scene.add(right);
 }
 
 function build3DDockDoors(scene){
-  // 5 dock doors on the front wall — rendered as ACTUAL openings you can see through.
-  const totalW = W3D.COL * W3D.CELL_W;
-  const totalD = ROWS.length * W3D.CELL_D;
-  const frontZ = -totalD/2 - 0.5;
+  // 5 dock doors on the FRONT wall ("front" = -Z side after transpose,
+  // which corresponds to the TOP of the 2D map). Each door spans 2 row
+  // positions in the 2D — and in 3D that translates directly to 2 cell
+  // widths along the X axis. Door slot mapping mirrors the 2D layout:
+  //
+  //   Door #1: rows 1+2 (X idx 0+1, center idx 1.0)
+  //   Door #2: rows 5+6 (center idx 5.0)
+  //   Door #3: rows 7+8 (center idx 7.0)
+  //   Door #4: rows 9+10 (center idx 9.0)
+  //   Door #5: rows 11+12 (center idx 11.0)
+  const totalX = W3D_TOTAL_POS * W3D.CELL_W;
+  const totalZ = W3D_TOTAL_POS * W3D.CELL_D;
+  const frontZ = -totalZ/2 - 0.5;   // -Z = front (top in 2D)
 
-  // Door definitions
   const doorDefs = [
-    {cols:[1], label:'#1'},
-    {cols:[4,6], label:'#2'},
-    {cols:[7], label:'#3'},
-    {cols:[9], label:'#4'},
-    {cols:[10], label:'#5'},
+    {idxCenter: 1.0,  label:'#1'},
+    {idxCenter: 5.0,  label:'#2'},
+    {idxCenter: 7.0,  label:'#3'},
+    {idxCenter: 9.0,  label:'#4'},
+    {idxCenter: 11.0, label:'#5'},
   ];
-  // Compute opening x-ranges (sorted left→right)
-  const openings = doorDefs.map(d=>{
-    const xMin = (Math.min(...d.cols) - 1) * W3D.CELL_W - totalW/2;
-    const xMax = Math.max(...d.cols) * W3D.CELL_W - totalW/2;
-    const w = (xMax - xMin) * 0.86;
-    const x = (xMin + xMax) / 2;
-    return {label:d.label, x, w, xLeft:x - w/2, xRight:x + w/2};
+  // Each opening is 2 cells wide (since each door spans 2 row positions)
+  const openings = doorDefs.map(d => {
+    const cx = d.idxCenter * W3D.CELL_W - totalX/2;
+    const w  = W3D.CELL_W * 1.78;   // ~2 cells minus a little for jambs
+    return {label:d.label, x:cx, w, xLeft:cx - w/2, xRight:cx + w/2};
   }).sort((a,b)=>a.x - b.x);
 
   // ── Wall (built as segments AROUND each opening so you can see through) ──
@@ -13740,10 +15344,10 @@ function build3DDockDoors(scene){
   const doorH = 4.4;
   const lintelH = wallH - doorH;
   const wallExtraW = 3;
-  const wallLeft = -(totalW + wallExtraW)/2;
-  const wallRight = (totalW + wallExtraW)/2;
+  const wallLeft = -(totalX + wallExtraW)/2;
+  const wallRight = (totalX + wallExtraW)/2;
 
-  // Pillars (vertical wall sections) between/around openings — only up to door height
+  // Pillars (vertical wall sections) between/around openings — up to door height
   const pillars = [];
   let prevRight = wallLeft;
   openings.forEach(o=>{
@@ -13761,19 +15365,18 @@ function build3DDockDoors(scene){
     scene.add(seg);
   });
 
-  // Lintel — full-width horizontal beam ABOVE all the openings (closes the top of the wall)
+  // Lintel — full-width horizontal beam ABOVE all openings
   const lintel = new THREE.Mesh(
-    new THREE.BoxGeometry(totalW + wallExtraW, lintelH, wallThick),
+    new THREE.BoxGeometry(totalX + wallExtraW, lintelH, wallThick),
     wallMat
   );
   lintel.position.set(0, doorH + lintelH/2, frontZ);
   scene.add(lintel);
 
-  // ── Outdoor apron (concrete extending past the doors) ──
-  // Gives the user something realistic to see when looking out through an open door.
+  // ── Outdoor apron (concrete extending past the doors, in -Z direction) ──
   const apronMat = new THREE.MeshStandardMaterial({color:0x9ca3af, roughness:0.95});
   const apron = new THREE.Mesh(
-    new THREE.BoxGeometry(totalW + wallExtraW + 4, 0.04, 4.5),
+    new THREE.BoxGeometry(totalX + wallExtraW + 4, 0.04, 4.5),
     apronMat
   );
   apron.position.set(0, 0.02, frontZ - 2.3);
@@ -13792,35 +15395,29 @@ function build3DDockDoors(scene){
     const x = o.x;
     const w = o.w;
 
-    // Frame as 3 separate pieces (left jamb, right jamb, header) — leaves the middle hollow
+    // Frame: left jamb, right jamb, header — hollow in the middle
     const jambW = 0.22;
     const headerH = 0.32;
 
-    const jambL = new THREE.Mesh(
-      new THREE.BoxGeometry(jambW, doorH, 0.45), doorFrameMat
-    );
+    const jambL = new THREE.Mesh(new THREE.BoxGeometry(jambW, doorH, 0.45), doorFrameMat);
     jambL.position.set(x - w/2 - jambW/2, doorH/2, frontZ);
     jambL.castShadow = true;
     scene.add(jambL);
 
-    const jambR = new THREE.Mesh(
-      new THREE.BoxGeometry(jambW, doorH, 0.45), doorFrameMat
-    );
+    const jambR = new THREE.Mesh(new THREE.BoxGeometry(jambW, doorH, 0.45), doorFrameMat);
     jambR.position.set(x + w/2 + jambW/2, doorH/2, frontZ);
     jambR.castShadow = true;
     scene.add(jambR);
 
-    const header = new THREE.Mesh(
-      new THREE.BoxGeometry(w + jambW*2, headerH, 0.45), doorFrameMat
-    );
+    const header = new THREE.Mesh(new THREE.BoxGeometry(w + jambW*2, headerH, 0.45), doorFrameMat);
     header.position.set(x, doorH - headerH/2, frontZ);
     header.castShadow = true;
     scene.add(header);
 
-    // Rolled-up door drum (sits inside the opening, just below the header)
+    // Rolled-up door drum
     const drumR = 0.28;
     const drumY = doorH - headerH - drumR - 0.06;
-    const drumZ = frontZ + 0.08;
+    const drumZ = frontZ - 0.08;     // slightly OUTSIDE the wall (-Z direction)
     const drum = new THREE.Mesh(
       new THREE.CylinderGeometry(drumR, drumR, w*0.96, 18), drumMat
     );
@@ -13829,7 +15426,7 @@ function build3DDockDoors(scene){
     drum.castShadow = true;
     scene.add(drum);
 
-    // Subtle ridges on the drum (suggest rolled-up door slats)
+    // Subtle ridges on drum
     for(let r=0;r<5;r++){
       const ring = new THREE.Mesh(
         new THREE.TorusGeometry(drumR+0.005, 0.012, 6, 24), drumCapMat
@@ -13858,7 +15455,7 @@ function build3DDockDoors(scene){
     brkR.position.set(x + w*0.48 + 0.09, drumY, frontZ);
     scene.add(brkR);
 
-    // Concrete dock pad — sits ON TOP of the apron, slightly raised
+    // Concrete dock pad — sits ON the apron, in front of the door (-Z direction)
     const pad = new THREE.Mesh(new THREE.BoxGeometry(w*0.98, 0.08, 1.6), dockPadMat);
     pad.position.set(x, 0.06, frontZ - 1.0);
     pad.receiveShadow = true;
@@ -13878,91 +15475,202 @@ function build3DDockDoors(scene){
 }
 
 function build3DRooms(scene){
-  const totalW = W3D.COL * W3D.CELL_W;
-  const totalD = ROWS.length * W3D.CELL_D;
+  // After the transpose, "15A" and "15B" sit at the +X (right) end of
+  // the warehouse. Per Alberto's 2D spec the Office's label appears at
+  // the 15A column slot and the Bathroom at 15B — so place them along
+  // the FRONT wall (-Z side) at those row-index X positions.
+  const totalX = W3D_TOTAL_POS * W3D.CELL_W;
+  const totalZ = W3D_TOTAL_POS * W3D.CELL_D;
+  const frontZ = -totalZ/2 - 0.5;
+  // X positions corresponding to 15A (idx 14) and 15B (idx 15)
+  const x15A = (14 + 0.5) * W3D.CELL_W - totalX/2;
+  const x15B = (15 + 0.5) * W3D.CELL_W - totalX/2;
+  // Place the room "outside" the wall a bit (-Z direction) so it reads
+  // as an annexed room jutting into the apron, not inside storage.
+  const roomZ = frontZ - W3D.CELL_D * 0.55;
 
-  // Office at col 11 (front area)
+  // ── Office (15A) ──
   const officeMat = new THREE.MeshStandardMaterial({
     color:0xfde68a, roughness:0.6, transparent:true, opacity:0.85
   });
   const office = new THREE.Mesh(
-    new THREE.BoxGeometry(W3D.CELL_W*0.85, 3.2, W3D.CELL_D*0.7),
+    new THREE.BoxGeometry(W3D.CELL_W*0.85, 3.2, W3D.CELL_D*0.85),
     officeMat
   );
-  const op = pos2World(11, 'A', 0);
-  office.position.set(op.x, 1.6, op.z - W3D.CELL_D/2 - 0.4);
+  office.position.set(x15A, 1.6, roomZ);
   office.castShadow = true;
   scene.add(office);
   const ol = makeTextSprite('OFFICE',{fontSize:34,color:'#854d0e',bg:'rgba(254,243,199,.95)'});
-  ol.position.set(op.x, 3.6, op.z - W3D.CELL_D/2 - 0.4);
+  ol.position.set(x15A, 3.6, roomZ);
   ol.scale.multiplyScalar(0.5);
   scene.add(ol);
 
-  // Bathroom at col 12
+  // ── Bathroom (15B) ──
   const bathMat = new THREE.MeshStandardMaterial({
     color:0xbbf7d0, roughness:0.6, transparent:true, opacity:0.85
   });
   const bath = new THREE.Mesh(
-    new THREE.BoxGeometry(W3D.CELL_W*0.85, 3.2, W3D.CELL_D*0.7),
+    new THREE.BoxGeometry(W3D.CELL_W*0.85, 3.2, W3D.CELL_D*0.85),
     bathMat
   );
-  const bp = pos2World(12, 'A', 0);
-  bath.position.set(bp.x, 1.6, bp.z - W3D.CELL_D/2 - 0.4);
+  bath.position.set(x15B, 1.6, roomZ);
   bath.castShadow = true;
   scene.add(bath);
   const bl = makeTextSprite('BATH',{fontSize:34,color:'#166534',bg:'rgba(187,247,208,.95)'});
-  bl.position.set(bp.x, 3.6, bp.z - W3D.CELL_D/2 - 0.4);
+  bl.position.set(x15B, 3.6, roomZ);
   bl.scale.multiplyScalar(0.5);
   scene.add(bl);
 
-  // Elevators at row N, cols 1 and 12
+  // ── Elevator 1 — rows 1-3 (X idx 0-2) × cols K-N (Z idx 10-13) ──
   const elevMat = new THREE.MeshStandardMaterial({
     color:0x64748b, roughness:0.4, metalness:0.4
   });
-  [1, 12].forEach(col=>{
+  const e1TL = pos2World('1K', 0);
+  const e1BR = pos2World('3N', 0);
+  if(e1TL && e1BR){
+    const cx = (e1TL.x + e1BR.x) / 2;
+    const cz = (e1TL.z + e1BR.z) / 2;
+    const ew = Math.abs(e1BR.x - e1TL.x) + W3D.CELL_W;
+    const ed = Math.abs(e1BR.z - e1TL.z) + W3D.CELL_D;
     const elev = new THREE.Mesh(
-      new THREE.BoxGeometry(W3D.CELL_W*0.78, 3.5, W3D.CELL_D*0.78),
+      new THREE.BoxGeometry(ew * 0.88, 3.5, ed * 0.88),
       elevMat
     );
-    const ep = pos2World(col, 'N', 0);
-    elev.position.set(ep.x, 1.75, ep.z);
+    elev.position.set(cx, 1.75, cz);
     elev.castShadow = true;
     elev.receiveShadow = true;
     scene.add(elev);
-    // Elevator doors as darker panel
-    const door = new THREE.Mesh(
-      new THREE.BoxGeometry(W3D.CELL_W*0.5, 2.2, 0.06),
-      new THREE.MeshStandardMaterial({color:0x334155, roughness:0.2, metalness:0.8})
-    );
-    door.position.set(ep.x, 1.1, ep.z - W3D.CELL_D*0.39 - 0.04);
-    scene.add(door);
-    const lbl = makeTextSprite('ELEV',{fontSize:30,color:'#fff',bg:'rgba(51,65,85,.92)'});
-    lbl.position.set(ep.x, 4, ep.z);
-    lbl.scale.multiplyScalar(0.45);
+    const lbl = makeTextSprite('ELEVATOR 1',{fontSize:30,color:'#fff',bg:'rgba(51,65,85,.92)'});
+    lbl.position.set(cx, 4, cz);
+    lbl.scale.multiplyScalar(0.7);
+    scene.add(lbl);
+  }
+}
+
+function build3DLabels(scene){
+  // Row labels along the FRONT edge (-Z side) — they appear at the TOP
+  // of the warehouse in the default camera view, exactly like in the
+  // transposed 2D map. Col labels along the LEFT edge (-X side).
+  const totalX = W3D_TOTAL_POS * W3D.CELL_W;
+  const totalZ = W3D_TOTAL_POS * W3D.CELL_D;
+
+  // Row numbers 1-14 at varying X, constant Z (just outside the front wall)
+  ROW_NUMBERS_NEW.forEach(rowN => {
+    const x = ((rowN - 1) + 0.5) * W3D.CELL_W - totalX/2;
+    const lbl = makeTextSprite(String(rowN), {fontSize:60, color:'#475569', bg:'rgba(255,255,255,.92)'});
+    lbl.position.set(x, 0.6, -totalZ/2 - 2.7);
+    lbl.scale.multiplyScalar(0.7);
+    scene.add(lbl);
+  });
+  // Cover row labels 15A and 15B (further +X)
+  ['15A', '15B'].forEach((rk, i) => {
+    const x = ((14 + i) + 0.5) * W3D.CELL_W - totalX/2;
+    const lbl = makeTextSprite(rk, {fontSize:42, color:'#1e3a8a', bg:'rgba(219,234,254,.95)'});
+    lbl.position.set(x, 0.6, -totalZ/2 - 2.7);
+    lbl.scale.multiplyScalar(0.6);
+    scene.add(lbl);
+  });
+
+  // Column letters A-P at varying Z, constant X (just outside left wall)
+  COLS_NEW.forEach((colLetter, idx) => {
+    const z = (idx + 0.5) * W3D.CELL_D - totalZ/2;
+    const lbl = makeTextSprite(colLetter, {fontSize:50, color:'#475569', bg:'rgba(255,255,255,.92)'});
+    lbl.position.set(-totalX/2 - 2.5, 0.6, z);
+    lbl.scale.multiplyScalar(0.55);
     scene.add(lbl);
   });
 }
 
-function build3DLabels(scene){
-  // Row letters (left side) and column numbers (front edge)
-  const totalW = W3D.COL * W3D.CELL_W;
-  const totalD = ROWS.length * W3D.CELL_D;
-
-  ROWS.forEach((row, idx)=>{
-    const z = (idx + 0.5) * W3D.CELL_D - totalD/2;
-    const lbl = makeTextSprite(row,{fontSize:60,color:'#475569',bg:'rgba(255,255,255,.92)'});
-    lbl.position.set(-totalW/2 - 2.5, 0.6, z);
-    lbl.scale.multiplyScalar(0.7);
-    scene.add(lbl);
+// Marriage Shelf — 3D fixture for the merged MINV position. Lives along
+// the FRONT wall (-Z) between Door #5 and the Office, at the X position
+// corresponding to rows 13-14 (the old 13A/14A semantic spot).
+function build3DMarriageShelf(scene){
+  const totalX = W3D_TOTAL_POS * W3D.CELL_W;
+  const totalZ = W3D_TOTAL_POS * W3D.CELL_D;
+  // Center between rows 13 and 14 along X (X idx 12.5)
+  const x = (12.5 + 0.5) * W3D.CELL_W - totalX/2;
+  // Sit it inside the warehouse, just behind the front wall and to the
+  // west of the office. Slightly inside col A so it's clearly visible.
+  const z = -totalZ/2 + W3D.CELL_D * 0.7;
+  // Pink shelf top
+  const topMat = new THREE.MeshStandardMaterial({color:0xdb2777, roughness:0.4, metalness:0.1});
+  const top = new THREE.Mesh(
+    new THREE.BoxGeometry(W3D.CELL_W * 1.8, 0.1, W3D.CELL_D * 0.9),
+    topMat
+  );
+  top.position.set(x, 1.0, z);
+  top.castShadow = true;
+  top.receiveShadow = true;
+  scene.add(top);
+  // Legs
+  const legMat = new THREE.MeshStandardMaterial({color:0x831843, roughness:0.6, metalness:0.3});
+  const legGeo = new THREE.BoxGeometry(0.12, 1.0, 0.12);
+  const legOffs = [
+    [ W3D.CELL_W*0.85,  W3D.CELL_D*0.4],
+    [ W3D.CELL_W*0.85, -W3D.CELL_D*0.4],
+    [-W3D.CELL_W*0.85,  W3D.CELL_D*0.4],
+    [-W3D.CELL_W*0.85, -W3D.CELL_D*0.4],
+  ];
+  legOffs.forEach(([dx, dz])=>{
+    const leg = new THREE.Mesh(legGeo, legMat);
+    leg.position.set(x + dx, 0.5, z + dz);
+    leg.castShadow = true;
+    scene.add(leg);
   });
+  // Accessory boxes representing live marriages
+  const accMat = new THREE.MeshStandardMaterial({color:0xf9a8d4, roughness:0.5});
+  const liveCount = (typeof marriages !== 'undefined' && Array.isArray(marriages))
+    ? marriages.filter(m => m.location === 'MINV' && m.status !== 'fulfilled' && m.status !== 'cancelled').length
+    : 0;
+  const showBoxes = Math.min(liveCount, 6);
+  for(let i = 0; i < showBoxes; i++){
+    const box = new THREE.Mesh(
+      new THREE.BoxGeometry(0.45, 0.32, 0.45),
+      accMat
+    );
+    box.position.set(
+      x - W3D.CELL_W*0.55 + (i % 3)*0.55,
+      1.22,
+      z + (Math.floor(i/3) - 0.5) * 0.55
+    );
+    box.castShadow = true;
+    scene.add(box);
+  }
+  // Label
+  const lbl = makeTextSprite('💍 MARRIAGE', {fontSize:32, color:'#fff', bg:'rgba(219,39,119,.92)'});
+  lbl.position.set(x, 2.1, z);
+  lbl.scale.multiplyScalar(0.5);
+  scene.add(lbl);
+}
 
-  for(let c=1;c<=12;c++){
-    const x = (c - 0.5) * W3D.CELL_W - totalW/2;
-    const lbl = makeTextSprite(String(c),{fontSize:50,color:'#475569',bg:'rgba(255,255,255,.92)'});
-    lbl.position.set(x, 0.6, totalD/2 + 2.2);
+// Zone labels — floating tags at the FRONT edge of each spa row,
+// matching the 2D row-label badges (LOCAL / DEALERS / SWIM / EXTRA /
+// COVERS). Positioned just inside the warehouse so they hover above the
+// front-edge of their row.
+function build3DZoneLabels(scene){
+  const totalX = W3D_TOTAL_POS * W3D.CELL_W;
+  const totalZ = W3D_TOTAL_POS * W3D.CELL_D;
+  const zones = [
+    { rowN: 1,  text:'LOCAL',   fg:'#92400e', bg:'rgba(254,243,199,.95)' },
+    { rowN: 4,  text:'DEALERS', fg:'#1e3a8a', bg:'rgba(219,234,254,.95)' },
+    { rowN: 7,  text:'DEALERS', fg:'#1e3a8a', bg:'rgba(219,234,254,.95)' },
+    { rowN: 8,  text:'DEALERS', fg:'#1e3a8a', bg:'rgba(219,234,254,.95)' },
+    { rowN: 11, text:'SWIM',    fg:'#065f46', bg:'rgba(209,250,229,.95)' },
+    { rowN: 12, text:'EXTRA',   fg:'#5b21b6', bg:'rgba(237,233,254,.95)' },
+  ];
+  zones.forEach(z => {
+    const x = ((z.rowN - 1) + 0.5) * W3D.CELL_W - totalX/2;
+    const lbl = makeTextSprite(z.text, {fontSize:36, color:z.fg, bg:z.bg});
+    lbl.position.set(x, 1.5, -totalZ/2 - 4.2);
     lbl.scale.multiplyScalar(0.55);
     scene.add(lbl);
-  }
+  });
+  // Cover hileras zone tag (over 15A / 15B columns)
+  const x15 = (14.5 + 0.5) * W3D.CELL_W - totalX/2;
+  const lbl15 = makeTextSprite('COVERS', {fontSize:36, color:'#1e3a8a', bg:'rgba(219,234,254,.95)'});
+  lbl15.position.set(x15, 1.5, -totalZ/2 - 4.2);
+  lbl15.scale.multiplyScalar(0.55);
+  scene.add(lbl15);
 }
 
 function makeUnitPlacard3D(dealer, sn, type, faceW){
@@ -14125,21 +15833,25 @@ function update3D(){
   // Group units by position
   const byPos = {};
   units.forEach(u=>{
-    const m = String(u.pos||'').match(/^(\d+)([A-N])$/i);
-    if(!m) return;
+    // Accept both standard cells ("7B", "12P") and cover cells ("15A-A", "15B-P")
+    const pos = String(u.pos || '');
+    const std   = pos.match(/^(\d+)([A-P])$/i);
+    const cover = pos.match(/^15[AB]-[A-P]$/i);
+    if(!std && !cover) return;
     if(!byPos[u.pos]) byPos[u.pos] = [];
     byPos[u.pos].push(u);
   });
 
   // Render each stack
   Object.keys(byPos).forEach(pos=>{
-    const m = pos.match(/^(\d+)([A-N])$/i);
-    const col = parseInt(m[1]);
-    const row = m[2].toUpperCase();
+    const parsed = parsePos(pos);
+    if(!parsed.valid) return;
     const stack = byPos[pos];
 
     stack.forEach((unit, idx)=>{
-      const w3 = pos2World(col, row, idx);
+      // Stack index = level - 1 (so BTM=0, MID=1, TOP=2)
+      const stackIdx = ((unit.level || 1) - 1);
+      const w3 = pos2World(pos, stackIdx);
       if(!w3) return;
 
       // Base dimensions
@@ -14352,14 +16064,10 @@ function focusOn3DSns(sns){
   sns.forEach(targetSn=>{
     const u = units.find(x=>String(x.sn)===String(targetSn));
     if(!u) return;
-    const m = String(u.pos||'').match(/^(\d+)([A-N])$/i);
-    if(!m) return;
-    const col = parseInt(m[1]);
-    const row = m[2].toUpperCase();
-    // Find this unit's stack index (its order within others at same pos)
-    const same = units.filter(x=>x.pos === u.pos);
-    const stackIdx = same.findIndex(x=>String(x.sn)===String(u.sn));
-    const w3 = pos2World(col, row, Math.max(0,stackIdx));
+    const parsed = parsePos(u.pos||'');
+    if(!parsed.valid || parsed.rowKey.startsWith('15')) return;
+    const stackIdx = ((u.level || 1) - 1);
+    const w3 = pos2World(u.pos, Math.max(0, stackIdx));
     if(w3) positions.push(w3);
   });
   if(!positions.length) return;
@@ -16029,6 +17737,7 @@ function addFactoryAccessory(){
   // If a marriage was specified, also create the marriage record — look up dealer from any source
   if(marsn){
     const spa = findSpaBySn(marsn);
+    const suggestedLoc = (typeof suggestMarriageLocation === 'function') ? suggestMarriageLocation() : null;
     marriages.push({
       id: ++nid,
       spaSn: marsn,
@@ -16038,9 +17747,11 @@ function addFactoryAccessory(){
       accessoryQty: qty,
       status: 'pending',
       notes,
-      created: toISO()
+      created: toISO(),
+      location: suggestedLoc,    // auto-place in marriage inventory (13A or 14A)
+      locationSuggested: !!suggestedLoc
     });
-    addAct(`Marriage created: ${name} → S/N ${marsn}${spa?` (${spa.dealer})`:''}`,'var(--red)');
+    addAct(`Marriage created: ${name} → S/N ${marsn}${spa?` (${spa.dealer})`:''}${suggestedLoc?` · auto-staged at ${suggestedLoc}`:''}`,'var(--red)');
   } else {
     addAct(`Added accessory "${name}" to factory`,'var(--orange)');
   }
@@ -16734,9 +18445,12 @@ function addMarriage(){
   marriages.push({
     id:++nid, spaSn:sn, spaDealer:resolvedDealer,
     accessoryId:accId, accessoryName:name, accessoryQty:qty,
-    status:'pending', notes, created:toISO()
+    status:'pending', notes, created:toISO(),
+    location: (typeof suggestMarriageLocation === 'function') ? suggestMarriageLocation() : null,
+    locationSuggested: true
   });
-  addAct(`Marriage created: ${name} → S/N ${sn}${resolvedDealer?` (${resolvedDealer})`:''}`,'var(--red)');
+  const lastM = marriages[marriages.length - 1];
+  addAct(`Marriage created: ${name} → S/N ${sn}${resolvedDealer?` (${resolvedDealer})`:''}${lastM.location?` · auto-staged at ${lastM.location}`:''}`,'var(--red)');
   toast('Marriage created','ok');
   // Close both the inline panel AND the overlay if open
   const inlinePanel = document.getElementById('marriage-float-panel');
@@ -18222,11 +19936,24 @@ function _stateSig(){
   try {
     // Cheap concatenation — no JSON.stringify of huge photo arrays.
     // Each item contributes the fields that ANY user action can change.
-    const u = units.map(x => `${x.id}:${x.pos||''}:${x.sn||''}:${x.dealer||''}:${x.color||''}:${x.model||''}:${(x.photos||[]).length}:${x.notes||''}:${x.spaSn||''}`).join(',');
+    //
+    // ── BUG FIX (audit) ──
+    // Previously this signature only tracked pos/sn/dealer/color/model/
+    // notes/photos. Edits that ONLY changed type, level, stack, entry, or
+    // alreadyInWh were silently dropped: the signature matched the prior
+    // call, saveState short-circuited, and the change never made it to
+    // localStorage or Firebase. Tracking those fields here closes the gap.
+    const u = units.map(x => [
+      x.id, x.pos||'', x.sn||'', x.dealer||'', x.type||'',
+      x.color||'', x.model||'', x.entry||'',
+      x.stack==null?'':x.stack, x.level==null?'':x.level,
+      x.alreadyInWh?'1':'',
+      (x.photos||[]).length, x.notes||'', x.spaSn||''
+    ].join(':')).join(',');
     const d = dispatched.map(x => `${x.id}:${x.status||''}:${x.deliveredAt||''}:${(x.photos||[]).length}:${x.dealer||''}`).join(',');
     const i = incoming.map(x => `${x.id}:${x.status||''}:${(x.items||[]).length}:${(x.photos||[]).length}:${x.dealer||''}`).join(',');
     const f = factory.map(x => `${x.id}:${x.trackingState||''}${x.onHold?'H':''}:${(x.trackingHistory||[]).length}:${(x.photos||[]).length}:${x.sn||''}:${x.dealer||''}`).join(',');
-    const mr = marriages.map(x => `${x.id}:${x.status||''}:${x.spaSn||''}:${x.deliveredAt||''}`).join(',');
+    const mr = marriages.map(x => `${x.id}:${x.status||''}:${x.spaSn||''}:${x.deliveredAt||''}:${x.location||''}`).join(',');
     const dr = dispatchRequests.map(x => `${x.id}:${x.status||''}`).join(',');
     const m = materials.map(x => `${x.id}:${x.qty||0}:${x.pos||''}:${(x.photos||[]).length}:${x.linkedUnitId||''}`).join(',');
     const c = coverInventory.map(x => `${x.id}:${x.qty||0}:${(x.pending||[]).length}`).join(',');
@@ -18811,6 +20538,7 @@ function importBackup(e){
       marriages = Array.isArray(s.marriages) ? s.marriages : [];
       dispatchRequests = Array.isArray(s.dispatchRequests) ? s.dispatchRequests : [];
       if(s.cfg && typeof s.cfg === 'object') cfg = mergeCfgPreservingPins(cfg, s.cfg);
+      migratePositionsToBlueprint();
       migrateUnitsToStacks();
       saveState();
       toast(`Restored ${units.length} units`, 'ok');
@@ -18877,6 +20605,7 @@ async function wipeInventoryData(){
 
 // ── BOOT ──
 loadState();
+migratePositionsToBlueprint();   // ONE-TIME: remap legacy "colNum + rowLetter" → blueprint "rowNum + colLetter"
 migrateUnitsToStacks();   // assign stack/level to legacy units
 // Ensure all roles have a PIN entry — must run after loadState so cfg exists
 try { ensureRolePinsInitialized(); } catch(e){ console.warn('[pins]', e); }
