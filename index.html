@@ -80,13 +80,17 @@ body{background:var(--bg);color:var(--text1);font-family:var(--font);font-size:1
 .shell{display:flex;min-height:100vh}
 
 /* ── SIDEBAR ── */
-.sidebar{width:224px;flex-shrink:0;background:var(--sidebar);display:flex;flex-direction:column;position:fixed;top:0;left:0;height:100vh;z-index:200}
-.logo-area{padding:18px 16px 14px;border-bottom:1px solid rgba(255,255,255,.06)}
+.sidebar{width:224px;flex-shrink:0;background:var(--sidebar);display:flex;flex-direction:column;position:fixed;top:0;left:0;height:100vh;height:100dvh;z-index:200;overflow:hidden}
+.logo-area{padding:18px 16px 14px;border-bottom:1px solid rgba(255,255,255,.06);flex-shrink:0}
 .logo-row{display:flex;align-items:center;gap:10px}
 .logo-mark{width:35px;height:35px;background:var(--accent);border-radius:8px;display:flex;align-items:center;justify-content:center;flex-shrink:0;box-shadow:0 3px 10px rgba(26,86,219,.4)}
 .logo-name{font-size:14px;font-weight:700;color:#fff}
 .logo-sub{font-size:9px;color:rgba(255,255,255,.28);letter-spacing:.1em;text-transform:uppercase;margin-top:1px}
-.nav{padding:10px 9px;flex:1;overflow-y:auto}
+/* .nav: min-height:0 is REQUIRED for flex item with overflow to actually scroll
+   on iOS Safari (default min-height is auto which prevents shrinking below
+   content size, breaking overflow:auto). -webkit-overflow-scrolling enables
+   momentum scroll. overscroll-behavior prevents scroll chaining to body. */
+.nav{padding:10px 9px;flex:1 1 0;min-height:0;overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain}
 .nav-sec{font-size:9px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:rgba(255,255,255,.2);padding:0 8px;margin:14px 0 4px}
 .nav-sec:first-child{margin-top:2px}
 .ni{display:flex;align-items:center;gap:9px;padding:8px 11px;border-radius:7px;cursor:pointer;transition:all .14s;color:rgba(255,255,255,.46);font-size:12px;font-weight:400;margin-bottom:1px;position:relative;user-select:none}
@@ -99,7 +103,7 @@ body{background:var(--bg);color:var(--text1);font-family:var(--font);font-size:1
 .nb.amber{background:rgba(217,119,6,.7)}
 .nb.green{background:rgba(13,158,120,.6)}
 .nb.red{background:rgba(220,38,38,.7)}
-.sb-foot{padding:10px 12px;border-top:1px solid rgba(255,255,255,.05)}
+.sb-foot{padding:10px 12px;border-top:1px solid rgba(255,255,255,.05);flex-shrink:0}
 .sb-ver{font-family:var(--mono);font-size:9px;color:rgba(255,255,255,.16);text-align:center}
 
 /* ── ROLE SELECTOR (sidebar) ── */
@@ -327,13 +331,14 @@ body.role-transit .scan-load-btn{
 
 /* ── SIDEBAR USER FOOTER ── */
 .sidebar-user-footer {
-  margin-top: auto;
+  margin-top: 0;          /* parent of .nav is flex column with flex:1 nav — user-footer naturally sits after nav now */
   padding: 12px;
   background: rgba(255,255,255,.04);
   border-top: 1px solid rgba(255,255,255,.08);
   display: flex; align-items: center; gap: 10px;
   cursor: pointer;
   transition: background .15s;
+  flex-shrink: 0;         /* never compress when nav grows */
 }
 .sidebar-user-footer:hover {
   background: rgba(255,255,255,.08);
@@ -1908,7 +1913,7 @@ tbody tr:hover td{background:var(--bg3)}
     border-color: rgba(255, 255, 255, 0.1);
   }
 
-  /* ── Sync badge group: legacy #sync-status-badge / #sync-diag-btn removed in v3.96 ── */
+  /* ── Sync badge group: legacy #sync-status-badge / #sync-diag-btn removed in v3.97 ── */
 
   /* ── Auth badge ── */
   #fb-auth-badge { flex-shrink: 0; }
@@ -2230,7 +2235,7 @@ tbody tr:hover td{background:var(--bg3)}
     display: none !important;
   }
 
-  /* Legacy #sync-status-group / #sync-status-badge / #sync-diag-btn removed in v3.96
+  /* Legacy #sync-status-group / #sync-status-badge / #sync-diag-btn removed in v3.97
      The fb-auth-badge handles everything now. */
 
   /* ═══ NOTIFICATION BANNER (the "2 married spas waiting" pill) ═══
@@ -3309,32 +3314,34 @@ body.dark-mode .mar-card-track {
       <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="7" width="10" height="7" rx="1.5"/><path d="M5 7V5a3 3 0 016 0v2"/><circle cx="8" cy="10.5" r="1"/></svg>
       Role PINs
     </div>
-
-    <!-- User identity footer — shows current user + tap to switch -->
-    <div class="sidebar-user-footer" id="sidebar-user-footer" onclick="showWelcomeScreen()" title="Tap to switch user">
-      <div class="sidebar-user-avatar" id="sidebar-user-avatar" style="background:#64748b">?</div>
-      <div class="sidebar-user-info">
-        <div class="sidebar-user-name" id="sidebar-user-name">Not signed in</div>
-        <div class="sidebar-user-role" id="sidebar-user-role">Tap to choose</div>
-      </div>
-      <div class="sidebar-user-switch" title="Switch user">⇄</div>
-    </div>
-
-    <!-- Compact role indicator — only shown to admins for debugging -->
-    <div class="role-selector" id="role-selector-debug" style="display:none">
-      <div class="role-label">Viewing as</div>
-      <select class="role-sel" onchange="setRole(this.value)" aria-label="Switch role view">
-        <option value="admin">🔑 Admin (full access)</option>
-        <option value="warehouse">🏭 Warehouse Manager</option>
-        <option value="factory">🚚 Factory</option>
-        <option value="transit">🚛 Truck / Transit</option>
-        <option value="organizer">📅 Dispatch Organizer</option>
-        <option value="viewer">👁 Viewer (read-only · request only)</option>
-      </select>
-      <div class="role-current"><span id="role-indicator">Admin</span></div>
-    </div>
   </div>
-  <div class="sb-foot"><div class="sb-ver">v3.96 · <span id="live-date"></span></div></div>
+
+  <!-- User identity footer — pinned BELOW the scrollable nav. Was previously
+       inside .nav which broke margin-top:auto and forced user to scroll past
+       all items to switch user on small screens. -->
+  <div class="sidebar-user-footer" id="sidebar-user-footer" onclick="showWelcomeScreen()" title="Tap to switch user">
+    <div class="sidebar-user-avatar" id="sidebar-user-avatar" style="background:#64748b">?</div>
+    <div class="sidebar-user-info">
+      <div class="sidebar-user-name" id="sidebar-user-name">Not signed in</div>
+      <div class="sidebar-user-role" id="sidebar-user-role">Tap to choose</div>
+    </div>
+    <div class="sidebar-user-switch" title="Switch user">⇄</div>
+  </div>
+
+  <!-- Compact role indicator — only shown to admins for debugging -->
+  <div class="role-selector" id="role-selector-debug" style="display:none">
+    <div class="role-label">Viewing as</div>
+    <select class="role-sel" onchange="setRole(this.value)" aria-label="Switch role view">
+      <option value="admin">🔑 Admin (full access)</option>
+      <option value="warehouse">🏭 Warehouse Manager</option>
+      <option value="factory">🚚 Factory</option>
+      <option value="transit">🚛 Truck / Transit</option>
+      <option value="organizer">📅 Dispatch Organizer</option>
+      <option value="viewer">👁 Viewer (read-only · request only)</option>
+    </select>
+    <div class="role-current"><span id="role-indicator">Admin</span></div>
+  </div>
+  <div class="sb-foot"><div class="sb-ver">v3.97 · <span id="live-date"></span></div></div>
 </nav>
 
 <!-- MAIN -->
@@ -4412,7 +4419,7 @@ let _fbInitAttempts = 0;
 //   /app_version/current  (in Firebase console, manually, OR call
 //   pushVersionToFirebase() from the Admin console at deploy time)
 // ══════════════════════════════════════════════════════════════════
-const APP_VERSION = 'v3.96';
+const APP_VERSION = 'v3.97';
 window.APP_VERSION = APP_VERSION;
 
 let _updateBannerShown = false;
@@ -6317,7 +6324,7 @@ function renderBottomNav(){
   const activeView = document.querySelector('.view.active');
   const activePage = activeView ? (activeView.id || '').replace(/^view-/, '') : (ROLES[role]?.defaultPage || 'dashboard');
   // Compute notification counts per nav target
-  const marPending = Array.isArray(marriages) ? marriages.filter(m => m.status === 'pending').length : 0;
+  const marPending = Array.isArray(marriages) ? marriages.filter(isMarriageActive).length : 0;
   const fctReady = Array.isArray(factory) ? factory.filter(f => f.trackingState === 'ready-to-ship').length : 0;
   const inTransit = Array.isArray(factory) ? factory.filter(f => f.trackingState === 'in-transit').length : 0;
   const reqOpen = Array.isArray(dispatchRequests) ? dispatchRequests.filter(r => r.status === 'open' || r.status === 'pending').length : 0;
@@ -7067,10 +7074,26 @@ const typeColor = t => ({hot:'var(--accent)',swim:'var(--teal)',extra:'var(--pur
 // ═══════════════════════════════════════════════════════
 // MARRIAGE HELPERS
 // ═══════════════════════════════════════════════════════
-// Get all pending marriages for a given S/N (still waiting on factory)
+// Marriage status state machine (v3.97+):
+//   'pending'        — created, accessory at factory, Factory hasn't acted yet
+//   'ready-to-ship'  — Factory pressed "Ship to WH", waiting for Truck scan
+//   'in-transit'     — Truck scanned the accessory, on its way to warehouse
+//   'delivered'      — Warehouse received the accessory (Receiving accepted)
+//   'completed'      — Spa has also arrived; marriage finalized at dispatch
+//   'split-pending'  — legacy: scheduled dispatch missing the accessory
+//
+// "Active" / "not yet delivered" = pending | ready-to-ship | in-transit.
+// These all mean Marriages crew is still waiting for the accessory to arrive.
+function isMarriageActive(m){
+  if(!m || !m.status) return false;
+  return m.status === 'pending' || m.status === 'ready-to-ship' || m.status === 'in-transit' || m.status === 'split-pending';
+}
+
+// Get all active marriages for a given S/N (still waiting on accessory arrival).
+// Includes pending + ready-to-ship + in-transit — anything not yet delivered.
 function marriagesPendingForSn(sn){
   if(!sn) return [];
-  return marriages.filter(m => m.spaSn===sn && m.status==='pending');
+  return marriages.filter(m => m.spaSn===sn && isMarriageActive(m));
 }
 // Get all delivered (but not yet dispatched) marriages for a given S/N
 function marriagesDeliveredForSn(sn){
@@ -7494,7 +7517,7 @@ function updBadges(){
   if(nbRec){ nbRec.textContent = recPending || ''; nbRec.className = 'nb' + (recPending>0?' red':''); }
   // Factory & marriage badges
   const fctCount = factory.length;
-  const marPending = marriages.filter(m=>m.status==='pending').length;
+  const marPending = marriages.filter(isMarriageActive).length;
   document.getElementById('nb-fct').textContent = fctCount || '';
   document.getElementById('nb-mar').textContent = marPending || '';
   document.getElementById('nb-mar').className = 'nb'+(marPending>0?' red':'');
@@ -7667,7 +7690,7 @@ function renderDash(){
     // Quick summary — what's pressing today
     const summary = document.getElementById('greeting-summary');
     if(summary){
-      const u = units.length, p = factory.length, t = marriages.filter(m=>m.status==='pending').length;
+      const u = units.length, p = factory.length, t = marriages.filter(isMarriageActive).length;
       const today = new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' });
       const parts = [`${today}`];
       if(t > 0) parts.push(`${t} marriage${t>1?'s':''} pending`);
@@ -7687,7 +7710,7 @@ function renderDash(){
   const total = storageCols * storageRows;
   const pend=incoming.filter(i=>i.status==='pending').length;
   const pct=n=>units.length?Math.round(n/units.length*100):0;
-  const marPending = marriages.filter(m=>m.status==='pending').length;
+  const marPending = marriages.filter(isMarriageActive).length;
   const fctCount = factory.length;
   // Stack capacity — count cells full, near-full
   const cellsWithSpas = [...new Set(units.filter(u=>isStackedType(u.type)).map(u=>u.pos))];
@@ -10595,13 +10618,14 @@ function renderMarriageOverlay(){
   svg.setAttribute('viewBox', `0 0 ${rect.width} ${rect.height}`);
   svg.setAttribute('width', rect.width);
   svg.setAttribute('height', rect.height);
-  // Active marriages we care about
+  // Active marriages we care about — any non-delivered, non-completed marriage
+  // tied to a spa that's in the warehouse (we draw a hint line from the spa
+  // cell back toward the factory area so the marriage flow is visible on the floor map)
   const visible = marriages.filter(m =>
-    (m.status === 'pending' || m.status === 'split-pending')
-    && units.some(u => u.sn === m.spaSn)
+    (isMarriageActive(m)) && units.some(u => u.sn === m.spaSn)
   );
   // Note: delivered marriages already show via the green marriage-flag badge on the cell itself,
-  // so we don't need overlay lines for them. Only pending (going to factory) + split-pending (going to dealer).
+  // so we don't need overlay lines for them. Only active (going to factory) + split-pending (going to dealer).
   if(visible.length === 0){
     svg.innerHTML = '';
     return;
@@ -10627,16 +10651,20 @@ function renderMarriageOverlay(){
   visible.forEach(m => {
     const unit = units.find(u => u.sn === m.spaSn);
     if(!unit) return;
-    if(m.status === 'pending'){
+    if(m.status === 'pending' || m.status === 'ready-to-ship' || m.status === 'in-transit'){
       // Small amber dot at top-left of cell — line goes UP to the top of the map (toward factory)
-      // Subtle arc — no text overlapping cell content
+      // Color shifts as marriage progresses: amber → blue → teal
+      // pending = amber (waiting at factory), ready-to-ship = blue (truck pickup), in-transit = teal (on the way)
       const dot = cellEdge(unit.pos, 'top-left');
       if(!dot) return;
-      const tooltip = `Pending: ${m.accessoryName} — waiting at factory`;
+      const stateColor = m.status === 'pending' ? '#d97706' : m.status === 'ready-to-ship' ? '#1e40af' : '#0d9e78';
+      const stateIcon = m.status === 'pending' ? '⏳' : m.status === 'ready-to-ship' ? '📦' : '🚛';
+      const stateText = m.status === 'pending' ? 'waiting at factory' : m.status === 'ready-to-ship' ? 'ready for Truck pickup' : 'on the truck';
+      const tooltip = `${m.status === 'pending' ? 'Pending' : m.status === 'ready-to-ship' ? 'Ready' : 'In Transit'}: ${m.accessoryName} — ${stateText}`;
       html += `<g><title>${escapeHTML(tooltip)}</title>`;
-      html += `<path d="M${dot.x},${dot.y} Q${dot.x-30},${dot.y-30} ${Math.max(0, dot.x-60)},${Math.max(0, dot.y-30)}" stroke="#d97706" stroke-width="1.5" stroke-dasharray="3,3" fill="none" opacity=".55"/>`;
-      html += `<circle cx="${dot.x}" cy="${dot.y}" r="4" fill="#d97706" stroke="#fff" stroke-width="1.5"/>`;
-      html += `<text x="${dot.x}" y="${dot.y+1}" text-anchor="middle" font-size="6" font-weight="700" fill="#fff">⏳</text>`;
+      html += `<path d="M${dot.x},${dot.y} Q${dot.x-30},${dot.y-30} ${Math.max(0, dot.x-60)},${Math.max(0, dot.y-30)}" stroke="${stateColor}" stroke-width="1.5" stroke-dasharray="3,3" fill="none" opacity=".55"/>`;
+      html += `<circle cx="${dot.x}" cy="${dot.y}" r="4" fill="${stateColor}" stroke="#fff" stroke-width="1.5"/>`;
+      html += `<text x="${dot.x}" y="${dot.y+1}" text-anchor="middle" font-size="6" font-weight="700" fill="#fff">${stateIcon}</text>`;
       html += `</g>`;
     } else if(m.status === 'split-pending'){
       // Small red dot at top-right with pulsing animation — line goes OUT to the right edge (toward dealer)
@@ -10808,7 +10836,7 @@ function renderGlobalSearchResults(qRaw){
   marriages.forEach(m => {
     if(matches.length >= limit) return;
     if(test(m.spaSn) || test(m.spaDealer) || test(m.accessoryName)){
-      const stateIcon = m.status === 'pending' ? '⏳' : m.status === 'delivered' ? '✓' : m.status === 'completed' ? '🏁' : '📋';
+      const stateIcon = m.status === 'pending' ? '⏳' : m.status === 'ready-to-ship' ? '📦' : m.status === 'in-transit' ? '🚛' : m.status === 'delivered' ? '✓' : m.status === 'completed' ? '🏁' : '📋';
       matches.push({
         view: 'marriages', icon: '🔗',
         label: `${m.accessoryName} → S/N ${m.spaSn}`,
@@ -15731,6 +15759,11 @@ function handleQRPayload(raw, mode){
   if(!found && !parsedSn) {
     setScanResult('err', tid, 'not found in system');
     toast(`${tid} not found in system`,'err');
+    // ── DEFENSIVE: trigger force-sync in case local data is stale ──
+    // Common cause of "not found": another device just created/moved this
+    // item but the change hasn't propagated yet. Force-pull from cloud so
+    // the next scan attempt sees the updated data.
+    try { if(typeof fbCloudSync === 'function' && _fbDb && _fbAuthorized) fbCloudSync(true); } catch(e){}
     if(_qrScanState) _qrScanState.scanning = true;
     return;
   }
@@ -15750,8 +15783,15 @@ function handleQRPayload(raw, mode){
   }
 
   if(!found){
-    setScanResult('err', tid, 'not found in system');
-    toast(`${tid} not found in system`,'err');
+    // Local data doesn't have this tracking ID nor S/N. Common causes:
+    //   1. Sync hasn't caught up — another device just changed this item
+    //   2. Item was deleted recently (rmFromFactory, dispatch, etc.)
+    //   3. QR is from a different system (genuinely unknown)
+    // We force-pull from the cloud so the next scan attempt has fresh data,
+    // and we give the user a clearer error message so they know to retry.
+    setScanResult('err', parsedSn || tid, 'not found locally · pulling latest from cloud…');
+    toast(`Item not found · syncing from cloud — scan again in 2 seconds`,'err');
+    try { if(typeof fbCloudSync === 'function' && _fbDb && _fbAuthorized) fbCloudSync(true); } catch(e){}
     if(_qrScanState) _qrScanState.scanning = true;
     return;
   }
@@ -15815,7 +15855,10 @@ function handleQRPayload(raw, mode){
       const isAcc = item.type === 'accessory' || item.type === 'misc';
       if(isAcc && item.marriedSn){
         // ── MARRIED ACCESSORY: mark marriage as delivered, remove from factory ──
-        const m = marriages.find(x => x.accessoryId === item.id && x.status === 'pending');
+        // Accept marriages in ANY pre-delivered state: pending, ready-to-ship,
+        // or in-transit. The receive scan is the terminal "delivered" event
+        // regardless of which path the marriage took to get here.
+        const m = marriages.find(x => x.accessoryId === item.id && x.status !== 'delivered' && x.status !== 'completed');
         if(m){
           m.status = 'delivered';
           m.deliveredDate = at;
@@ -16030,28 +16073,34 @@ function shipFromFactory(id){
       renderFactory(); renderMaterials(); updBadges(); drawMap();
       return;
     }
-    // ── MARRIED accessory: direct ship to warehouse, no truck scan needed ──
-    // Factory's "Ship to WH" is the final action. The accessory goes to
-    // in-transit immediately AND the linked marriage flips to "delivered"
-    // so Marriages crew sees it's on its way. Tracking remains visible
-    // in In Transit until it physically arrives.
-    if(!confirm(`Ship "${f.dealer}" to warehouse?\n\nThis accessory is married to S/N ${f.marriedSn}. It will:\n• Go directly to In Transit\n• Mark the marriage as Delivered\n• Show up for Receiving when it physically arrives`)) return;
-    snapshot('ship married accessory direct to wh');
-    f.trackingState = 'in-transit';
+    // ── MARRIED accessory: now follows the same Truck-scan flow as spas ──
+    // BEHAVIORAL CHANGE (May 16): Alberto requested that pressing "Ship to WH"
+    // on a married accessory must NOT skip the Truck/Transit scan. The accessory
+    // stays at factory in 'ready-to-ship' state, the marriage moves to
+    // 'ready-to-ship' (visible to Marriages crew as "waiting for Truck"), and
+    // Loading Bay shows the accessory waiting for Truck to scan. When Truck
+    // scans (truckLoadOne), the accessory moves to 'in-transit' and the
+    // marriage flips to 'in-transit' too. Only when Receiving accepts the
+    // accessory at the warehouse does the marriage flip to 'delivered'.
+    if(!confirm(`Mark "${f.dealer}" as READY for Truck pickup?\n\nThis accessory is married to S/N ${f.marriedSn}. It will:\n• Stay at the factory with a "ready" badge\n• Show up in Loading Bay for the Truck crew to scan\n• Move to In Transit only when Truck/Transit scans the QR\n• The marriage stays in "waiting" state until then`)) return;
+    snapshot('mark married accessory ready-to-ship');
+    f.trackingState = 'ready-to-ship';
     f.trackingId = f.trackingId || makeTrackingId('ACC');
     f.trackingHistory = f.trackingHistory || [];
-    f.trackingHistory.push({state:'in-transit', at:toISO(), by:ROLES[currentRole].label, note:'Shipped from factory direct to warehouse — marriage marked delivered'});
-    // Find the linked marriage and flip status to delivered
+    f.trackingHistory.push({state:'ready-to-ship', at:toISO(), by:ROLES[currentRole].label, note:'Marked ready — waiting for Truck/Transit to scan'});
+    // Mark the linked marriage as ready-to-ship (NOT delivered — that only
+    // happens when Receiving accepts the arrived accessory at the warehouse)
     const linkedMarriage = marriages.find(m => m.accessoryId === f.id && m.status === 'pending');
     if(linkedMarriage){
-      linkedMarriage.status = 'delivered';
-      linkedMarriage.deliveredDate = toISO();
-      addAct(`✈ Marriage delivered (in transit): ${f.dealer} → S/N ${f.marriedSn}`, 'var(--teal)');
+      linkedMarriage.status = 'ready-to-ship';
+      linkedMarriage.readyAt = toISO();
+      addAct(`📦 Marriage ready to ship: ${f.dealer} → S/N ${f.marriedSn}`, 'var(--amber)');
     }
-    addAct(`📦 Shipped to WH: ${f.dealer} (married to S/N ${f.marriedSn})`,'var(--teal)');
-    toast(`Shipped — Marriages crew can track it in In Transit`,'ok');
+    addAct(`📦 Ready for Truck pickup: ${f.dealer} (married to S/N ${f.marriedSn})`,'var(--amber)');
+    toast(`${f.dealer} marked ready — Truck/Transit will scan to load`,'ok');
     renderFactory();
     if(typeof renderMarriages === 'function') renderMarriages();
+    if(typeof renderTruck === 'function') renderTruck();
     if(typeof renderInTransit === 'function') renderInTransit();
     updBadges();
     // ── AUTO-PRINT LABEL ──
@@ -16094,9 +16143,12 @@ function rmFromFactory(id){
   const f = factory.find(x=>x.id===id); if(!f) return;
   if(!confirm(`Remove "${f.sn||f.dealer}" from factory?`)) return;
   snapshot('remove from factory');
-  // Also remove orphaned marriages
-  const wasMarried = marriages.some(m => m.accessoryId === id && m.status === 'pending');
-  marriages = marriages.filter(m => !(m.accessoryId === id && m.status === 'pending'));
+  // Also remove orphaned marriages — pending OR ready-to-ship (both still
+  // hold a reference to a factory item that's now being deleted). In-transit
+  // marriages are NOT cleaned up here because by then the accessory has
+  // already left the factory list anyway.
+  const wasMarried = marriages.some(m => m.accessoryId === id && (m.status === 'pending' || m.status === 'ready-to-ship'));
+  marriages = marriages.filter(m => !(m.accessoryId === id && (m.status === 'pending' || m.status === 'ready-to-ship')));
   factory = factory.filter(x => x.id !== id);
   addAct(`🗑 Removed from factory: ${f.sn||f.dealer}${wasMarried ? ' (+ orphaned marriages)' : ''}`, 'var(--red)');
   toast('Removed','ok');
@@ -16281,7 +16333,12 @@ function setMarTab(tab,btn){
 }
 
 function renderMarriages(){
-  const pending = marriages.filter(m => m.status === 'pending');
+  // "Pending" in the Marriages view means "still waiting for the accessory
+  // to arrive at the warehouse" — includes pending (at factory), ready-to-ship
+  // (waiting for Truck scan at Loading Bay), and in-transit (on the truck).
+  // All three appear in the same "Pending" tab so the Marriages crew sees
+  // every active pairing in one place. Delivered = accessory arrived. Completed = dispatched.
+  const pending = marriages.filter(m => isMarriageActive(m) && m.status !== 'split-pending');
   const delivered = marriages.filter(m => m.status === 'delivered');
   const completed = marriages.filter(m => m.status === 'completed');
   const splitPending = marriages.filter(m => m.status === 'split-pending');
@@ -16337,9 +16394,11 @@ function renderMarriages(){
     </div>`;
     return;
   }
-  // Status visual config
+  // Status visual config — covers all marriage states
   const stCfg = {
-    'pending':       { color:'#dc2626', bg:'#fef2f2', icon:'⏳', label:'PENDING',       rowBg:'',          urgent:false },
+    'pending':       { color:'#dc2626', bg:'#fef2f2', icon:'⏳', label:'AT FACTORY',    rowBg:'',          urgent:false },
+    'ready-to-ship': { color:'#1e40af', bg:'#eff6ff', icon:'📦', label:'READY · TRUCK', rowBg:'',          urgent:false },
+    'in-transit':    { color:'#0d9e78', bg:'#ecfdf5', icon:'🚛', label:'IN TRANSIT',    rowBg:'',          urgent:false },
     'delivered':     { color:'#0d9e78', bg:'#ecfdf5', icon:'✓',  label:'DELIVERED',     rowBg:'',          urgent:false },
     'completed':     { color:'#6b7280', bg:'#f3f4f6', icon:'🏁', label:'COMPLETED',     rowBg:'',          urgent:false },
     'split-pending': { color:'#ffffff', bg:'#dc2626', icon:'🔴', label:'SPLIT-PENDING', rowBg:'#fef2f2',   urgent:true  },
@@ -16353,13 +16412,20 @@ function renderMarriages(){
     cont.innerHTML = `<div class="mar-cards-grid">${list.map(m => {
       const inWH = units.some(u => u.sn === m.spaSn);
       const sc = stCfg[m.status] || stCfg['pending'];
-      const isPending = m.status === 'pending';
-      const isDelivered = m.status === 'delivered';
+      // Active states + their visual cues
+      const isPending = m.status === 'pending';           // accessory at factory, no action yet
+      const isReady = m.status === 'ready-to-ship';        // marked ready, waiting for Truck scan
+      const isInTransit = m.status === 'in-transit';       // Truck scanned, on the way
+      const isDelivered = m.status === 'delivered';        // arrived at warehouse
       const isSplit = m.status === 'split-pending';
 
-      // Find linked accessory's tracking info — shown when delivered/in-transit
+      // Find linked accessory's tracking info — shown when delivered/in-transit/ready-to-ship
       let trackInfo = '';
-      if(isDelivered && m.accessoryId){
+      if(isReady){
+        trackInfo = `<div class="mar-card-track" style="background:#eff6ff;color:#1e40af;border-color:#93c5fd">📦 Waiting at Loading Bay — Truck/Transit will scan to load</div>`;
+      } else if(isInTransit){
+        trackInfo = `<div class="mar-card-track" style="background:#ecfdf5;color:#065f46;border-color:#a7f3d0">🚛 On truck — heading to warehouse</div>`;
+      } else if(isDelivered && m.accessoryId){
         const acc = factory.find(f => f.id === m.accessoryId);
         if(acc && acc.trackingState === 'in-transit'){
           trackInfo = `<div class="mar-card-track">✈ In Transit to warehouse</div>`;
@@ -16451,7 +16517,7 @@ function renderMarriages(){
         <td class="td-s" data-hide-mobile>${m.notes||'—'}</td>
         <td class="td-s" data-hide-mobile>${fmtD(m.created)}</td>
         <td style="text-align:right;white-space:nowrap">
-          ${m.status==='pending'?`<button class="btn btn-sm btn-g" onclick="markMarriageDelivered(${m.id})">Mark delivered</button>`:''}
+          ${isMarriageActive(m) && m.status !== 'split-pending' ? `<button class="btn btn-sm btn-g" onclick="markMarriageDelivered(${m.id})" title="Override: mark as delivered without waiting for Truck/Receiving scan">Mark delivered</button>`:''}
           ${m.status==='split-pending'?`<button class="btn btn-sm" style="background:#fef9c3;border-color:#f59e0b;color:#78350f" onclick="goV('requests')" title="View the auto-created Factory Request to ship this accessory">📋 Open follow-up</button>`:''}
           ${m.status!=='completed'?`<button class="btn btn-sm" onclick="printMarriageLabel(${m.id})" title="Print physical label for this pairing">🖨 Label</button>`:''}
           ${m.status!=='completed'?`<button class="btn btn-sm" onclick="openMarriageEdit(${m.id})" title="Edit this marriage">✎ Edit</button>`:''}
@@ -16963,15 +17029,24 @@ window.printMarriageLabel = printMarriageLabel;
 //
 // Returns true if a marriage was updated. Safe to call multiple times — no-op
 // if marriage is already delivered/completed or no matching marriage exists.
+// When a married accessory transitions to in-transit (Truck/Transit scans
+// its QR or types its S/N at Loading Bay), flip the linked marriage to
+// 'in-transit'. Marriage stays in-transit until Receiving accepts the
+// physical accessory at the warehouse, at which point markMarriageDelivered
+// (or the cellAssignFromIncoming flow) flips it to 'delivered'.
 function syncMarriageOnAccessoryTransit(acc){
   if(!acc) return false;
   const isAcc = acc.type === 'accessory' || acc.type === 'misc';
   if(!isAcc || !acc.marriedSn) return false;
-  const m = marriages.find(x => x.accessoryId === acc.id && x.status === 'pending');
+  // Match marriages in either 'pending' OR 'ready-to-ship' state — both
+  // are valid sources for the in-transit transition (Truck can scan an
+  // accessory whose marriage was marked ready-to-ship from Factory, OR
+  // an accessory that's never been marked ready but Truck scanned anyway).
+  const m = marriages.find(x => x.accessoryId === acc.id && (x.status === 'pending' || x.status === 'ready-to-ship'));
   if(!m) return false;
-  m.status = 'delivered';
-  m.deliveredDate = toISO();
-  addAct(`✈ Marriage auto-delivered (in transit): ${acc.dealer} → S/N ${acc.marriedSn}`, 'var(--teal)');
+  m.status = 'in-transit';
+  m.inTransitAt = toISO();
+  addAct(`✈ Marriage in transit (Truck scanned): ${acc.dealer} → S/N ${acc.marriedSn}`, 'var(--accent)');
   // Render hooks — best-effort, all guarded
   try { if(typeof renderMarriages === 'function') renderMarriages(); } catch(e){}
   try { if(typeof updBadges === 'function') updBadges(); } catch(e){}
@@ -16981,9 +17056,12 @@ window.syncMarriageOnAccessoryTransit = syncMarriageOnAccessoryTransit;
 
 // ─── SEND TO WAREHOUSE (from Marriages role) ───
 // Lets the Marriages crew push a pairing through the ship flow themselves —
-// useful when Factory hasn't acted yet but the accessory is ready. Does the
-// same thing Factory's "Ship to WH" does for a married accessory: flips the
-// linked accessory to in-transit and marks the marriage as delivered.
+// useful when Factory hasn't acted yet but the accessory is ready. Marks
+// the accessory as ready-to-ship + marriage as ready-to-ship, then WAITS
+// for the Truck/Transit crew to scan it onto the truck (same flow as the
+// Factory "Ship to WH" button). Only after the truck scans does the
+// accessory move to in-transit; only after Receiving accepts it does the
+// marriage flip to delivered.
 function shipMarriageFromMarriages(mid){
   const m = marriages.find(x => x.id === mid);
   if(!m){ toast('Marriage not found','err'); return; }
@@ -17011,19 +17089,20 @@ function shipMarriageFromMarriages(mid){
     return;
   }
 
-  if(!confirm(`Send "${m.accessoryName}" to warehouse for S/N ${m.spaSn}?\n\nThis will:\n• Mark the accessory as In Transit (skip truck scan)\n• Flip the marriage status to Delivered\n• Make it visible in your In Transit view`)) return;
+  if(!confirm(`Mark "${m.accessoryName}" as READY for Truck pickup?\n\nThis is for S/N ${m.spaSn}. It will:\n• Stay at the factory with a "ready" badge\n• Show up in Loading Bay for the Truck crew to scan\n• Move to In Transit only when Truck/Transit scans the QR\n• The marriage stays in "waiting" state until then`)) return;
 
-  snapshot('marriage shipped from marriages');
-  acc.trackingState = 'in-transit';
+  snapshot('marriage ready-to-ship from marriages');
+  acc.trackingState = 'ready-to-ship';
   acc.trackingId = acc.trackingId || makeTrackingId('ACC');
   acc.trackingHistory = acc.trackingHistory || [];
-  acc.trackingHistory.push({state:'in-transit', at:toISO(), by:ROLES[currentRole].label, note:'Sent to warehouse by Marriages crew'});
-  m.status = 'delivered';
-  m.deliveredDate = toISO();
-  addAct(`✈ Marriage shipped by Marriages crew: ${m.accessoryName} → S/N ${m.spaSn}`,'var(--teal)');
-  toast(`Sent to warehouse — track in In Transit`,'ok');
+  acc.trackingHistory.push({state:'ready-to-ship', at:toISO(), by:ROLES[currentRole].label, note:'Marked ready by Marriages crew — waiting for Truck'});
+  m.status = 'ready-to-ship';
+  m.readyAt = toISO();
+  addAct(`📦 Marriage ready for Truck pickup: ${m.accessoryName} → S/N ${m.spaSn}`,'var(--amber)');
+  toast(`Marked ready — Truck/Transit will scan to load`,'ok');
   renderMarriages();
   if(typeof renderFactory === 'function') renderFactory();
+  if(typeof renderTruck === 'function') renderTruck();
   if(typeof renderInTransit === 'function') renderInTransit();
   updBadges();
   // ── AUTO-PRINT LABEL ──
@@ -18053,7 +18132,7 @@ function toggleReceived(rid){
 // ══════════════════════════════════════════════════════════════════════════════
 // STATE SIGNATURE — lightweight fingerprint for change detection
 // ══════════════════════════════════════════════════════════════════════════════
-// In v3.96+, saveState() compares this signature against the last-saved one to
+// In v3.97+, saveState() compares this signature against the last-saved one to
 // detect if state actually changed since the last save. Without this check,
 // every render triggers saveState (via the updBadges wrapper), which
 // increments _fbLocalEditCounter, which makes the realtime listener defer
@@ -18091,7 +18170,7 @@ function saveState(){
   if(_fbApplyingRemote) return;
 
   // ══════════════════════════════════════════════════════════════════════════
-  // CRITICAL: REAL-CHANGE DETECTION (v3.96)
+  // CRITICAL: REAL-CHANGE DETECTION (v3.97)
   // ──────────────────────────────────────────────────────────────────────────
   // saveState is called both by real mutations (addUnit, etc.) AND from the
   // updBadges wrapper that fires on every render. Without this check, every
@@ -18221,7 +18300,7 @@ function checkStateIntegrity(){
 setInterval(checkStateIntegrity, 5000);
 
 // ══════════════════════════════════════════════════════════════════════════════
-// SYNC STATUS INDICATOR — REMOVED in v3.96
+// SYNC STATUS INDICATOR — REMOVED in v3.97
 // ══════════════════════════════════════════════════════════════════════════════
 // The legacy `sync-status-badge` system was removed because it ran in parallel
 // with the newer `fb-auth-badge` (which has a real .info/connected monitor),
