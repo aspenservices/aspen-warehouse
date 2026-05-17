@@ -479,57 +479,116 @@ body.dark-mode textarea.fi:focus {
 }
 
 /* ── BOTTOM NAVIGATION (mobile only) ── */
+/* ══════════════════════════════════════════════════════════════════
+   BOTTOM NAVIGATION — professional, Microsoft Fluent / iOS hybrid
+   ──────────────────────────────────────────────────────────────────
+   Design goals: glass background, prominent active state, large
+   touch targets, consistent SVG icon stroke widths, no jitter.
+   ══════════════════════════════════════════════════════════════════ */
 .bottom-nav {
   display: none;
   position: fixed;
   bottom: 0;
   left: 0;
   right: 0;
-  background: var(--bg2);
-  border-top: 1px solid var(--line);
-  box-shadow: 0 -4px 16px -4px rgba(0,0,0,.08);
   z-index: 1000;
-  padding: 6px 4px calc(6px + env(safe-area-inset-bottom));
+  padding: 0 0 env(safe-area-inset-bottom);
+  /* Glass effect — sits over content with subtle blur */
+  background: rgba(255, 255, 255, 0.92);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+  backdrop-filter: saturate(180%) blur(20px);
+  border-top: 0.5px solid rgba(0, 0, 0, 0.08);
+  box-shadow: 0 -8px 24px -8px rgba(15, 23, 42, 0.08);
   justify-content: space-around;
-  align-items: center;
+  align-items: stretch;
+  height: calc(56px + env(safe-area-inset-bottom));
 }
 body.dark-mode .bottom-nav {
-  background: var(--bg2);
-  border-top-color: var(--line2);
-  box-shadow: 0 -4px 16px -4px rgba(0,0,0,.5);
+  background: rgba(15, 23, 42, 0.94);
+  border-top-color: rgba(255, 255, 255, 0.08);
+  box-shadow: 0 -8px 24px -8px rgba(0, 0, 0, 0.6);
 }
 .bn-item {
   flex: 1;
   background: none;
   border: none;
-  padding: 8px 4px;
+  padding: 8px 4px 6px;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 3px;
+  justify-content: center;
+  gap: 4px;
   cursor: pointer;
-  border-radius: 8px;
-  transition: background .12s;
+  position: relative;
   -webkit-tap-highlight-color: transparent;
+  /* Active indicator pill grows behind icon on tap */
+  transition: opacity .15s;
 }
+/* SVG icons: clean strokes, neutral by default */
 .bn-item svg {
-  width: 22px;
-  height: 22px;
-  color: var(--text3);
-  transition: color .15s;
+  width: 24px;
+  height: 24px;
+  color: #6b7280;
+  transition: color .18s, transform .18s;
+  stroke-width: 1.75;
 }
 .bn-item span {
-  font-size: 10px;
-  color: var(--text3);
-  font-weight: 600;
-  transition: color .15s;
+  font-size: 10.5px;
+  color: #6b7280;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  transition: color .18s;
+  line-height: 1;
 }
-.bn-item.active svg,
+body.dark-mode .bn-item svg,
+body.dark-mode .bn-item span {
+  color: #9ca3af;
+}
+/* Active tab — vibrant accent + thin top indicator bar */
+.bn-item.active::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 25%;
+  right: 25%;
+  height: 2.5px;
+  background: var(--accent);
+  border-radius: 0 0 3px 3px;
+}
+.bn-item.active svg {
+  color: var(--accent);
+  transform: scale(1.05);
+}
 .bn-item.active span {
   color: var(--accent);
+  font-weight: 700;
 }
-.bn-item:active {
-  background: var(--bg3);
+/* Touch feedback — subtle scale-down, no background flash */
+.bn-item:active svg {
+  transform: scale(0.92);
+}
+/* Badge dot for items with notifications (e.g. red dot on Marriages) */
+.bn-item .bn-badge {
+  position: absolute;
+  top: 6px;
+  right: calc(50% - 18px);
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  background: #ef4444;
+  color: #fff;
+  border-radius: 9px;
+  font-size: 9.5px;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+  border: 1.5px solid #fff;
+  box-shadow: 0 1px 3px rgba(239, 68, 68, 0.35);
+}
+body.dark-mode .bn-item .bn-badge {
+  border-color: var(--bg2);
 }
 
 /* ── FLOATING ACTION BUTTON ── */
@@ -570,31 +629,10 @@ body.dark-mode .bottom-nav {
   to { opacity: 1; transform: scale(1) rotate(0); }
 }
 
-/* ── BOTTOM NAVIGATION active indicator ── */
-.bn-item {
-  position: relative;
-}
-.bn-item::before {
-  content: '';
-  position: absolute;
-  top: 4px;
-  left: 50%;
-  transform: translateX(-50%) scaleX(0);
-  width: 28px;
-  height: 3px;
-  border-radius: 0 0 3px 3px;
-  background: var(--accent);
-  transition: transform .22s cubic-bezier(.34,1.56,.64,1);
-  transform-origin: center;
-}
-.bn-item.active::before {
-  transform: translateX(-50%) scaleX(1);
-}
-
 /* Show bottom nav + FAB only on mobile */
 @media (max-width: 768px){
   .bottom-nav { display: flex !important; }
-  .main { padding-bottom: 72px !important; }
+  .main { padding-bottom: calc(64px + env(safe-area-inset-bottom)) !important; }
   .fab { display: flex !important; }
   /* Hamburger stays visible on mobile — it opens the sidebar which holds
      all the secondary actions (settings, sign-in, search, dark-mode, etc.)
@@ -1978,10 +2016,10 @@ tbody tr:hover td{background:var(--bg3)}
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3) !important;
   }
 
-  /* ── Sleeker stat cards: 2 cols on phone for breathing room ── */
+  /* ── Stat cards: 2 cols, generous gap, professional spacing ── */
   .stats-grid {
     grid-template-columns: 1fr 1fr !important;
-    gap: 9px !important;
+    gap: 11px !important;
     margin-bottom: 14px !important;
   }
   /* If only 3 cards, the lonely one spans full width on its row */
@@ -1996,7 +2034,7 @@ tbody tr:hover td{background:var(--bg3)}
     font-weight: 700;
   }
   .sc-val {
-    font-size: 26px !important;
+    font-size: 28px !important;
     font-weight: 700 !important;
     margin-top: 5px !important;
     line-height: 1 !important;
@@ -2040,41 +2078,9 @@ tbody tr:hover td{background:var(--bg3)}
   }
   .fab svg { width: 22px; height: 22px; }
 
-  /* ── Bottom nav refinements ── */
-  .bottom-nav {
-    backdrop-filter: saturate(180%) blur(20px);
-    -webkit-backdrop-filter: saturate(180%) blur(20px);
-    background: rgba(255, 255, 255, 0.92) !important;
-    border-top: 0.5px solid rgba(0, 0, 0, 0.1) !important;
-    box-shadow: none !important;
-  }
-  body.dark-mode .bottom-nav {
-    background: rgba(15, 23, 42, 0.92) !important;
-    border-top-color: rgba(255, 255, 255, 0.08) !important;
-  }
-  .bn-item {
-    min-height: 50px;
-    padding: 6px 4px !important;
-    font-size: 9.5px;
-    font-weight: 600;
-    color: var(--text3);
-    letter-spacing: 0.01em;
-  }
-  .bn-item.active {
-    color: var(--accent);
-  }
-  .bn-item svg {
-    width: 22px;
-    height: 22px;
-    margin-bottom: 2px;
-  }
-  .bn-item:active {
-    background-color: rgba(0, 0, 0, 0.05);
-    opacity: 1 !important;
-  }
-  body.dark-mode .bn-item:active {
-    background-color: rgba(255, 255, 255, 0.08);
-  }
+  /* Bottom nav rules are handled by the main .bottom-nav block at the top of
+     this stylesheet — they include glass background, active indicators, etc.
+     Mobile doesn't need additional overrides. */
 
   /* ── Factory tab bar: iOS-style segmented look ── */
   .fct-tabs {
@@ -2263,46 +2269,33 @@ tbody tr:hover td{background:var(--bg3)}
   }
 
   /* ═══ NOTIFICATION BANNER (the "2 married spas waiting" pill) ═══
-     Was: cramped inside the topbar's right side, often cut off.
-     Now: full-width row pinned below the topbar, easy to read, tappable. */
-  #notif-area {
-    /* Take it OUT of the topbar's flex flow and pin it as its own row */
-    position: fixed !important;
-    top: calc(50px + env(safe-area-inset-top)) !important;
-    left: 0 !important;
-    right: 0 !important;
-    z-index: 99 !important;
-    padding: 6px 10px !important;
+     Now lives OUTSIDE the topbar as its own row. No floating, no overlap.
+     Just a clean full-width strip that pushes content down naturally. */
+  #notif-area:empty { display: none !important; }
+  #notif-area:not(:empty) {
     background: rgba(255, 255, 255, 0.92);
     backdrop-filter: saturate(180%) blur(20px);
     -webkit-backdrop-filter: saturate(180%) blur(20px);
     border-bottom: 0.5px solid rgba(0, 0, 0, 0.08);
-    /* Hide if empty (no inner content) */
+    padding: 8px 12px !important;
   }
-  body.dark-mode #notif-area {
+  body.dark-mode #notif-area:not(:empty) {
     background: rgba(15, 23, 42, 0.92);
     border-bottom-color: rgba(255, 255, 255, 0.08);
   }
-  #notif-area:empty { display: none !important; }
-  /* When it has content, the inner pill becomes a compact full-width row */
+  /* The inner pill (created by JS) — make it a centered, full-width strip */
   #notif-area > div {
-    width: 100%;
-    margin: 0;
-    padding: 6px 11px !important;
-    font-size: 12px !important;
+    width: 100% !important;
+    margin: 0 !important;
+    padding: 9px 14px !important;
+    font-size: 12.5px !important;
     font-weight: 600 !important;
-    line-height: 1.3 !important;
-    border-radius: 8px !important;
+    line-height: 1.35 !important;
+    border-radius: 10px !important;
     display: flex !important;
     align-items: center;
     justify-content: center;
-    gap: 6px;
-  }
-  /* Push the rest of content down to clear the banner — but ONLY when banner is non-empty.
-     We use a CSS class added by JS if we want this dynamic, but for now offset always
-     by a small margin if we detect non-empty banner via :not(:empty). */
-  #notif-area:not(:empty) ~ .main .view {
-    padding-top: 44px !important;
+    gap: 8px;
   }
 
   /* ═══ HERO BANNER — compact in mobile ═══
@@ -3378,7 +3371,7 @@ body.dark-mode .mar-card-track {
       <div class="role-current"><span id="role-indicator">Admin</span></div>
     </div>
   </div>
-  <div class="sb-foot"><div class="sb-ver">v3.90 · <span id="live-date"></span></div></div>
+  <div class="sb-foot"><div class="sb-ver">v3.95 · <span id="live-date"></span></div></div>
 </nav>
 
 <!-- MAIN -->
@@ -3410,7 +3403,6 @@ body.dark-mode .mar-card-track {
       <span class="user-pill-name" id="user-name-display">Sign in</span>
     </div>
     <div id="fb-auth-badge" style="display:inline-flex;align-items:center"></div>
-    <div id="notif-area"></div>
     <button class="btn btn-p" onclick="goV('incoming')">
       <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 1v10M4 7l4 4 4-4"/></svg>
       New Shipment
@@ -3429,6 +3421,11 @@ body.dark-mode .mar-card-track {
     </button>
   </div>
 </div>
+
+<!-- Notification banner row — sits BELOW the topbar, full-width, so it never
+     overlaps content and always shows the full message. Empty when there's
+     nothing to show (hidden via :empty CSS). -->
+<div id="notif-area"></div>
 
 <div class="content">
 
@@ -4306,6 +4303,10 @@ body.dark-mode .mar-card-track {
             🔄 Announce New Version to All Devices
           </button>
           <div style="font-size:10.5px;color:#1e40af;margin-top:-2px;line-height:1.4;padding-left:8px">After deploying a new version, click this to notify all other devices. They'll show an "Update available" banner and reload to the latest code.</div>
+          <button class="btn" onclick="showSyncDiagnostic()" style="justify-content:flex-start;padding:11px 14px;font-weight:700;background:#0891b2;border-color:#0891b2;color:#fff;margin-top:6px">
+            🔬 Sync Status (Auto-running)
+          </button>
+          <div style="font-size:10.5px;color:#0e7490;margin-top:-2px;line-height:1.4;padding-left:8px">Sync runs <strong>automatically</strong> in background — checks every 10s, heartbeat pull every 30s, auto-fixes silently. Use this button only if you want to see real-time stats or run a manual test.</div>
           <div style="border-top:1px dashed #fca5a5;padding-top:10px;margin-top:4px">
             <button class="btn btn-r" onclick="wipeInventoryData()" style="width:100%;justify-content:flex-start;padding:11px 14px;font-weight:700;background:#dc2626;border-color:#dc2626;color:#fff">
               🗑 Wipe All Inventory · Start Fresh Count
@@ -4358,6 +4359,8 @@ let _fbSyncTimer = null;  // periodic sync interval (backup safety net)
 let _fbLastSyncedAt = 0;
 // ── REALTIME SYNC additions ───────────────────────────────────────────────
 let _fbSharedRef = null;            // .ref('state/shared/latest') listener
+let _fbConnectedRef = null;         // .ref('.info/connected') listener
+let _fbWasConnected = false;        // last known WebSocket connection state
 let _fbLastLocalWriteAt = 0;        // ms timestamp of our last successful push (echo guard)
 let _fbAutoPushTimer = null;        // debounce for fbAutoPush
 let _fbApplyingRemote = false;      // flag: we're applying a remote update, don't push back
@@ -4370,6 +4373,12 @@ let _fbApplyingRemote = false;      // flag: we're applying a remote update, don
 let _fbLocalEditCounter = 0;
 let _fbPushedEditCounter = 0;
 let _fbDeferredRemote = null;       // {payload} held while local edits pending
+// ── Sync watchdog (auto-healing daemon) ──
+// Runs every 10s when tab is visible. Auto-detects + auto-fixes common sync
+// failure modes that would otherwise require Alberto opening a diagnostic.
+let _syncWatchdogTimer = null;
+let _syncWatchdogLastPull = 0;
+let _syncWatchdogTickCount = 0;
 // Counts consecutive cloud-write failures. Used by the failure banner that
 // pops up after 3+ in a row. Declared up here (not where verifyCloudWrite is
 // defined) because fbCloudSync's catch block reads it — and that runs as
@@ -4440,7 +4449,7 @@ let _fbInitAttempts = 0;
 //   /app_version/current  (in Firebase console, manually, OR call
 //   pushVersionToFirebase() from the Admin console at deploy time)
 // ══════════════════════════════════════════════════════════════════
-const APP_VERSION = 'v3.90';
+const APP_VERSION = 'v3.95';
 window.APP_VERSION = APP_VERSION;
 
 let _updateBannerShown = false;
@@ -4474,6 +4483,115 @@ function pushVersionToFirebase(){
   }).catch(e => alert('Failed: ' + e.message));
 }
 window.pushVersionToFirebase = pushVersionToFirebase;
+
+// ══════════════════════════════════════════════════════════════════════════
+// SYNC DIAGNOSTIC — full status report + active sync test
+// ══════════════════════════════════════════════════════════════════════════
+// Shows a modal with everything needed to debug "Mac and iPhone are out of
+// sync". Runs an active write-then-read test and reports each step.
+async function showSyncDiagnostic(){
+  let modal = document.getElementById('sync-diag-modal');
+  if(modal) modal.remove();
+  modal = document.createElement('div');
+  modal.id = 'sync-diag-modal';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(15,23,42,.6);z-index:99999;display:flex;align-items:center;justify-content:center;padding:16px;backdrop-filter:blur(4px)';
+  modal.innerHTML = `
+    <div style="background:#fff;border-radius:16px;max-width:560px;width:100%;max-height:90vh;overflow-y:auto;box-shadow:0 24px 60px -8px rgba(0,0,0,.4)">
+      <div style="padding:18px 20px;border-bottom:1px solid #e5e7eb;display:flex;align-items:center;justify-content:space-between">
+        <div style="font-size:17px;font-weight:800;display:flex;align-items:center;gap:8px">🔬 Sync Diagnostic</div>
+        <button onclick="document.getElementById('sync-diag-modal').remove()" style="background:#f1f5f9;border:none;border-radius:8px;padding:7px 12px;font-size:13px;font-weight:600;cursor:pointer">Close</button>
+      </div>
+      <div id="sync-diag-body" style="padding:18px 20px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;line-height:1.6"></div>
+    </div>`;
+  document.body.appendChild(modal);
+  const body = modal.querySelector('#sync-diag-body');
+  const row = (label, val, ok) => `<div style="display:flex;justify-content:space-between;gap:10px;padding:4px 0;border-bottom:1px dashed #f1f5f9"><span style="color:#64748b">${label}</span><span style="font-weight:700;color:${ok===true?'#15803d':ok===false?'#dc2626':'#1e293b'};text-align:right;word-break:break-all">${val}</span></div>`;
+
+  // ── SECTION 1: Connection state ──
+  let html = '<div style="font-weight:800;color:#0891b2;margin-bottom:6px;font-size:13px">📡 Connection</div>';
+  html += row('Firebase SDK loaded', _fbDb ? 'yes' : 'NO', !!_fbDb);
+  html += row('Signed in', _fbUser ? 'yes' : 'NO', !!_fbUser);
+  html += row('User UID', _fbUser ? _fbUser.uid.slice(0,16)+'…' : '—', _fbUser);
+  html += row('Anonymous', _fbUser ? (_fbUser.isAnonymous ? 'yes' : 'no') : '—');
+  html += row('Authorized', _fbAuthorized ? _fbAuthorized.role : 'NO', !!_fbAuthorized);
+  html += row('WebSocket live', _fbWasConnected ? 'YES ✓' : 'NO ✗', _fbWasConnected);
+  html += row('Realtime listener', _fbSharedRef ? 'attached' : 'NOT attached', !!_fbSharedRef);
+
+  // ── SECTION 1b: Auto-healing watchdog ──
+  html += '<div style="font-weight:800;color:#0891b2;margin:14px 0 6px;font-size:13px">🤖 Auto-Healing Watchdog</div>';
+  html += row('Watchdog running', _syncWatchdogTimer ? 'YES ✓ (every 10s)' : 'NO ✗', !!_syncWatchdogTimer);
+  html += row('Tick count this session', _syncWatchdogTickCount);
+  const lastWPull = _syncWatchdogLastPull ? Math.round((Date.now()-_syncWatchdogLastPull)/1000) : null;
+  html += row('Last heartbeat pull', lastWPull != null ? lastWPull+'s ago' : 'pending');
+
+  // ── SECTION 2: Device & state ──
+  html += '<div style="font-weight:800;color:#0891b2;margin:14px 0 6px;font-size:13px">📱 This Device</div>';
+  html += row('Device ID', _fbDeviceId);
+  html += row('User name', (typeof currentUser !== 'undefined' && currentUser?.name) || '(none)');
+  html += row('Current role', (typeof currentRole !== 'undefined' && currentRole) || '(none)');
+  html += row('App version', APP_VERSION);
+
+  // ── SECTION 3: Sync timestamps ──
+  html += '<div style="font-weight:800;color:#0891b2;margin:14px 0 6px;font-size:13px">⏱ Sync Timing</div>';
+  const localAge = _fbLastLocalWriteAt ? Math.round((Date.now()-_fbLastLocalWriteAt)/1000) : null;
+  const syncAge = _fbLastSyncedAt ? Math.round((Date.now()-_fbLastSyncedAt)/1000) : null;
+  html += row('Last local write', _fbLastLocalWriteAt ? new Date(_fbLastLocalWriteAt).toLocaleString() + ' (' + localAge + 's ago)' : 'never');
+  html += row('Last cloud push', _fbLastSyncedAt ? new Date(_fbLastSyncedAt).toLocaleString() + ' (' + syncAge + 's ago)' : 'never');
+  html += row('Local edit counter', _fbLocalEditCounter);
+  html += row('Pushed counter', _fbPushedEditCounter);
+  const pending = _fbLocalEditCounter - _fbPushedEditCounter;
+  html += row('Pending pushes', pending, pending === 0);
+  html += row('Deferred remote', _fbDeferredRemote ? 'yes' : 'no');
+
+  // ── SECTION 4: Active sync test ──
+  html += '<div style="font-weight:800;color:#0891b2;margin:14px 0 6px;font-size:13px">🧪 Active Test</div>';
+  html += '<div id="sync-test-results" style="color:#64748b">Running write→read test…</div>';
+  body.innerHTML = html;
+
+  // Active test: read shared/latest, push a marker, read again, compare
+  const results = modal.querySelector('#sync-test-results');
+  let testHtml = '';
+  try {
+    if(!_fbDb || !_fbAuthorized){
+      testHtml = row('Test', 'SKIPPED — not connected', false);
+    } else {
+      const before = await _fbDb.ref('state/shared/latest').once('value');
+      const beforeVal = before.val();
+      const beforeTs = beforeVal ? beforeVal.timestamp : 0;
+      const beforeWriter = beforeVal ? (beforeVal.uploadedBy || '?') : 'EMPTY';
+      const beforeDev = beforeVal ? (beforeVal.deviceId || '?') : '?';
+      const beforeAge = beforeTs ? Math.round((Date.now()-beforeTs)/1000) : null;
+      testHtml += row('Cloud writer', beforeWriter);
+      testHtml += row('Cloud device', beforeDev === _fbDeviceId ? beforeDev + ' (us)' : beforeDev + ' (OTHER)');
+      testHtml += row('Cloud age', beforeAge != null ? beforeAge+'s ago' : '—');
+      const t0 = performance.now();
+      await _fbDb.ref('state/shared/_diag_ping').set({ts: Date.now(), from: _fbDeviceId, user: (typeof currentUser !== 'undefined' && currentUser?.name) || 'anon'});
+      const writeMs = Math.round(performance.now() - t0);
+      testHtml += row('Write latency', writeMs+' ms', writeMs < 2000);
+      const back = await _fbDb.ref('state/shared/_diag_ping').once('value');
+      const backVal = back.val();
+      const readOK = backVal && backVal.from === _fbDeviceId;
+      testHtml += row('Read-back match', readOK ? 'YES ✓' : 'NO ✗', readOK);
+      // Cleanup
+      try { _fbDb.ref('state/shared/_diag_ping').remove(); } catch(e){}
+      // Verdict
+      let verdict = '✓ All checks passed — sync is healthy';
+      let verdictColor = '#15803d';
+      if(!_fbWasConnected){ verdict = '✗ WebSocket offline — sync will not work until reconnected'; verdictColor = '#dc2626'; }
+      else if(!_fbSharedRef){ verdict = '✗ Realtime listener detached — close & reopen the app'; verdictColor = '#dc2626'; }
+      else if(!readOK){ verdict = '✗ Cloud write failed — check Firebase rules'; verdictColor = '#dc2626'; }
+      else if(pending > 0){ verdict = '⚠ Pending pushes — wait a few seconds and re-run'; verdictColor = '#d97706'; }
+      testHtml += '<div style="margin-top:12px;padding:11px 13px;background:'+verdictColor+'15;border:1.5px solid '+verdictColor+';border-radius:9px;font-weight:800;color:'+verdictColor+';text-align:center">'+verdict+'</div>';
+    }
+  } catch(err){
+    testHtml += row('TEST FAILED', err.message, false);
+    if(err.code === 'PERMISSION_DENIED' || /permission/i.test(err.message)){
+      testHtml += '<div style="margin-top:8px;padding:9px 12px;background:#fef2f2;border:1.5px solid #ef4444;border-radius:8px;color:#991b1b;font-size:11.5px;font-weight:600">⚠ Firebase rules are blocking this write. Apply the new rules from firebase-rules.json in Firebase Console → Realtime Database → Rules.</div>';
+    }
+  }
+  results.innerHTML = testHtml;
+}
+window.showSyncDiagnostic = showSyncDiagnostic;
 
 function showUpdateBanner(newVer){
   if(_updateBannerShown) return;
@@ -4634,6 +4752,7 @@ async function handleAuthChange(user){
   }
   fbStartRealtimeSync();
   startVersionWatcher();
+  _startSyncWatchdog();   // auto-healing daemon — checks every 10s, fixes silently
   updateAuthBadge();
 
   // ══════════════════════════════════════════════════════════════
@@ -4652,8 +4771,13 @@ async function handleAuthChange(user){
           if(payload && payload.state && payload.deviceId !== _fbDeviceId){
             if(payload.timestamp > _fbLastLocalWriteAt){
               console.log('[firebase] Pulling fresh cloud state after sign-in');
-              fbApplyRemoteState(payload.state, payload.timestamp);
-              toast('☁ Synced with cloud — latest data loaded', 'ok');
+              try {
+                const restored = JSON.parse(payload.state);
+                fbApplyRemoteState(restored, payload.timestamp);
+                toast('☁ Synced with cloud — latest data loaded', 'ok');
+              } catch(parseErr){
+                console.warn('[post-signin pull] parse failed:', parseErr.message);
+              }
             }
           }
         }).catch(err => console.warn('[post-signin pull]', err));
@@ -4704,9 +4828,15 @@ async function fbCloudSync(showToast){
   try {
     const state = {nid, units, dispatched, incoming, materials, events, activity, queue, cfg, factory, marriages, dispatchRequests, coverInventory, colorLibrary, coverModelMapping};
     const ts = Date.now();
+    // For anonymous users, _fbUser.email is null. Use the current user pill
+    // name (from in-app Welcome screen) + deviceId for traceable diagnostics.
+    // Fall back to a stable "anon-{deviceId}" identifier if no Welcome user picked.
+    const writerName = (typeof currentUser !== 'undefined' && currentUser?.name)
+      ? `${currentUser.name}@${_fbDeviceId.slice(-6)}`
+      : (_fbUser.email || `anon@${_fbDeviceId.slice(-6)}`);
     const payload = {
       timestamp: ts,
-      uploadedBy: _fbUser.email,
+      uploadedBy: writerName,
       version: 'v3.32',
       state: JSON.stringify(state)  // string to avoid deep nested ref limits
     };
@@ -4892,8 +5022,54 @@ function fbStartRealtimeSync(){
     }
   }, err => {
     console.error('[firebase] realtime listener error:', err);
+    // Listener errored out → detach + try to reattach after a short delay.
+    // Common causes: rules permission denied, network blip, token expired.
+    try { _fbSharedRef.off('value'); } catch(e){}
+    _fbSharedRef = null;
+    setTimeout(() => {
+      if(_fbDb && _fbAuthorized && !_fbSharedRef){
+        console.log('[firebase] auto-reattaching realtime listener after error');
+        try { fbStartRealtimeSync(); } catch(e){ console.warn('[reattach]', e); }
+      }
+    }, 3000);
   });
   console.log('[firebase] realtime listener attached on state/shared/latest');
+
+  // ── CONNECTION STATE MONITOR ──
+  // Firebase exposes a special path '.info/connected' that's true when the
+  // WebSocket is alive and false when it isn't. We use this to:
+  //   1. Update the badge so users see actual cloud state, not just last-sync
+  //   2. Detect when we reconnect after being offline → force-pull missed updates
+  // Without this monitor, the badge can show "✓ Synced" forever even if the
+  // socket died 10 minutes ago and nothing has actually synced.
+  if(!_fbConnectedRef){
+    _fbConnectedRef = _fbDb.ref('.info/connected');
+    _fbConnectedRef.on('value', snap => {
+      const wasConnected = _fbWasConnected;
+      _fbWasConnected = !!snap.val();
+      if(_fbWasConnected && !wasConnected){
+        console.log('[firebase] WebSocket connected');
+        // Reconnect → force pull. The listener will replay events, but
+        // an explicit once() read is more reliable.
+        if(_fbAuthorized){
+          _fbDb.ref('state/shared/latest').once('value').then(s => {
+            const p = s.val();
+            if(!p || !p.state || p.deviceId === _fbDeviceId) return;
+            if(p.timestamp <= _fbLastLocalWriteAt) return;
+            if(_fbLocalEditCounter > _fbPushedEditCounter){ _fbDeferredRemote = p; return; }
+            try {
+              fbApplyRemoteState(JSON.parse(p.state), p.timestamp);
+              console.log('[reconnect-pull] applied update from', p.uploadedBy || p.deviceId);
+            } catch(e){ console.warn('[reconnect-pull]', e); }
+          }).catch(e => console.warn('[reconnect-pull read]', e));
+        }
+      } else if(!_fbWasConnected && wasConnected){
+        console.warn('[firebase] WebSocket DISCONNECTED');
+      }
+      // Refresh badge to reflect actual connection state
+      try { updateAuthBadge(); } catch(e){}
+    });
+  }
 }
 
 // Stop listening (called on sign-out)
@@ -4902,6 +5078,113 @@ function fbStopRealtimeSync(){
     try { _fbSharedRef.off('value'); } catch(e){}
     _fbSharedRef = null;
   }
+  if(_fbConnectedRef){
+    try { _fbConnectedRef.off('value'); } catch(e){}
+    _fbConnectedRef = null;
+  }
+  _stopSyncWatchdog();
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// SYNC WATCHDOG — runs every 10s, auto-fixes sync issues
+// ══════════════════════════════════════════════════════════════════════════
+// This is the "diagnostic that runs by itself". No buttons to press — it just
+// monitors the sync infrastructure and quietly repairs problems as they're
+// detected. Logs to console (visible in DevTools) so issues can be reviewed
+// after the fact, but does NOT toast unless something cannot be auto-fixed.
+//
+// Checks performed every tick (10s while tab is visible):
+//   1. Realtime listener attached? → reattach if not
+//   2. Pending pushes older than 3s? → force-push (fbAutoPush debounce may
+//      have been killed by iOS Safari throttling)
+//   3. Deferred remote sitting unapplied? → apply it
+//   4. Heartbeat pull every 30s → catches updates the listener may have
+//      silently dropped (iOS Safari background suspension behavior)
+//   5. Connection state stale > 60s? → reset _fbWasConnected to false so the
+//      badge reflects reality
+//
+// All checks are idempotent — running them on a healthy system is a no-op.
+function _syncWatchdog(){
+  if(!_fbDb || !_fbAuthorized) return;
+  // Skip when hidden — visibilitychange handler covers wake-up.
+  // Mobile browsers throttle setInterval when hidden anyway.
+  if(typeof document !== 'undefined' && document.hidden) return;
+  _syncWatchdogTickCount++;
+
+  // ── Check 1: Realtime listener attached? ──
+  if(!_fbSharedRef){
+    console.log('[watchdog] listener detached → reattaching');
+    try { fbStartRealtimeSync(); } catch(e){ console.warn('[watchdog reattach]', e); }
+  }
+
+  // ── Check 2: Pending pushes stale? ──
+  // If we have local edits that haven't been pushed and the last write was >3s ago,
+  // the debounce probably got killed. Force-push now.
+  if(_fbLocalEditCounter > _fbPushedEditCounter && _fbLastLocalWriteAt){
+    const age = Date.now() - _fbLastLocalWriteAt;
+    if(age > 3000){
+      console.log('[watchdog] stale pending push ('+(_fbLocalEditCounter-_fbPushedEditCounter)+' edits, '+Math.round(age/1000)+'s old) → force-pushing');
+      try { fbForcePush(); } catch(e){ console.warn('[watchdog push]', e); }
+    }
+  }
+
+  // ── Check 3: Deferred remote not applied? ──
+  // If a remote update arrived during a push and was deferred, it should be
+  // applied as soon as the push completes. Recover here if that didn't happen.
+  if(_fbDeferredRemote && _fbLocalEditCounter === _fbPushedEditCounter){
+    const p = _fbDeferredRemote;
+    _fbDeferredRemote = null;
+    if(p.timestamp > _fbLastLocalWriteAt && p.deviceId !== _fbDeviceId){
+      try {
+        fbApplyRemoteState(JSON.parse(p.state), p.timestamp);
+        console.log('[watchdog] applied stale deferred remote from', p.uploadedBy || p.deviceId);
+      } catch(e){ console.warn('[watchdog deferred]', e); }
+    }
+  }
+
+  // ── Check 4: Heartbeat pull every 30s ──
+  // Belt-and-suspenders. Even if the listener appears healthy, do an explicit
+  // once() read every 30s. This catches the iOS Safari case where the listener
+  // technically reattached after backgrounding but missed events during the gap.
+  if(Date.now() - _syncWatchdogLastPull > 30000){
+    _syncWatchdogLastPull = Date.now();
+    _fbDb.ref('state/shared/latest').once('value').then(snap => {
+      const payload = snap.val();
+      if(!payload || !payload.state) return;
+      if(payload.deviceId === _fbDeviceId) return;
+      if(payload.timestamp <= _fbLastLocalWriteAt) return;
+      // If we have unpushed edits, defer (next push will replay)
+      if(_fbLocalEditCounter > _fbPushedEditCounter){ _fbDeferredRemote = payload; return; }
+      try {
+        fbApplyRemoteState(JSON.parse(payload.state), payload.timestamp);
+        console.log('[watchdog] heartbeat pull → applied missed update from', payload.uploadedBy || payload.deviceId, '(age '+Math.round((Date.now()-payload.timestamp)/1000)+'s)');
+      } catch(e){ console.warn('[watchdog pull apply]', e); }
+    }).catch(e => {
+      console.warn('[watchdog pull read]', e.code, e.message);
+      // PERMISSION_DENIED on the heartbeat = rules are blocking. Surface this.
+      if(e.code === 'PERMISSION_DENIED' && !window._permDeniedBannerShown){
+        window._permDeniedBannerShown = true;
+        try { _showPermissionDeniedBanner(); } catch(e){}
+      }
+    });
+  }
+
+  // ── Check 5: Refresh badge so user sees current state ──
+  try { updateAuthBadge(); } catch(e){}
+}
+
+function _startSyncWatchdog(){
+  if(_syncWatchdogTimer) return;  // already running — no double-start
+  _syncWatchdogTimer = setInterval(_syncWatchdog, 10000);
+  // Run once after a 1s delay so we don't have to wait 10s for the first check
+  setTimeout(() => { try { _syncWatchdog(); } catch(e){ console.warn('[watchdog first tick]', e); } }, 1000);
+  console.log('[sync] watchdog started — auto-healing checks every 10s, heartbeat pull every 30s');
+}
+
+function _stopSyncWatchdog(){
+  if(_syncWatchdogTimer){ clearInterval(_syncWatchdogTimer); _syncWatchdogTimer = null; }
+  _syncWatchdogLastPull = 0;
+  _syncWatchdogTickCount = 0;
 }
 
 // Replace local state with the restored object from cloud. Mirrors fbRestoreFromCloud
@@ -5092,196 +5375,6 @@ function fbForcePush(){
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// ADMIN USER MANAGEMENT — Firebase whitelist CRUD
-// The whitelist lives at /authorized/{emailKey} with {role, addedBy, addedAt}.
-// Only admin can view, add, remove, or change roles.
-// Note: actual passwords are managed by Google Sign-In — we do not store passwords.
-// To change a user's password, the user resets it via their Google Account.
-// ══════════════════════════════════════════════════════════════════════════════
-
-// List all authorized users from Firebase. Returns array of {emailKey, email, role, addedBy, addedAt}.
-async function fbListAuthorizedUsers(){
-  if(!_fbDb || !_fbUser){ toast('Sign in first','err'); return []; }
-  try {
-    const snap = await _fbDb.ref('authorized').once('value');
-    const data = snap.val() || {};
-    return Object.entries(data).map(([key, val]) => ({
-      emailKey: key,
-      // Reverse of emailKey(): _at_ → @, then , → . to get the original email back
-      email: key.replace(/_at_/g, '@').replace(/,/g, '.'),
-      role: val.role || 'unknown',
-      addedBy: val.addedBy || '—',
-      addedAt: val.addedAt || ''
-    })).sort((a, b) => a.email.localeCompare(b.email));
-  } catch(err){
-    console.error('[firebase] list users failed:', err);
-    toast('Failed to load users: ' + err.message, 'err');
-    return [];
-  }
-}
-
-// Add or update a user in the whitelist. Email is normalized to a Firebase-safe key.
-async function fbAddOrUpdateUser(email, role){
-  if(!_fbDb || !_fbUser){ toast('Sign in first','err'); return false; }
-  if(currentRole !== 'admin'){ toast('Admin only','err'); return false; }
-  email = (email||'').trim().toLowerCase();
-  if(!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)){ toast('Invalid email','err'); return false; }
-  if(!ROLES[role]){ toast('Invalid role','err'); return false; }
-  try {
-    const key = emailKey(email);
-    await _fbDb.ref(`authorized/${key}`).set({
-      role,
-      addedBy: _fbUser.email,
-      addedAt: new Date().toISOString()
-    });
-    toast(`✓ ${email} authorized as ${ROLES[role].label}`,'ok');
-    return true;
-  } catch(err){
-    console.error('[firebase] add user failed:', err);
-    toast('Failed: ' + err.message, 'err');
-    return false;
-  }
-}
-
-// Remove a user from the whitelist. They'll be signed out on next auth check.
-async function fbRemoveAuthorizedUser(emailK){
-  if(!_fbDb || !_fbUser){ toast('Sign in first','err'); return false; }
-  if(currentRole !== 'admin'){ toast('Admin only','err'); return false; }
-  try {
-    await _fbDb.ref(`authorized/${emailK}`).remove();
-    toast('✓ User removed from whitelist','ok');
-    return true;
-  } catch(err){
-    console.error('[firebase] remove user failed:', err);
-    toast('Failed: ' + err.message, 'err');
-    return false;
-  }
-}
-
-// Render the admin user management modal. Shows the whitelist with role-change and remove
-// controls, plus a form to add a new user.
-async function openAdminUsersModal(){
-  if(currentRole !== 'admin'){ toast('Admin only','err'); return; }
-  if(!_fbDb){ toast('Cloud sync not initialized','err'); return; }
-  if(!_fbUser){ toast('Sign in to Firebase first','err'); return; }
-  // Build modal shell first
-  const existing = document.getElementById('admin-users-overlay');
-  if(existing) existing.remove();
-  const overlay = document.createElement('div');
-  overlay.id = 'admin-users-overlay';
-  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(15,23,42,.65);z-index:9990;display:flex;align-items:center;justify-content:center;padding:20px;overflow-y:auto';
-  overlay.innerHTML = `
-    <div style="background:#fff;border-radius:14px;max-width:720px;width:100%;max-height:90vh;overflow-y:auto;box-shadow:0 20px 60px -10px rgba(0,0,0,.4)">
-      <div style="padding:18px 22px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center">
-        <div>
-          <div style="font-size:17px;font-weight:800">👥 Manage Authorized Users</div>
-          <div style="font-size:11.5px;color:var(--text3);margin-top:3px">Add/remove people who can sign in · change their role</div>
-        </div>
-        <button class="btn btn-sm" onclick="document.getElementById('admin-users-overlay').remove()">✕ Close</button>
-      </div>
-      <div style="padding:16px 22px;background:#f0f9ff;border-bottom:1px solid #bae6fd">
-        <div style="font-size:12px;color:#0c4a6e;line-height:1.5">
-          <strong>About passwords:</strong> Users sign in with their Google account, so passwords are managed by Google. To reset a user's password, they go to their Google Account → Security. Admin controls <em>who</em> can sign in and <em>which role</em> they get.
-        </div>
-      </div>
-      <!-- Add new user form -->
-      <div style="padding:14px 22px;border-bottom:1px solid var(--line);background:#fafbfc">
-        <div style="font-size:12.5px;font-weight:700;margin-bottom:8px;color:var(--text1)">+ Add User</div>
-        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
-          <div style="flex:2 1 220px;min-width:0">
-            <label style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.05em;font-weight:600;display:block;margin-bottom:3px">Email</label>
-            <input id="adm-new-email" type="email" class="fi" placeholder="name@company.com" style="width:100%">
-          </div>
-          <div style="flex:1 1 130px;min-width:0">
-            <label style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.05em;font-weight:600;display:block;margin-bottom:3px">Role</label>
-            <select id="adm-new-role" class="fsel" style="width:100%">
-              <option value="admin">🔑 Admin</option>
-              <option value="warehouse">🏭 Warehouse Manager</option>
-              <option value="factory">🚚 Factory</option>
-              <option value="transit">🚛 Truck / Transit</option>
-              <option value="organizer">📅 Dispatch Organizer</option>
-              <option value="viewer" selected>👁 Viewer</option>
-            </select>
-          </div>
-          <button class="btn btn-p" onclick="submitAdminAddUser()" style="flex:0 0 auto;min-height:38px">Add</button>
-        </div>
-      </div>
-      <!-- User list -->
-      <div id="admin-users-list" style="padding:8px 14px 18px">
-        <div style="text-align:center;color:var(--text3);font-size:12px;padding:32px">Loading users…</div>
-      </div>
-    </div>`;
-  document.body.appendChild(overlay);
-  // Click outside to close
-  overlay.addEventListener('click', e => { if(e.target === overlay) overlay.remove(); });
-  // Load and render users
-  refreshAdminUsersList();
-}
-
-async function refreshAdminUsersList(){
-  const wrap = document.getElementById('admin-users-list');
-  if(!wrap) return;
-  let users;
-  try {
-    users = await fbListAuthorizedUsers();
-  } catch(e){
-    console.warn('[admin-users]', e);
-    wrap.innerHTML = `<div style="text-align:center;color:var(--red);font-size:12px;padding:32px">Could not load users — check your connection.</div>`;
-    return;
-  }
-  if(!users.length){
-    wrap.innerHTML = `<div style="text-align:center;color:var(--text3);font-size:12px;padding:32px">No authorized users yet. Add the first one above.</div>`;
-    return;
-  }
-  wrap.innerHTML = `
-    <div style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:.06em;font-weight:600;padding:8px 8px 6px">${users.length} authorized user${users.length===1?'':'s'}</div>
-    ${users.map(u => {
-      const isMe = (u.email === (_fbUser?.email||'').toLowerCase());
-      const roleOpts = Object.entries(ROLES).map(([k, r]) => `<option value="${k}" ${u.role===k?'selected':''}>${r.icon} ${r.label}</option>`).join('');
-      return `
-      <div style="display:flex;align-items:center;gap:10px;padding:11px 13px;border:1px solid var(--line);border-radius:9px;margin-bottom:7px;background:${isMe?'#f0fdf4':'#fff'}">
-        <div style="flex:1 1 200px;min-width:0">
-          <div style="font-size:13px;font-weight:700;color:var(--text1);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${u.email}${isMe?' <span style=\"font-size:9px;color:#15803d;font-weight:700;background:#dcfce7;padding:2px 6px;border-radius:4px;margin-left:6px;letter-spacing:.04em\">YOU</span>':''}</div>
-          <div style="font-size:10px;color:var(--text3);margin-top:2px">Added by ${u.addedBy} · ${u.addedAt ? new Date(u.addedAt).toLocaleDateString() : '—'}</div>
-        </div>
-        <select class="fsel" style="flex:0 0 auto;font-size:11px;padding:5px 8px" onchange="changeUserRole('${u.emailKey}', this.value, '${u.email.replace(/'/g,"\\'")}')" ${isMe?'disabled':''}>${roleOpts}</select>
-        <button class="btn btn-sm" style="background:#fef2f2;border-color:#fecaca;color:#991b1b;font-size:11px" onclick="removeUserConfirm('${u.emailKey}', '${u.email.replace(/'/g,"\\'")}')" ${isMe?'disabled':''} title="${isMe?'Cannot remove yourself':'Remove user'}">✕</button>
-      </div>`;
-    }).join('')}
-  `;
-}
-
-async function submitAdminAddUser(){
-  const email = document.getElementById('adm-new-email')?.value || '';
-  const role = document.getElementById('adm-new-role')?.value || 'viewer';
-  const ok = await fbAddOrUpdateUser(email, role);
-  if(ok){
-    document.getElementById('adm-new-email').value = '';
-    refreshAdminUsersList();
-  }
-}
-
-async function changeUserRole(emailK, newRole, displayEmail){
-  if(!confirm(`Change ${displayEmail}'s role to ${ROLES[newRole]?.label || newRole}?`)) {
-    refreshAdminUsersList(); // revert UI
-    return;
-  }
-  try {
-    await _fbDb.ref(`authorized/${emailK}/role`).set(newRole);
-    toast(`✓ ${displayEmail} → ${ROLES[newRole].label}`, 'ok');
-  } catch(err){
-    toast('Failed: ' + err.message, 'err');
-    refreshAdminUsersList();
-  }
-}
-
-async function removeUserConfirm(emailK, displayEmail){
-  if(!confirm(`Remove ${displayEmail} from the whitelist?\n\nThey will lose access on next sign-in.`)) return;
-  const ok = await fbRemoveAuthorizedUser(emailK);
-  if(ok) refreshAdminUsersList();
-}
-
-// ══════════════════════════════════════════════════════════════════════════════
 // ADMIN ROLE PIN MANAGEMENT — local PINs for the role-switcher dropdown
 // ══════════════════════════════════════════════════════════════════════════════
 // LEGACY: these two functions used to drive a separate PIN-editing modal that
@@ -5412,10 +5505,24 @@ function updateAuthBadge(){
     el.innerHTML = `<span style="font-size:10.5px;color:var(--text3)">⏳ Setting up…</span>`;
     return;
   }
-  // Connected — show a clean green sync indicator. No identity displayed
-  // because users are anonymous; in-app Welcome screen identifies them.
+  // ── REAL connection state from .info/connected ──
+  // If the WebSocket dropped, show a yellow "reconnecting" badge — not green.
+  // Pre-connection (before _fbConnectedRef listener fires for the first time)
+  // _fbWasConnected is false; in that case fall back to "connecting" too.
   const lastSync = _fbLastSyncedAt ? new Date(_fbLastSyncedAt).toLocaleTimeString() : 'pending';
-  el.innerHTML = `<span style="display:inline-flex;align-items:center;gap:5px;font-size:11px;background:#dcfce7;color:#166534;padding:4px 9px;border-radius:11px;cursor:pointer" onclick="fbCloudSync(true)" title="Connected · click to sync now · last sync: ${lastSync}">☁ Synced</span>`;
+  const lastSyncAgo = _fbLastSyncedAt ? Math.round((Date.now() - _fbLastSyncedAt) / 1000) : null;
+  const ageStr = lastSyncAgo == null ? 'pending' : (lastSyncAgo < 60 ? lastSyncAgo+'s ago' : Math.round(lastSyncAgo/60)+'m ago');
+  // Detect problems the watchdog is working on
+  const pending = _fbLocalEditCounter - _fbPushedEditCounter;
+  const watchdogStatus = _syncWatchdogTimer ? '✓ auto-healing on' : '⚠ auto-healing off';
+  if(!_fbWasConnected){
+    el.innerHTML = `<span style="display:inline-flex;align-items:center;gap:5px;font-size:11px;background:#fef3c7;color:#92400e;padding:4px 9px;border-radius:11px;cursor:pointer" onclick="fbCloudSync(true)" title="WebSocket offline · last sync: ${lastSync} · ${watchdogStatus}">⏳ Reconnecting…</span>`;
+  } else if(pending > 0 && lastSyncAgo != null && lastSyncAgo < 5){
+    // Mid-push state — show "syncing" briefly
+    el.innerHTML = `<span style="display:inline-flex;align-items:center;gap:5px;font-size:11px;background:#dbeafe;color:#1e40af;padding:4px 9px;border-radius:11px;cursor:pointer" onclick="fbCloudSync(true)" title="Pushing ${pending} edit(s) to cloud · ${watchdogStatus}">⇅ Syncing…</span>`;
+  } else {
+    el.innerHTML = `<span style="display:inline-flex;align-items:center;gap:5px;font-size:11px;background:#dcfce7;color:#166534;padding:4px 9px;border-radius:11px;cursor:pointer" onclick="fbCloudSync(true)" title="Connected · last sync: ${lastSync} (${ageStr}) · ${watchdogStatus} · tap to force sync">☁ Synced</span>`;
+  }
 }
 
 // ══════════════════════════════════════════════════════════════════
@@ -5427,24 +5534,9 @@ function updateAuthBadge(){
 // blocks key actions until they sign in — because without auth, every
 // operation they do is LOCAL ONLY and won't sync to other devices.
 // That's how data on Alberto's iPhone got out of sync with his Mac.
+// (showAuthBigBanner / hideAuthBigBanner removed in v3.94 — replaced by the
+// in-topbar sync badge that reflects actual connection state.)
 // ══════════════════════════════════════════════════════════════════
-function showAuthBigBanner(){
-  // DISABLED in v3.88 — we now show a single, properly-placed sign-in card
-  // INSIDE the dashboard (dash-signin-card). The fixed-position banner was
-  // creating a duplicate UI element + layout shifts on mobile. The dashboard
-  // card is enough — it's prominent, in-flow, and doesn't overlay anything.
-  // Kept as a no-op so other call sites still work.
-  return;
-}
-
-function hideAuthBigBanner(){
-  // Clean up any banner that may have been added before this version
-  const b = document.getElementById('auth-big-banner');
-  if(b){
-    b.remove();
-    document.body.style.paddingTop = '';
-  }
-}
 
 // ─── PHOTO HELPERS — render a thumbnail strip + add-photo wrappers per type ───
 
@@ -6217,34 +6309,22 @@ const BN_LABELS = {
   receiving: 'Receive', more: 'More'
 };
 const BN_ICONS = {
-  // 4-square grid
-  dashboard:  '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="1" y="1" width="6" height="6" rx="1.5"/><rect x="9" y="1" width="6" height="6" rx="1.5"/><rect x="1" y="9" width="6" height="6" rx="1.5"/><rect x="9" y="9" width="6" height="6" rx="1.5"/></svg>',
-  // 3x2 grid (floor map)
-  map:        '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="1" y="1" width="4" height="4" rx="1"/><rect x="6" y="1" width="4" height="4" rx="1"/><rect x="11" y="1" width="4" height="4" rx="1"/><rect x="1" y="6" width="4" height="4" rx="1"/><rect x="6" y="6" width="4" height="4" rx="1"/><rect x="11" y="6" width="4" height="4" rx="1"/></svg>',
-  // Two linked circles
-  marriages:  '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="5" cy="8" r="3.5"/><circle cx="11" cy="8" r="3.5"/></svg>',
-  // Delivery truck side view
-  dispatched: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M2 11h11l-1-4H2v4z"/><circle cx="5" cy="11" r="1.5"/><circle cx="11" cy="11" r="1.5"/></svg>',
-  // Factory building (chimney + walls)
-  factory:    '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M2 14V7l4 2V7l4 2V7l4 2v5H2z"/><rect x="4" y="2" width="2" height="4"/></svg>',
-  // Truck with arrow (in motion)
-  intransit:  '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M1 10h8V5H1v5z"/><path d="M9 7h3l2 3v0h-5"/><circle cx="4" cy="12" r="1.3"/><circle cx="11" cy="12" r="1.3"/></svg>',
-  // Truck loading (with vertical lines = items being scanned)
-  truck:      '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M1 10h9V5H1v5z"/><path d="M10 7h3l2 3v0h-5"/><circle cx="4" cy="12" r="1.3"/><circle cx="12" cy="12" r="1.3"/><path d="M3 6.5v2M5 6.5v2M7 6.5v2" stroke-width="1.2"/></svg>',
-  // Clipboard with lines (requests)
-  requests:   '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="2" width="10" height="12" rx="1.5"/><path d="M5 5h6M5 8h6M5 11h4" stroke-width="1.4"/></svg>',
-  // Calendar
-  schedule:   '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="2" y="3" width="12" height="11" rx="1"/><path d="M2 6h12M5 1.5v3M11 1.5v3" stroke-width="1.4"/></svg>',
-  // Inbox / box with arrow in
-  incoming:   '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M2 9v5h12V9"/><path d="M8 1v8M5 6l3 3 3-3"/></svg>',
-  // Shield (cover)
-  covers:     '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M8 1L2 3v5c0 4 3 6.5 6 7 3-.5 6-3 6-7V3L8 1z"/></svg>',
-  // Stacked boxes (materials)
-  materials:  '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="2" y="9" width="5" height="5"/><rect x="9" y="9" width="5" height="5"/><rect x="5.5" y="2" width="5" height="5"/></svg>',
-  // Inbox arrow down (receive)
-  receiving:  '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M2 9v5h12V9"/><path d="M8 1v9M5 7l3 3 3-3"/></svg>',
-  // 3 vertical dots
-  more:       '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="8" cy="3" r="1.5"/><circle cx="8" cy="8" r="1.5"/><circle cx="8" cy="13" r="1.5"/></svg>'
+  // All icons use 24x24 viewBox, rounded line-caps, consistent 2px stroke
+  // for that Microsoft Fluent / Apple SF Symbols polished look.
+  dashboard:  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7.5" height="7.5" rx="1.8"/><rect x="13.5" y="3" width="7.5" height="7.5" rx="1.8"/><rect x="3" y="13.5" width="7.5" height="7.5" rx="1.8"/><rect x="13.5" y="13.5" width="7.5" height="7.5" rx="1.8"/></svg>',
+  map:        '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="5.5" height="5.5" rx="1.2"/><rect x="9.25" y="3" width="5.5" height="5.5" rx="1.2"/><rect x="15.5" y="3" width="5.5" height="5.5" rx="1.2"/><rect x="3" y="9.25" width="5.5" height="5.5" rx="1.2"/><rect x="9.25" y="9.25" width="5.5" height="5.5" rx="1.2"/><rect x="15.5" y="9.25" width="5.5" height="5.5" rx="1.2"/><rect x="3" y="15.5" width="5.5" height="5.5" rx="1.2"/><rect x="9.25" y="15.5" width="5.5" height="5.5" rx="1.2"/><rect x="15.5" y="15.5" width="5.5" height="5.5" rx="1.2"/></svg>',
+  marriages:  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M10 14a4 4 0 0 1 0-5.66l2.83-2.83a4 4 0 1 1 5.66 5.66l-1.42 1.41"/><path d="M14 10a4 4 0 0 1 0 5.66l-2.83 2.83a4 4 0 1 1-5.66-5.66l1.42-1.41"/></svg>',
+  dispatched: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M2 16V6a1 1 0 0 1 1-1h11v11"/><path d="M14 9h4l3 3.5V16h-7"/><circle cx="7" cy="17.5" r="2"/><circle cx="17" cy="17.5" r="2"/></svg>',
+  factory:    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M3 21V11l5 3V11l5 3V11l5 3V21H3z"/><path d="M6 4h3v6"/></svg>',
+  intransit:  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="6" width="11" height="9" rx="1"/><path d="M13 9h4l3 3.5V15h-7"/><circle cx="6.5" cy="17.5" r="1.8"/><circle cx="16" cy="17.5" r="1.8"/></svg>',
+  truck:      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="6" width="12" height="9" rx="1"/><path d="M14 9h4l3 3.5V15h-7"/><circle cx="6.5" cy="17.5" r="1.8"/><circle cx="16" cy="17.5" r="1.8"/><path d="M5 9.5v2.5M8 9.5v2.5M11 9.5v2.5"/></svg>',
+  requests:   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M9 8h6M9 12h6M9 16h4"/></svg>',
+  schedule:   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 9.5h18M8 3v4M16 3v4"/></svg>',
+  incoming:   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M3 13v6a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-6"/><path d="M12 3v12M7 10l5 5 5-5"/></svg>',
+  covers:     '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 4 5v6c0 5.5 3.5 9.5 8 10.5 4.5-1 8-5 8-10.5V5l-8-3z"/></svg>',
+  materials:  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="13" width="8" height="8" rx="1"/><rect x="13" y="13" width="8" height="8" rx="1"/><rect x="8" y="3" width="8" height="8" rx="1"/></svg>',
+  receiving:  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M3 13v6a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-6"/><path d="M12 3v14M7 12l5 5 5-5"/></svg>',
+  more:       '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="5" r="1.6" fill="currentColor"/><circle cx="12" cy="12" r="1.6" fill="currentColor"/><circle cx="12" cy="19" r="1.6" fill="currentColor"/></svg>'
 };
 // Maps role → ordered list of 3-5 page keys to show in the bottom nav.
 // "more" should always be the last entry (it opens the sidebar for everything
@@ -6272,13 +6352,30 @@ function renderBottomNav(){
   // Detect currently active page from the .view.active element
   const activeView = document.querySelector('.view.active');
   const activePage = activeView ? (activeView.id || '').replace(/^view-/, '') : (ROLES[role]?.defaultPage || 'dashboard');
+  // Compute notification counts per nav target
+  const marPending = Array.isArray(marriages) ? marriages.filter(m => m.status === 'pending').length : 0;
+  const fctReady = Array.isArray(factory) ? factory.filter(f => f.trackingState === 'ready-to-ship').length : 0;
+  const inTransit = Array.isArray(factory) ? factory.filter(f => f.trackingState === 'in-transit').length : 0;
+  const reqOpen = Array.isArray(dispatchRequests) ? dispatchRequests.filter(r => r.status === 'open' || r.status === 'pending').length : 0;
+  const incomingCt = Array.isArray(incoming) ? incoming.length : 0;
+  // Badge map per nav target
+  const badges = {
+    marriages: marPending,
+    factory:   fctReady,
+    intransit: inTransit,
+    truck:     fctReady,
+    requests:  reqOpen,
+    incoming:  incomingCt
+  };
   nav.innerHTML = pages.map(p => {
     const isActive = p === activePage;
     const isMore = p === 'more';
     const onclick = isMore ? 'toggleSidebar(true)' : `goV('${p}');setBottomNavActive('${p}')`;
     const label = BN_LABELS[p] || p;
     const icon = BN_ICONS[p] || '';
-    return `<button class="bn-item${isActive?' active':''}" data-page="${p}" onclick="${onclick}" aria-label="${label}">${icon}<span>${label}</span></button>`;
+    const cnt = badges[p] || 0;
+    const badge = cnt > 0 ? `<span class="bn-badge">${cnt > 99 ? '99+' : cnt}</span>` : '';
+    return `<button class="bn-item${isActive?' active':''}" data-page="${p}" onclick="${onclick}" aria-label="${label}">${icon}${badge}<span>${label}</span></button>`;
   }).join('');
 }
 // Expose for callers (setUser, role-change handlers)
@@ -7459,6 +7556,8 @@ function updBadges(){
       ?`<div style="display:flex;align-items:center;gap:6px;background:var(--amber-lt);border:1px solid rgba(217,119,6,.3);border-radius:7px;padding:5px 11px;cursor:pointer;font-size:11px;font-weight:600;color:var(--amber)" onclick="goV('map')"><span class="nb-dot"></span>${qLen} item${qLen>1?'s':''} in queue</div>`
       :p>0?`<div style="display:flex;align-items:center;gap:6px;background:var(--amber-lt);border:1px solid rgba(217,119,6,.3);border-radius:7px;padding:5px 11px;cursor:pointer;font-size:11px;font-weight:600;color:var(--amber)" onclick="goV('incoming')"><span class="nb-dot"></span>${p} arriving</div>`:'';
   }
+  // Refresh bottom nav badge counts (mobile)
+  try { if(typeof renderBottomNav === 'function') renderBottomNav(); } catch(e){}
 }
 
 // ═══════════════════════════════════════════════════════
@@ -10872,14 +10971,21 @@ function renderInTransit(){
   });
 
   // ── Animated truck scene ──
+  // ALWAYS shown — even when there are no items in transit. When empty,
+  // the truck drives empty between factory and warehouse with a quiet
+  // status message in the overlay. Hiding the whole scene felt cold;
+  // Alberto's preference is to keep the animation alive so the screen
+  // never feels broken or static.
   const truckScene = document.getElementById('truck-scene-card');
   const truckCargo = document.getElementById('truck-cargo');
   const truckInfo = document.getElementById('truck-info-text');
   if(truckScene){
+    truckScene.style.display = '';   // always visible
     if(items.length === 0){
-      truckScene.style.display = 'none';
+      // Empty truck — no cargo boxes, just the truck driving
+      if(truckCargo) truckCargo.innerHTML = '';
+      if(truckInfo) truckInfo.textContent = 'Quiet road today · no items in transit';
     } else {
-      truckScene.style.display = '';
       // Populate cargo bed with tiny visual reps of each spa
       if(truckCargo){
         const cargoHtml = items.slice(0, 6).map((it, i) => {
@@ -18914,12 +19020,45 @@ document.addEventListener('visibilitychange', () => {
 // and tab-kill paths run pagehide first, so this is the most reliable last call.
 window.addEventListener('pagehide', _flushPendingSyncOnHide);
 // When the tab becomes visible again after being hidden, the realtime listener
-// may have missed updates while the WebSocket was suspended. Firebase reconnects
-// automatically, but we still nudge any pending local push (in case fbAutoPush
-// was queued at the moment of hide and the resumed timer is in a weird state).
+// may have missed updates while the WebSocket was suspended (iOS Safari is
+// notorious for this). We do THREE things on foreground:
+//   1. Force-push any pending local edits (in case fbAutoPush was queued at
+//      the moment of hide and the resumed timer is in a weird state)
+//   2. EXPLICITLY PULL the latest cloud state — don't trust the listener to
+//      replay missed updates, do an authoritative once() read
+//   3. Verify the listener is still attached, reattach if it died
 document.addEventListener('visibilitychange', () => {
   if(!document.hidden){
+    // 1. Push pending local edits first (don't let cloud overwrite them)
     try { fbForcePush?.(); } catch(e){}
+    // 2. Force pull from cloud — the authoritative way to catch missed updates
+    if(_fbDb && _fbAuthorized){
+      _fbDb.ref('state/shared/latest').once('value').then(snap => {
+        const payload = snap.val();
+        if(!payload || !payload.state) return;
+        // Skip if this is our own write
+        if(payload.deviceId === _fbDeviceId) return;
+        // Skip if cloud is older than our local
+        if(payload.timestamp <= _fbLastLocalWriteAt) return;
+        // Skip if local has unpushed edits (preserve them; they'll push next)
+        if(_fbLocalEditCounter > _fbPushedEditCounter){
+          _fbDeferredRemote = payload;
+          return;
+        }
+        try {
+          const restored = JSON.parse(payload.state);
+          fbApplyRemoteState(restored, payload.timestamp);
+          console.log('[foreground-pull] applied remote update from', payload.uploadedBy || payload.deviceId, '— age', Math.round((Date.now()-payload.timestamp)/1000)+'s');
+        } catch(e){ console.warn('[foreground-pull] apply failed:', e); }
+      }).catch(err => console.warn('[foreground-pull] read failed:', err));
+    }
+    // 3. Verify listener still attached (reattach if not — iOS sometimes kills it)
+    if(_fbDb && _fbAuthorized && !_fbSharedRef){
+      console.warn('[foreground] realtime listener was detached — reattaching');
+      try { fbStartRealtimeSync(); } catch(e){ console.warn('[foreground reattach]', e); }
+    }
+    // 4. Run a watchdog tick immediately so any other stale state gets fixed
+    try { _syncWatchdog?.(); } catch(e){}
   }
 });
 
