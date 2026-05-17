@@ -1908,17 +1908,7 @@ tbody tr:hover td{background:var(--bg3)}
     border-color: rgba(255, 255, 255, 0.1);
   }
 
-  /* ── Sync badge group: compact ── */
-  #sync-status-badge {
-    padding: 4px 9px !important;
-    font-size: 10.5px !important;
-    font-weight: 600 !important;
-  }
-  #sync-diag-btn {
-    width: 28px !important;
-    height: 28px !important;
-    font-size: 13px;
-  }
+  /* ── Sync badge group: legacy #sync-status-badge / #sync-diag-btn removed in v3.96 ── */
 
   /* ── Auth badge ── */
   #fb-auth-badge { flex-shrink: 0; }
@@ -2240,33 +2230,8 @@ tbody tr:hover td{background:var(--bg3)}
     display: none !important;
   }
 
-  /* Sync badge: compact pill — just visual indicator */
-  #sync-status-group {
-    margin: 0 !important;
-    gap: 3px !important;
-  }
-  #sync-status-badge {
-    padding: 6px 11px !important;
-    font-size: 12px !important;
-    font-weight: 700 !important;
-    border-radius: 100px !important;
-    line-height: 1.2 !important;
-    white-space: nowrap !important;
-    max-width: 44vw !important;
-    overflow: hidden !important;
-    text-overflow: ellipsis !important;
-  }
-  /* When the badge has the pulse animation (= sign-in needed), make it noticeably
-     bigger so users notice it even glancing at the topbar. */
-  #sync-status-badge[style*="pulseAuthBadge"] {
-    padding: 7px 13px !important;
-    font-size: 12.5px !important;
-  }
-  #sync-diag-btn {
-    width: 28px !important;
-    height: 28px !important;
-    font-size: 13px;
-  }
+  /* Legacy #sync-status-group / #sync-status-badge / #sync-diag-btn removed in v3.96
+     The fb-auth-badge handles everything now. */
 
   /* ═══ NOTIFICATION BANNER (the "2 married spas waiting" pill) ═══
      Now lives OUTSIDE the topbar as its own row. No floating, no overlap.
@@ -2588,8 +2553,6 @@ tbody tr:hover td{background:var(--bg3)}
 @media (max-width: 380px) {
   .pg-title { font-size: 16px !important; }
   .user-pill-avatar { width: 28px !important; height: 28px !important; }
-  #sync-status-badge { padding: 3px 7px !important; font-size: 10px !important; }
-  #sync-diag-btn { width: 26px !important; height: 26px !important; }
   .stats-grid { gap: 7px !important; }
   .sc { padding: 13px 14px !important; }
   .sc-val { font-size: 26px !important; }
@@ -3371,7 +3334,7 @@ body.dark-mode .mar-card-track {
       <div class="role-current"><span id="role-indicator">Admin</span></div>
     </div>
   </div>
-  <div class="sb-foot"><div class="sb-ver">v3.95 · <span id="live-date"></span></div></div>
+  <div class="sb-foot"><div class="sb-ver">v3.96 · <span id="live-date"></span></div></div>
 </nav>
 
 <!-- MAIN -->
@@ -4449,7 +4412,7 @@ let _fbInitAttempts = 0;
 //   /app_version/current  (in Firebase console, manually, OR call
 //   pushVersionToFirebase() from the Admin console at deploy time)
 // ══════════════════════════════════════════════════════════════════
-const APP_VERSION = 'v3.95';
+const APP_VERSION = 'v3.96';
 window.APP_VERSION = APP_VERSION;
 
 let _updateBannerShown = false;
@@ -5273,6 +5236,7 @@ function fbApplyRemoteState(restored, sourceTimestamp){
       const state = {nid, units, dispatched, incoming, materials, events, activity, queue, cfg, factory, marriages, dispatchRequests, coverInventory, colorLibrary, coverModelMapping, _saved: ts};
       localStorage.setItem(LS_KEY, JSON.stringify(state));
       _lastSavedHash = stateHash();  // integrity watchdog baseline
+      _lastSavedSig = _stateSig();    // sig baseline — prevents saveState from echo-pushing this state back to cloud
       _fbLastLocalWriteAt = ts;       // newness guard baseline (survives reload via loadState)
     } catch(e){
       console.warn('[remote apply] direct localStorage write failed:', e.message);
@@ -18086,6 +18050,37 @@ function toggleReceived(rid){
 }
 
 
+// ══════════════════════════════════════════════════════════════════════════════
+// STATE SIGNATURE — lightweight fingerprint for change detection
+// ══════════════════════════════════════════════════════════════════════════════
+// In v3.96+, saveState() compares this signature against the last-saved one to
+// detect if state actually changed since the last save. Without this check,
+// every render triggers saveState (via the updBadges wrapper), which
+// increments _fbLocalEditCounter, which makes the realtime listener defer
+// EVERY remote update, which then gets dropped on the next push — meaning
+// Mac → iPhone sync never works. This signature captures every user-mutable
+// field (positions, statuses, photos counts, qtys, etc.) so a legitimate
+// edit always produces a different sig, while a pure render produces the same.
+let _lastSavedSig = '';
+function _stateSig(){
+  try {
+    // Cheap concatenation — no JSON.stringify of huge photo arrays.
+    // Each item contributes the fields that ANY user action can change.
+    const u = units.map(x => `${x.id}:${x.pos||''}:${x.sn||''}:${x.dealer||''}:${x.color||''}:${x.model||''}:${(x.photos||[]).length}:${x.notes||''}:${x.spaSn||''}`).join(',');
+    const d = dispatched.map(x => `${x.id}:${x.status||''}:${x.deliveredAt||''}:${(x.photos||[]).length}:${x.dealer||''}`).join(',');
+    const i = incoming.map(x => `${x.id}:${x.status||''}:${(x.items||[]).length}:${(x.photos||[]).length}:${x.dealer||''}`).join(',');
+    const f = factory.map(x => `${x.id}:${x.trackingState||''}${x.onHold?'H':''}:${(x.trackingHistory||[]).length}:${(x.photos||[]).length}:${x.sn||''}:${x.dealer||''}`).join(',');
+    const mr = marriages.map(x => `${x.id}:${x.status||''}:${x.spaSn||''}:${x.deliveredAt||''}`).join(',');
+    const dr = dispatchRequests.map(x => `${x.id}:${x.status||''}`).join(',');
+    const m = materials.map(x => `${x.id}:${x.qty||0}:${x.pos||''}:${(x.photos||[]).length}:${x.linkedUnitId||''}`).join(',');
+    const c = coverInventory.map(x => `${x.id}:${x.qty||0}:${(x.pending||[]).length}`).join(',');
+    return [nid, u, d, i, f, mr, dr, m, c, events.length, activity.length, queue.length, JSON.stringify(cfg||{})].join('|');
+  } catch(e){
+    // If signature fails, fall back to a random-ish value so save proceeds
+    return 'sig-err-' + Date.now();
+  }
+}
+
 function saveState(){
   // ── ECHO LOOP GUARD ──
   // If we're applying remote state (set by the listener around fbApplyRemoteState
@@ -18093,10 +18088,22 @@ function saveState(){
   // localStorage directly and the state came FROM the cloud — re-pushing it
   // would just bounce back to other devices and they'd bounce it to us,
   // creating a perpetual ping-pong loop wasting Firebase quota.
-  // Render functions (updBadges, drawMap, etc.) call saveState as a safety
-  // net for user-driven mutations; during a remote-apply cycle, we want the
-  // UI to update but NOT trigger a write or push.
   if(_fbApplyingRemote) return;
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // CRITICAL: REAL-CHANGE DETECTION (v3.96)
+  // ──────────────────────────────────────────────────────────────────────────
+  // saveState is called both by real mutations (addUnit, etc.) AND from the
+  // updBadges wrapper that fires on every render. Without this check, every
+  // render bumps _fbLocalEditCounter, making the realtime listener defer
+  // remote updates that then get silently dropped — the Mac → iPhone sync bug.
+  // If the state signature hasn't changed since the last save, this is a
+  // render-driven call with no real edit — skip everything.
+  // ══════════════════════════════════════════════════════════════════════════
+  const sig = _stateSig();
+  if(sig === _lastSavedSig) return;
+  _lastSavedSig = sig;  // mark this state as "seen" — duplicate render-saves now no-op
+
   // SYNCHRONOUS edit mark — must happen BEFORE the debounce. Any remote update
   // arriving after this point but before our push will defer to avoid clobbering
   // this local edit. Counter is only ever incremented; fbCloudSync advances the
@@ -18111,6 +18118,7 @@ function saveState(){
       const state = {nid, units, dispatched, incoming, materials, events, activity, queue, cfg, factory, marriages, dispatchRequests, coverInventory, colorLibrary, coverModelMapping, _saved: now};
       localStorage.setItem(LS_KEY, JSON.stringify(state));
       _lastSavedHash = stateHash();  // mark integrity watchdog "clean" — drift detection from here
+      _lastSavedSig = _stateSig();   // refresh sig in case more changes came in during debounce
       // ── EDGE CASE FIX: bump local-write timestamp ──
       // If we don't update _fbLastLocalWriteAt here, an edit made BEFORE Firebase
       // auth completes leaves _fbLastLocalWriteAt at the loadState() value (which
@@ -18145,6 +18153,7 @@ function flushSave(){
     const state = {nid, units, dispatched, incoming, materials, events, activity, queue, cfg, factory, marriages, dispatchRequests, coverInventory, colorLibrary, coverModelMapping, _saved: now};
     localStorage.setItem(LS_KEY, JSON.stringify(state));
     _lastSavedHash = stateHash();  // mark integrity watchdog "clean"
+    _lastSavedSig = _stateSig();   // mark sig as "seen" to prevent echo in saveState
     _fbLastLocalWriteAt = now;
   }catch(err){
     console.warn('flushSave failed:', err.message);
@@ -18212,108 +18221,14 @@ function checkStateIntegrity(){
 setInterval(checkStateIntegrity, 5000);
 
 // ══════════════════════════════════════════════════════════════════════════════
-// SYNC STATUS INDICATOR — visible badge so you ALWAYS know if data is safe
+// SYNC STATUS INDICATOR — REMOVED in v3.96
 // ══════════════════════════════════════════════════════════════════════════════
-// Shows in the top bar. States:
-//   ✓ Synced              — green     — local==cloud, all good
-//   ⏳ Saving…             — amber     — pending push to Firebase
-//   ⚠ N pending writes     — red       — push failed / offline / not signed in
-//   ⊘ Offline              — gray      — no internet
-// Tapping it forces an immediate cloud sync.
+// The legacy `sync-status-badge` system was removed because it ran in parallel
+// with the newer `fb-auth-badge` (which has a real .info/connected monitor),
+// creating two "✓ Synced" pills in the topbar that could disagree. The auth
+// badge handles everything now — connection state, pending edits, sign-in
+// status. The 🔬 diagnostic button moved to Admin Tools → Sync Diagnostic.
 // ══════════════════════════════════════════════════════════════════════════════
-function _ensureSyncStatusBadge(){
-  let badge = document.getElementById('sync-status-badge');
-  if(badge) return badge;
-  // Build a small group: [✓ Synced] [🔬]
-  const group = document.createElement('span');
-  group.id = 'sync-status-group';
-  group.style.cssText = 'display:inline-flex;align-items:center;gap:4px;margin-right:6px';
-  badge = document.createElement('span');
-  badge.id = 'sync-status-badge';
-  badge.style.cssText = 'display:inline-flex;align-items:center;gap:4px;padding:4px 9px;border-radius:11px;font-size:11px;font-weight:600;cursor:pointer;transition:all .2s;white-space:nowrap';
-  badge.title = 'Click to force cloud sync now';
-  badge.onclick = () => {
-    if(_fbDb && _fbUser && _fbAuthorized){
-      fbCloudSync(true);
-    } else {
-      toast('Not signed in to cloud sync', 'err');
-    }
-  };
-  // Diagnostic button (🔬) — visible to ALL roles so anyone can run the
-  // self-test from their phone if data starts behaving weird
-  const diag = document.createElement('span');
-  diag.id = 'sync-diag-btn';
-  diag.textContent = '🔬';
-  diag.style.cssText = 'display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;border-radius:50%;background:var(--bg3);border:1px solid var(--line);font-size:12px;cursor:pointer;transition:transform .15s';
-  diag.title = 'Run system diagnostic';
-  diag.onclick = () => { try { openDiagnosticPanel(); } catch(e){ console.warn(e); } };
-  diag.onmouseenter = () => { diag.style.transform = 'scale(1.1)'; };
-  diag.onmouseleave = () => { diag.style.transform = 'scale(1)'; };
-  group.appendChild(badge);
-  group.appendChild(diag);
-  // Insert in the top bar — find the auth badge container and place before it
-  const authBadge = document.getElementById('fb-auth-badge');
-  if(authBadge && authBadge.parentElement){
-    authBadge.parentElement.insertBefore(group, authBadge);
-  } else {
-    const tb = document.querySelector('.topbar > div:last-child') || document.querySelector('.topbar');
-    if(tb) tb.insertBefore(group, tb.firstChild);
-  }
-  return badge;
-}
-function updateSyncStatusBadge(){
-  const badge = _ensureSyncStatusBadge();
-  if(!badge) return;
-  const isOnline = navigator.onLine;
-  const sdkLoaded = !!(typeof firebase !== 'undefined' && firebase.database);
-  const isFb = !!(_fbDb && _fbUser && _fbAuthorized);
-  const pending = _fbLocalEditCounter - _fbPushedEditCounter;
-  // Reset click handler each update (state-dependent action)
-  badge.onclick = null;
-  badge.style.cursor = 'default';
-  if(!isOnline){
-    badge.textContent = '⊘ Offline';
-    badge.title = 'No internet — changes saved locally';
-    badge.style.background = '#f3f4f6'; badge.style.color = '#4b5563';
-    return;
-  }
-  // SDK never loaded → "Offline" rather than the misleading "Not signed in"
-  if(!sdkLoaded || _fbSdkLoadFailed){
-    badge.textContent = '⊘ Offline';
-    badge.title = 'Firebase couldn\'t load — changes saved locally, will retry in background';
-    badge.style.background = '#f3f4f6'; badge.style.color = '#4b5563';
-    return;
-  }
-  if(!isFb){
-    // Anonymous auth is initializing. Show a clean "connecting" indicator.
-    // No more CTA — anonymous sign-in happens automatically, the user
-    // doesn't need to do anything.
-    badge.innerHTML = '⏳ Connecting…';
-    badge.title = 'Auto-connecting to cloud sync — this should only take a second';
-    badge.style.background = '#fef3c7';
-    badge.style.color = '#92400e';
-    badge.style.fontWeight = '600';
-    badge.style.cursor = 'default';
-    badge.style.animation = '';
-    return;
-  }
-  // Signed-in states: reset animation
-  badge.style.animation = '';
-  badge.style.fontWeight = '';
-  if(pending > 0){
-    badge.textContent = '⏳ Saving…';
-    badge.title = pending + ' edit' + (pending>1?'s':'') + ' pending';
-    badge.style.background = '#fef3c7'; badge.style.color = '#92400e';
-    return;
-  }
-  badge.textContent = '✓ Synced';
-  badge.title = 'All changes saved to cloud · click to force sync now';
-  badge.style.background = '#dcfce7'; badge.style.color = '#166534';
-}
-// Update once a second so the user always has live feedback
-setInterval(updateSyncStatusBadge, 1000);
-// Initial render after the DOM/topbar exists (deferred so the badge slot is ready)
-setTimeout(updateSyncStatusBadge, 800);
 
 // ══════════════════════════════════════════════════════════════════════════════
 // WRITE CONFIRMATION — verify the cloud actually got what we sent
@@ -18639,6 +18554,9 @@ function loadState(){
     // Initialize the integrity-watchdog baseline so the first 5s tick doesn't
     // see "drift" against an empty hash and fire a spurious flushSave.
     try { _lastSavedHash = stateHash(); } catch(e){}
+    // Initialize the saveState sig baseline so the first render-driven saveState
+    // call from updBadges wrapper doesn't see "change" and trigger an unnecessary push.
+    try { _lastSavedSig = _stateSig(); } catch(e){}
     return true;
   }catch(err){
     console.warn('loadState failed:', err.message);
@@ -19095,6 +19013,7 @@ window.addEventListener('storage', e => {
       if(restored.cfg && typeof restored.cfg === 'object') cfg = mergeCfgPreservingPins(cfg, restored.cfg);
       if(typeof restored._saved === 'number'){ _fbLastLocalWriteAt = restored._saved; }
       try { _lastSavedHash = stateHash(); } catch(e){}
+      try { _lastSavedSig = _stateSig(); } catch(e){}  // prevent echo from saveState wrapper
       // Render INSIDE the flag-protected block so the render's saveState calls
       // get skipped (otherwise updBadges → saveState → fbAutoPush leaks a push).
       try { fbRerenderActiveView?.(); } catch(e){}
