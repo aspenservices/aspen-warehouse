@@ -7521,6 +7521,9 @@ function markMarriageDelivered(mid){
   snapshot(`marriage delivered ${m.spaSn}`);
   m.status = 'delivered';
   m.deliveredDate = toISO();
+  // Auto-locate at marriage inventory shelf — accessory has physically
+  // arrived at the warehouse, so it lives at MINV until dispatch.
+  if(!m.location) m.location = 'MINV';
   // Remove the matching accessory from factory inventory
   if(m.accessoryId){ factory = factory.filter(f => f.id !== m.accessoryId); }
   // Sync: if there is an auto-created Factory Request for this marriage (split-dispatch follow-up),
@@ -9113,7 +9116,7 @@ function drawMap(){
       // Render as a marriage shelf cell at this position.
       const cell = el('div','');
       const items = (typeof marriages !== 'undefined' && Array.isArray(marriages))
-        ? marriages.filter(m => m.location === pos && m.status !== 'fulfilled' && m.status !== 'cancelled')
+        ? marriages.filter(m => m.location === pos && m.status !== 'fulfilled' && m.status !== 'cancelled' && m.status !== 'completed')
         : [];
       cell.style.cssText = 'background:linear-gradient(135deg,#fdf2f8,#fce7f3);border:1.5px solid #db2777;border-radius:6px;min-height:84px;cursor:pointer;display:flex;flex-direction:column;padding:5px 6px;position:relative;overflow:hidden';
       cell.dataset.pos = pos;
@@ -9521,7 +9524,7 @@ function drawMap(){
     if(rk === '13'){
       const pos = 'MINV';
       const items = (typeof marriages !== 'undefined' && Array.isArray(marriages))
-        ? marriages.filter(m => m.location === pos && m.status !== 'fulfilled' && m.status !== 'cancelled')
+        ? marriages.filter(m => m.location === pos && m.status !== 'fulfilled' && m.status !== 'cancelled' && m.status !== 'completed')
         : [];
       const cell = el('div','');
       cell.style.cssText = 'grid-column:span 2;background:linear-gradient(135deg,#fdf2f8,#fce7f3);border:1.5px solid #db2777;border-radius:8px;min-height:74px;cursor:pointer;display:flex;flex-direction:column;padding:8px 12px;position:relative;overflow:hidden';
@@ -9639,7 +9642,7 @@ function openMarriageInventoryPanel(pos){
     floorBox.parentElement.appendChild(panel);
   }
   const stored = marriages.filter(m =>
-    m.location === pos && m.status !== 'fulfilled' && m.status !== 'cancelled'
+    m.location === pos && m.status !== 'fulfilled' && m.status !== 'cancelled' && m.status !== 'completed'
   );
   const unstored = marriages.filter(m =>
     !m.location && (m.status === 'pending' || m.status === 'in_progress')
@@ -10274,8 +10277,16 @@ function showCellPanel(pos,cu){
       </div>` : ''}
     ` : '';
     const dealerC = dealerColor(u.dealer);
-    return `<div class="uc" style="position:relative;${isCover?'border-left:3px solid #7dd3fc;background:#f0f9ff;':isMaterial?'border-left:3px solid var(--orange);background:#fff7ed;':marPending.length?'border-left:3px solid var(--red);':`border-left:4px solid ${dealerC.border};`}">
-      ${!isCover && !isMaterial && !marPending.length ? `<div style="position:absolute;left:-4px;top:8px;bottom:8px;width:4px;background:${dealerC.border};border-radius:2px"></div>` : ''}
+    // ── VISUAL "READY TO DISPATCH" GREEN STATE ──
+    // Per Alberto's spec: when the spa is at warehouse AND its accessory has
+    // arrived at the marriage shelf (MINV), the cell should turn GREEN to
+    // signal "ready to dispatch". marDelivered.length > 0 AND no pending
+    // marriages = ready. This visual is what tells Alberto's team that the
+    // dispatch button is unlocked.
+    const marReady = marDelivered.length > 0 && marPending.length === 0;
+    return `<div class="uc" style="position:relative;${isCover?'border-left:3px solid #7dd3fc;background:#f0f9ff;':isMaterial?'border-left:3px solid var(--orange);background:#fff7ed;':marPending.length?'border-left:3px solid var(--red);background:#fff5f5;':marReady?'border-left:4px solid #10b981;background:#f0fdf4;':`border-left:4px solid ${dealerC.border};`}">
+      ${!isCover && !isMaterial && !marPending.length && !marReady ? `<div style="position:absolute;left:-4px;top:8px;bottom:8px;width:4px;background:${dealerC.border};border-radius:2px"></div>` : ''}
+      ${marReady ? `<div style="position:absolute;right:8px;top:8px;background:#10b981;color:#fff;font-size:9px;font-weight:800;letter-spacing:.05em;padding:2px 7px;border-radius:9px;box-shadow:0 1px 3px rgba(16,185,129,.4)" title="Marriage complete — ready to dispatch">✓ READY</div>` : ''}
       <div class="uc-dealer">${u.dealer}${ageBadge}${u.alreadyInWh?` <span style="display:inline-block;font-size:8.5px;font-weight:800;color:#854d0e;background:#fde68a;border:.5px solid #d97706;padding:1px 5px;border-radius:3px;letter-spacing:.04em;margin-left:6px;vertical-align:middle" title="Pre-existing inventory">📍 WH</span>`:''}${(()=>{
         if(!isStackedType(u.type)) return '';
         const blockers = unitsAbove(u);
@@ -10928,11 +10939,19 @@ function openDispForm(id){
       <strong>Two-step dispatch:</strong> next you'll see a checklist of every item to physically load (spa, cover, accessories). The actual dispatch happens after you confirm each box.
     </div>
     <div class="faction">
-      <button class="btn ${marPending.length?'btn-r':'btn-g'}" onclick="openDispatchChecklist(${id})" style="padding:13px 18px;font-size:13px;font-weight:700">
-        ${marPending.length
-          ? '⚠ Override warning → Pickup Checklist →'
-          : 'Next: Pickup Checklist →'}
-      </button>
+      ${marPending.length ? `
+        <button class="btn" disabled style="padding:13px 18px;font-size:13px;font-weight:700;background:#fee2e2;border:1.5px solid #fecaca;color:#991b1b;opacity:.7;cursor:not-allowed">
+          🔒 BLOCKED — accessory not at warehouse
+        </button>
+        ${currentRole === 'admin' ? `
+          <button class="btn" onclick="if(confirm('ADMIN OVERRIDE: This spa has ${marPending.length} married accessor${marPending.length>1?'ies':'y'} still at the factory. Dispatching now SPLITS the order — the dealer gets the spa WITHOUT the matching accessory. Auto follow-up requests will be created for the missing items. Continue?')) openDispatchChecklist(${id});" style="padding:13px 18px;font-size:12px;font-weight:700;background:#7c2d12;color:#fff;border-color:#7c2d12">
+            🔑 Admin force-dispatch (split order)
+          </button>` : ''}
+      ` : `
+        <button class="btn btn-g" onclick="openDispatchChecklist(${id})" style="padding:13px 18px;font-size:13px;font-weight:700">
+          Next: Pickup Checklist →
+        </button>
+      `}
       <button class="btn" onclick="document.getElementById('float-panel').innerHTML=''">Cancel</button>
     </div>
   </div>`;
@@ -11070,11 +11089,23 @@ function confirmDispatch(id){
   // or if confirmDispatch is called programmatically (e.g., in tests/scripts).
   const authEl = document.getElementById('d-auth');
   if(!authEl){ toast('Dispatch form not open — click Dispatch button first','err'); return; }
-  // Check pending marriages — require double confirmation
+  // ── HARD BLOCK: pending marriages prevent dispatch ──
+  // Per Alberto's spec, a spa cannot be dispatched until its married
+  // accessory is at the warehouse. Only the admin role can force-dispatch
+  // (which auto-creates split-order follow-up requests to the factory).
+  // Defense in depth: openDispForm already disables the button for non-admins,
+  // but this catches any code path that bypasses the UI gate.
   const marPending = marriagesPendingForSn(u.sn);
   if(marPending.length){
+    if(currentRole !== 'admin'){
+      const itemList = marPending.map(m=>`• ${m.accessoryName}`).join('\n');
+      alert(`🔒 BLOCKED — Cannot dispatch S/N ${u.sn}\n\nThis spa is married to ${marPending.length} accessor${marPending.length>1?'ies':'y'} still at the factory:\n\n${itemList}\n\nWait for the accessor${marPending.length>1?'ies':'y'} to arrive, OR ask an admin to force-dispatch (which creates a split order).`);
+      toast(`🔒 Dispatch blocked — ${marPending.length} accessor${marPending.length>1?'ies':'y'} not yet at warehouse`, 'err');
+      return;
+    }
+    // Admin path: confirm the split-dispatch explicitly
     const itemList = marPending.map(m=>`• ${m.accessoryName}`).join('\n');
-    if(!confirm(`⚠ WARNING: This spa has ${marPending.length} married accessor${marPending.length>1?'ies':'y'} still at the factory:\n\n${itemList}\n\nDispatching now will SPLIT the order. The dealer will receive the spa without the matching accessory.\n\nReally dispatch anyway?`)) return;
+    if(!confirm(`⚠ ADMIN OVERRIDE — Force-dispatch S/N ${u.sn}?\n\n${marPending.length} married accessor${marPending.length>1?'ies':'y'} still at factory:\n\n${itemList}\n\nThis SPLITS the order — the dealer will receive the spa WITHOUT the matching accessor${marPending.length>1?'ies':'y'}. Auto follow-up factory requests will be created.\n\nProceed?`)) return;
   }
   // Stack-above check — auto-drop upper tubs to fill the gap
   const above = unitsAbove(u);
@@ -11128,10 +11159,12 @@ function confirmDispatch(id){
     toast(`⚠ ${marPending.length} follow-up request${marPending.length>1?'s':''} auto-created — factory must ship the missing accessor${marPending.length>1?'ies':'y'} to ${u.dealer}`,'amber');
   }
   // Mark remaining marriages (already delivered) as completed
+  // and clear their location — accessory physically left MINV with the spa.
   marriages.forEach(m=>{
     if(m.spaSn===u.sn && m.status==='delivered'){
       m.status = 'completed';
       m.dispatchedDate = date;
+      m.location = null;   // no longer at MINV — went out with the spa
     }
   });
   closePanel();drawMap();updBadges();
@@ -11620,8 +11653,9 @@ function receiveTransitItem(factoryId){
     if(m){
       m.status = 'delivered';
       m.deliveredDate = at;
-      addAct(`📬 Married accessory received: ${item.dealer} for S/N ${item.marriedSn}`,'var(--teal)');
-      toast(`Marriage delivered for S/N ${item.marriedSn}`,'ok');
+      if(!m.location) m.location = 'MINV';
+      addAct(`📬 Married accessory received: ${item.dealer} for S/N ${item.marriedSn} · placed at MINV`,'var(--teal)');
+      toast(`Marriage delivered for S/N ${item.marriedSn} — at MINV`,'ok');
     }
     factory.splice(factory.indexOf(item), 1);
     renderMarriages(); renderFactory?.(); renderInTransit?.(); drawMap?.(); updBadges();
@@ -15620,7 +15654,7 @@ function build3DMarriageShelf(scene){
   // Accessory boxes representing live marriages
   const accMat = new THREE.MeshStandardMaterial({color:0xf9a8d4, roughness:0.5});
   const liveCount = (typeof marriages !== 'undefined' && Array.isArray(marriages))
-    ? marriages.filter(m => m.location === 'MINV' && m.status !== 'fulfilled' && m.status !== 'cancelled').length
+    ? marriages.filter(m => m.location === 'MINV' && m.status !== 'fulfilled' && m.status !== 'cancelled' && m.status !== 'completed').length
     : 0;
   const showBoxes = Math.min(liveCount, 6);
   for(let i = 0; i < showBoxes; i++){
@@ -17358,6 +17392,60 @@ function handleQRPayload(raw, mode){
   // the normal handler — marriage labels aren't expected in those flows.
   // ══════════════════════════════════════════════════════════════════
   let found = null;
+
+  // ══════════════════════════════════════════════════════════════════
+  // MARRIAGE LABEL — LOAD / DISPATCH HANDLER (bug fix)
+  // ──────────────────────────────────────────────────────────────────
+  // Marriage QR payloads encode {type:'marriage', mid, sn, acc, dealer}
+  // where `sn` is the SPA's serial number — NOT the accessory's. When
+  // the Truck role scanned a marriage label in 'load' mode, the fallback
+  // SN-lookup would resolve to the SPA factory record. If that spa was
+  // already loaded (in-transit), the scan would reject with "already on
+  // truck" — leaving the accessory permanently un-scannable from its
+  // own label.
+  //
+  // Fix: in load/dispatch modes, when we see a marriage QR, route to
+  // the ACCESSORY factory record (via marriage.accessoryId) instead.
+  // The spa's tracking state is irrelevant — it has its own label.
+  // ══════════════════════════════════════════════════════════════════
+  if(parsedType === 'marriage' && parsedMid != null && (mode === 'load' || mode === 'dispatch')){
+    const m = marriages.find(x => x.id === parsedMid);
+    if(!m){
+      setScanResult('err', 'MAR-' + parsedMid, 'marriage not found locally · pulling latest from cloud…');
+      toast(`Marriage MAR-${parsedMid} not found · syncing — scan again in 2 seconds`, 'err');
+      try { if(typeof fbCloudSync === 'function' && _fbDb && _fbAuthorized) fbCloudSync(true); } catch(e){}
+      if(_qrScanState) _qrScanState.scanning = true;
+      return;
+    }
+    // Find the accessory in factory[] by accessoryId (NOT by sn — sn is the spa's)
+    let acc = m.accessoryId != null ? factory.find(f => f.id === m.accessoryId) : null;
+    if(!acc){
+      // Fallback: some older marriages stored only accessoryName + marriedSn on the
+      // factory record. Try matching by marriedSn + accessory name.
+      acc = factory.find(f =>
+        (f.type === 'accessory' || f.type === 'misc') &&
+        f.marriedSn === m.spaSn &&
+        (f.dealer === m.accessoryName || f.name === m.accessoryName)
+      );
+    }
+    if(!acc){
+      setScanResult('err', m.accessoryName || ('MAR-'+m.id), 'accessory not in factory inventory');
+      toast(`Accessory for MAR-${m.id} not found at factory — check Marriages tab`, 'err');
+      if(_qrScanState) _qrScanState.scanning = true;
+      return;
+    }
+    // Now treat `acc` as the item being scanned. Reuse the normal flow below
+    // by populating `found` and falling through to the mode handlers.
+    found = { item: acc, source: 'factory' };
+    // Override parsedSn so any downstream logging shows the accessory dealer
+    // instead of the spa's SN. Keep the marriage context in a sidecar var so
+    // syncMarriageOnAccessoryTransit can short-circuit if needed.
+    parsedSn = '';   // accessories don't have a SN; suppress SN-based messaging
+    // Replace the raw-JSON tid with a human-readable accessory identifier so
+    // toasts/activity log don't dump JSON into the UI.
+    tid = (acc.dealer || acc.name || `MAR-${parsedMid}`);
+  }
+
   if(parsedType === 'marriage' && parsedMid != null && mode === 'receive'){
     // Re-parse the raw QR to grab the accessory name + dealer
     let parsedAccName = '';
@@ -17466,6 +17554,12 @@ function handleQRPayload(raw, mode){
       m.accessoryId = m.accessoryId || acc.id;
       m.status = 'delivered';
       m.deliveredDate = m.deliveredDate || toISO();
+      // Auto-locate at the marriage inventory shelf (MINV) so the
+      // physical accessory has a "home" tracked in the system.
+      // Alberto's flow: spa + accessory both live at warehouse,
+      // accessory in MINV, spa in its assigned cell — both must be
+      // present before the spa can dispatch.
+      if(!m.location) m.location = 'MINV';
       addAct(`📬 Received married accessory: ${parsedAccName || acc.dealer} for S/N ${m.spaSn}`, 'var(--teal)');
       setScanResult('ok', `for S/N ${m.spaSn}`, `received: ${parsedAccName || acc.dealer || 'accessory'} · spa ${spaLocation}`);
       toast(`✓ Received accessory for S/N ${m.spaSn}`,'ok');
@@ -17479,6 +17573,7 @@ function handleQRPayload(raw, mode){
       snapshot('marriage receive (no factory record)');
       m.status = 'delivered';
       m.deliveredDate = m.deliveredDate || toISO();
+      if(!m.location) m.location = 'MINV';
       const recoveredNote = marriageWasLocallyKnown ? '' : ' (recovered from QR — was missing locally)';
       addAct(`📬 Marriage delivered${recoveredNote}: ${m.accessoryName} for S/N ${m.spaSn}`, 'var(--teal)');
       setScanResult('ok', `for S/N ${m.spaSn}`, `marked delivered · spa ${spaLocation}${recoveredNote}`);
@@ -17627,9 +17722,13 @@ function handleQRPayload(raw, mode){
         if(m){
           m.status = 'delivered';
           m.deliveredDate = at;
-          addAct(`📬 Married accessory received: ${item.dealer} for S/N ${item.marriedSn}`,'var(--teal)');
-          setScanResult('ok', item.dealer, `marriage delivered for ${item.marriedSn}`);
-          toast(`Marriage delivered for S/N ${item.marriedSn}`,'ok');
+          // Auto-locate at the marriage inventory shelf so the accessory
+          // has a tracked "home" — Alberto's flow: married accessories
+          // sit at MINV until the spa is dispatched.
+          if(!m.location) m.location = 'MINV';
+          addAct(`📬 Married accessory received: ${item.dealer} for S/N ${item.marriedSn} · placed at MINV`,'var(--teal)');
+          setScanResult('ok', item.dealer, `marriage delivered for ${item.marriedSn} · MINV`);
+          toast(`Marriage delivered for S/N ${item.marriedSn} — at MINV`,'ok');
         } else {
           addAct(`📬 Accessory received: ${item.dealer}`,'var(--teal)');
           setScanResult('ok', item.dealer, 'received');
@@ -17681,6 +17780,30 @@ function handleQRPayload(raw, mode){
       return;
     }
   } else if(mode === 'dispatch'){
+    // ── HARD BLOCK: pending marriages prevent dispatch ──
+    // The QR-dispatch path is used by warehouse loaders to scan each spa
+    // as it goes onto the dealer's truck. Same business rule as the UI
+    // dispatch button: cannot dispatch a spa whose accessory is still at
+    // the factory. Only admin can force-dispatch.
+    const snForMarCheck = item.sn || (found && found.source === 'units' ? item.sn : '') || parsedSn;
+    if(snForMarCheck && typeof marriagesPendingForSn === 'function'){
+      const marPending = marriagesPendingForSn(String(snForMarCheck));
+      if(marPending.length){
+        if(currentRole !== 'admin'){
+          const itemNames = marPending.map(m => m.accessoryName).join(', ');
+          setScanResult('err', item.sn||tid, `🔒 BLOCKED — ${marPending.length} accessor${marPending.length>1?'ies':'y'} not at warehouse: ${itemNames}`);
+          toast(`🔒 Cannot dispatch S/N ${snForMarCheck} — waiting for ${marPending.length} accessor${marPending.length>1?'ies':'y'} from factory`, 'err');
+          if(_qrScanState) _qrScanState.scanning = true;
+          return;
+        }
+        // Admin override — but still warn explicitly
+        const itemList = marPending.map(m=>'• '+m.accessoryName).join('\n');
+        if(!confirm(`⚠ ADMIN OVERRIDE — Dispatch S/N ${snForMarCheck} anyway?\n\nMissing accessories:\n${itemList}\n\nThis will SPLIT the order. Continue?`)){
+          if(_qrScanState) _qrScanState.scanning = true;
+          return;
+        }
+      }
+    }
     item.trackingState = 'dispatched-out';
     item.trackingHistory.push({state:'dispatched-out', at, by});
     addAct(`🚚 Dispatched: ${item.sn||tid} (${item.dealer||''})`,'var(--accent)');
@@ -18868,6 +18991,7 @@ function shipMarriageFromMarriages(mid){
     snapshot('marriage shipped from marriages (no factory record)');
     m.status = 'delivered';
     m.deliveredDate = toISO();
+    if(!m.location) m.location = 'MINV';
     addAct(`✈ Marriage marked delivered (Marriages crew): ${m.accessoryName} → S/N ${m.spaSn}`,'var(--teal)');
     toast(`Marriage marked delivered`,'ok');
     renderMarriages();
@@ -20630,11 +20754,13 @@ function runIntegrityChecks(){
       if(acc && (acc.trackingState === 'in-transit' || acc.trackingState === 'received-at-wh' || acc.trackingState === 'received-at-warehouse')){
         m.status = 'delivered';
         m.deliveredDate = m.deliveredDate || toISO();
+        if(!m.location) m.location = 'MINV';
         fixed++;
       } else if(!acc){
         // Factory accessory gone — assume already received and update marriage
         m.status = 'delivered';
         m.deliveredDate = m.deliveredDate || toISO();
+        if(!m.location) m.location = 'MINV';
         fixed++;
       }
     });
