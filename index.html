@@ -3283,7 +3283,7 @@ body.dark-mode .mar-card-track {
     <div class="nav-sec sb-sec" data-section="inventory">Inventory</div>
     <div class="ni" data-page="incoming" data-section="inventory" onclick="goV('incoming')">
       <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M8 1v10M4 7l4 4 4-4M2 13h12"/></svg>
-      Incoming Spas
+      Incoming
       <span class="nb amber" id="nb-inc">0</span>
     </div>
     <div class="ni" data-page="truck" data-section="inventory" onclick="goV('truck')">
@@ -3714,7 +3714,7 @@ body.dark-mode .mar-card-track {
     <div class="card-hd">
       <div>
         <div class="card-title">Incoming List</div>
-        <div class="card-sub" id="inc-summary">Spas arriving to warehouse</div>
+        <div class="card-sub" id="inc-summary">All items arriving to warehouse</div>
       </div>
       <button class="btn btn-sm" id="inc-add-toggle" onclick="document.getElementById('inc-add-collapsed').style.display='block';this.style.display='none'">
         + Add Manually
@@ -6029,12 +6029,16 @@ function displayItemId(item, opts){
   const o = opts || {};
   const sub = o.subFontSize || '12px';   // size of the "for" prefix
   const esc = (s) => (typeof escapeHTML === 'function') ? escapeHTML(String(s)) : String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  // Virtual marriage entry (from Incoming page) — show MAR-N ID
+  if(item.type === 'marriage' && item._marriageId != null){
+    return `<span style="font-size:${sub};color:#831843;font-weight:600;letter-spacing:0">MAR-${esc(item._marriageId)}</span>`;
+  }
   // 1. Own S/N (spas + extras + any item with an explicit sn)
   if(item.sn) return esc(item.sn);
-  // 2. Married accessory → spa S/N it travels with
+  // 2. Married accessory → spa S/N it travels with (factory record OR virtual transit)
   const isAcc = item.type === 'accessory' || item.type === 'misc';
-  if(isAcc && item.marriedSn){
-    return `<span style="font-size:${sub};color:var(--text2);font-weight:600;letter-spacing:0">🔗 for</span> ${esc(item.marriedSn)}`;
+  if(isAcc && (item.marriedSn || item._marriedSn)){
+    return `<span style="font-size:${sub};color:var(--text2);font-weight:600;letter-spacing:0">🔗 for</span> ${esc(item.marriedSn || item._marriedSn)}`;
   }
   // 3. Loose accessory → dealer name (no S/N to show)
   if(isAcc && item.dealer) return esc(item.dealer);
@@ -8169,7 +8173,7 @@ const PAGES = {
   factory:['Factory Warehouse','Aspen production · Spas & accessories ready to ship'],
   marriages:['Marriages','Spa + accessory pairings — must ship together'],
   covers:['Cover Inventory','Spa covers in warehouse storage · auto-decrements when assigned to a spa'],
-  incoming:['Incoming Spas','Units arriving to warehouse'],
+  incoming:['Incoming','All items arriving to warehouse · spas · accessories · marriages · materials · covers'],
   intransit:['In Transit','Spas & accessories loaded on truck · waiting at warehouse'],
   truck:['Loading Bay','Ready to load · scan QR to put on truck'],
   materials:['Materials','Receive & log supplies with photo'],
@@ -9668,6 +9672,9 @@ function openMarriageInventoryPanel(pos){
     const floorBox = document.getElementById('floor');
     floorBox.parentElement.appendChild(panel);
   }
+  // Tag the panel with its current pos so other functions (rmMarriage, edit,
+  // etc.) can re-render in place after mutating a marriage.
+  panel.dataset.minvPos = pos;
   const stored = marriages.filter(m =>
     m.location === pos && m.status !== 'fulfilled' && m.status !== 'cancelled' && m.status !== 'completed'
   );
@@ -9701,10 +9708,14 @@ function openMarriageInventoryPanel(pos){
                  <div style="font-size:11px;color:var(--text2);margin-top:3px;font-family:var(--mono)">→ Tina ${escapeHTML(m.spaSn || '?')} · ${escapeHTML(m.spaDealer || '?')}</div>
                  ${m.notes ? `<div style="font-size:10.5px;color:var(--text2);margin-top:4px;font-style:italic">"${escapeHTML(m.notes)}"</div>` : ''}
                </div>
-               <div style="display:flex;gap:6px;align-items:center">
+               <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
                  <span style="font-size:10px;background:${m.status==='in_progress'?'#fef3c7':'#dbeafe'};color:${m.status==='in_progress'?'#92400e':'#1e40af'};padding:3px 8px;border-radius:4px;font-weight:700;letter-spacing:.04em">${(m.status||'pending').toUpperCase()}</span>
                  <button class="btn" onclick="moveMarriageLocation(${m.id})" style="padding:5px 10px;font-size:11px">Move</button>
                  <button class="btn" onclick="fulfillMarriage(${m.id})" style="padding:5px 10px;font-size:11px;background:#15803d;color:#fff;border-color:#166534">✓ Fulfill</button>
+                 ${currentRole === 'admin' ? `
+                   <button class="btn" onclick="openMarriageEdit(${m.id})" style="padding:5px 10px;font-size:11px;background:#fde68a;color:#78350f;border-color:#f59e0b" title="Edit marriage (admin only)">✏ Edit</button>
+                   <button class="btn" onclick="rmMarriage(${m.id})" style="padding:5px 10px;font-size:11px;background:#fee2e2;color:#991b1b;border-color:#fca5a5" title="Delete marriage (admin only)">🗑 Delete</button>
+                 ` : ''}
                </div>
              </div>
            `).join('')}
@@ -11570,6 +11581,10 @@ function renderIncoming(){
       sn: f.sn,
       dealer: f.dealer,
       type: f.type,
+      // Surface marriage pairing info for married accessory items so they
+      // display with helpful context rather than just "accessory".
+      _marriedSn: f.marriedSn || null,
+      _accessoryName: (f.type === 'accessory' || f.type === 'misc') ? f.dealer : null,
       date: transitEvent?.at ? transitEvent.at.split('T')[0] : '',
       status: 'transit-virtual',
       trackingId: f.trackingId,
@@ -11578,16 +11593,42 @@ function renderIncoming(){
       transitLoadedBy: transitEvent?.by
     };
   });
-  // Combined list: real incoming entries first (existing flow), then in-transit virtuals
-  const combined = [...incoming, ...virtualIncoming];
+  // ── NEW: virtual entries for delivered marriages now at MINV ──
+  // Per Alberto's spec: Incoming should surface everything that has arrived
+  // at the warehouse, including married accessories that are waiting at the
+  // marriage shelf (MINV) to be paired with their spa for dispatch.
+  const arrivedMarriages = (Array.isArray(marriages) ? marriages : [])
+    .filter(m => m.status === 'delivered' && m.location === 'MINV')
+    .map(m => ({
+      id: 'mar-' + m.id,
+      _marriageId: m.id,
+      _isMarriageArrived: true,
+      sn: '',
+      dealer: m.accessoryName || 'Accessory',
+      type: 'marriage',
+      _marriedSn: m.spaSn,
+      _accessoryName: m.accessoryName,
+      _accessoryQty: m.accessoryQty || 1,
+      date: (m.deliveredDate || '').split('T')[0] || '',
+      status: 'arrived-marriage',
+      trackingHistory: []
+    }));
+  // Combined list: real incoming entries first, then in-transit virtuals
+  // (spas + accessories + materials), then arrived marriages at MINV.
+  const combined = [...incoming, ...virtualIncoming, ...arrivedMarriages];
   if(!combined.length){
-    wrap.innerHTML = `<div style="padding:34px 14px;text-align:center;color:var(--text3);font-size:13px">No incoming units. <button class="btn btn-sm btn-p" onclick="document.getElementById('inc-add-toggle').click()" style="margin-left:8px">+ Add Manually</button></div>`;
-    if(summary) summary.textContent = 'Spas arriving to warehouse';
+    wrap.innerHTML = `<div style="padding:34px 14px;text-align:center;color:var(--text3);font-size:13px">No incoming items. <button class="btn btn-sm btn-p" onclick="document.getElementById('inc-add-toggle').click()" style="margin-left:8px">+ Add Manually</button></div>`;
+    if(summary) summary.textContent = 'All items arriving to warehouse';
     return;
   }
-  // Sort: arrived (needs position) first, then in-transit virtuals, then in-queue by date asc
+  // Sort: arrived (needs position) first, arrived marriages second, in-transit third, queued last
   const sorted = combined.slice().sort((a, b) => {
-    const order = (it) => it.status === 'arrived' ? 0 : (it._isTransitVirtual ? 1 : 2);
+    const order = (it) => {
+      if(it.status === 'arrived') return 0;
+      if(it._isMarriageArrived) return 1;
+      if(it._isTransitVirtual) return 2;
+      return 3;
+    };
     const oa = order(a), ob = order(b);
     if(oa !== ob) return oa - ob;
     return (a.date||'').localeCompare(b.date||'');
@@ -11595,29 +11636,47 @@ function renderIncoming(){
   const arrivedCnt = incoming.filter(x => x.status === 'arrived').length;
   const queueCnt = incoming.filter(x => x.status !== 'arrived' && x.status !== 'stored').length;
   const transitCnt = virtualIncoming.length;
+  const marArrCnt = arrivedMarriages.length;
   if(summary){
     const parts = [];
     if(arrivedCnt) parts.push(`<span style="color:var(--teal);font-weight:600">${arrivedCnt} arrived · need position</span>`);
+    if(marArrCnt) parts.push(`<span style="color:#831843;font-weight:600">💍 ${marArrCnt} marriage${marArrCnt>1?'s':''} at MINV</span>`);
     if(transitCnt) parts.push(`<span style="color:#d97706;font-weight:600">🚛 ${transitCnt} in transit</span>`);
     if(queueCnt) parts.push(`<span style="color:var(--amber)">${queueCnt} expected</span>`);
-    summary.innerHTML = parts.length ? parts.join(' · ') : 'Spas arriving to warehouse';
+    summary.innerHTML = parts.length ? parts.join(' · ') : 'All items arriving to warehouse';
   }
   wrap.innerHTML = sorted.map(it => {
-    const typeIcon = {hot:'🛁', swim:'🏊', extra:'📦'}[it.type] || '📦';
-    const typeLabel = {hot:'Hot Tub', swim:'Swim Spa', extra:'Extra/Stock'}[it.type] || it.type;
+    // Expanded type metadata — covers spas, accessories, marriages, materials, covers
+    const typeIcon = {
+      hot: '🛁', swim: '🏊', extra: '📦',
+      accessory: '🔧', misc: '📋',
+      material: '🧱', cover: '🎯',
+      marriage: '💍'
+    }[it.type] || '📦';
+    const typeLabel = {
+      hot: 'Hot Tub', swim: 'Swim Spa', extra: 'Extra/Stock',
+      accessory: 'Accessory', misc: 'Misc',
+      material: 'Material', cover: 'Cover',
+      marriage: 'Marriage'
+    }[it.type] || (it.type ? it.type.charAt(0).toUpperCase()+it.type.slice(1) : 'Item');
     const arrived = it.status === 'arrived';
     const isTransit = it._isTransitVirtual;
-    // Card styling: green for arrived, amber for in-transit, white for queue
+    const isMarArr = it._isMarriageArrived;
+    // Card styling: green for arrived spas, pink for arrived marriages, amber for in-transit, white for queue
     const cardStyle = arrived
       ? 'background:#ecfdf5;border-color:#6ee7b7'
-      : isTransit
-        ? 'background:#fef3c7;border-color:#fcd34d'
-        : 'background:#fff;border-color:var(--line)';
+      : isMarArr
+        ? 'background:#fdf2f8;border-color:#f9a8d4'
+        : isTransit
+          ? 'background:#fef3c7;border-color:#fcd34d'
+          : 'background:#fff;border-color:var(--line)';
     const statusBadge = arrived
       ? `<span style="background:#10b981;color:#fff;padding:4px 11px;border-radius:11px;font-size:10px;font-weight:700;letter-spacing:.06em;white-space:nowrap">✓ ARRIVED · NEEDS POSITION</span>`
-      : isTransit
-        ? `<span style="background:#d97706;color:#fff;padding:4px 11px;border-radius:11px;font-size:10px;font-weight:700;letter-spacing:.06em;white-space:nowrap">🚛 IN TRANSIT</span>`
-        : `<span style="background:#fef3c7;color:#78350f;padding:4px 11px;border-radius:11px;font-size:10px;font-weight:700;letter-spacing:.06em;white-space:nowrap">⏳ IN QUEUE</span>`;
+      : isMarArr
+        ? `<span style="background:#db2777;color:#fff;padding:4px 11px;border-radius:11px;font-size:10px;font-weight:700;letter-spacing:.06em;white-space:nowrap">💍 AT MINV · READY TO SHIP</span>`
+        : isTransit
+          ? `<span style="background:#d97706;color:#fff;padding:4px 11px;border-radius:11px;font-size:10px;font-weight:700;letter-spacing:.06em;white-space:nowrap">🚛 IN TRANSIT</span>`
+          : `<span style="background:#fef3c7;color:#78350f;padding:4px 11px;border-radius:11px;font-size:10px;font-weight:700;letter-spacing:.06em;white-space:nowrap">⏳ IN QUEUE</span>`;
     // Actions vary by status
     let actions;
     if(arrived){
@@ -11625,6 +11684,10 @@ function renderIncoming(){
          <button class="btn" style="padding:13px 14px;min-height:48px;background:#fef2f2;border-color:#fecaca;color:#991b1b" onclick="rejectIncoming(${it.id})" title="Reject — return to factory">✗ Reject</button>
          <button class="btn tracking-btn" style="padding:13px 14px;min-height:48px" onclick="openTrackingHistory('incoming',${it.id})" title="View tracking history (admin only)">📜</button>
          <button class="btn btn-r" style="padding:13px 16px;min-height:48px" onclick="rmFromIncoming(${it.id})" title="Remove">✕</button>`;
+    } else if(isMarArr){
+      // Arrived marriage at MINV — link to floor map MINV shelf for management
+      actions = `<button class="btn btn-p" style="padding:13px 20px;font-size:14px;font-weight:700;flex:1 1 200px;min-height:48px;background:#db2777;border-color:#db2777" onclick="goV('map');setTimeout(()=>{if(typeof openMarriageInventoryPanel==='function')openMarriageInventoryPanel('MINV')},220)">💍 Open MINV Shelf</button>
+         <button class="btn" style="padding:13px 14px;min-height:48px" onclick="goV('marriages')" title="Go to Marriages page">📋 Marriages</button>`;
     } else if(isTransit){
       // In-transit virtual entries — show "receive now" and "reject" actions referencing the factory item
       actions = `<button class="btn btn-p" style="padding:13px 20px;font-size:14px;font-weight:700;flex:1 1 200px;min-height:48px;background:#16a34a;border-color:#16a34a" onclick="receiveTransitItem(${it._factoryId})">✓ Mark Received at WH</button>
@@ -11639,9 +11702,18 @@ function renderIncoming(){
          <button class="btn tracking-btn" style="padding:13px 14px;min-height:48px" onclick="openTrackingHistory('incoming',${it.id})" title="View tracking history (admin only)">📜</button>
          <button class="btn btn-r" style="padding:13px 16px;min-height:48px" onclick="rmFromIncoming(${it.id})" title="Remove">✕</button>`;
     }
-    const meta = isTransit
-      ? `<strong>${it.dealer||'No dealer'}</strong> · ${typeLabel} · <span style="color:#92400e;font-weight:600">loaded ${it.transitLoadedAt ? fmtTrackingTime(it.transitLoadedAt) : 'recently'}</span>${it.transitLoadedBy ? ' by '+it.transitLoadedBy : ''}`
-      : `<strong>${it.dealer||'No dealer'}</strong> · ${typeLabel} · expected ${it.date||'—'}`;
+    // Build the descriptor line. Surface marriage pairing for accessory items
+    // and marriage entries so the unified list reads clearly at a glance.
+    let meta;
+    if(isMarArr){
+      meta = `<strong>${it._accessoryName || 'Accessory'}</strong>${it._accessoryQty>1?` × ${it._accessoryQty}`:''} · <span style="color:#831843;font-weight:600">💍 Paired with S/N ${it._marriedSn || '?'}</span> · delivered ${it.date||'—'}`;
+    } else if(isTransit && it._marriedSn){
+      meta = `<strong>${it._accessoryName || it.dealer || 'Accessory'}</strong> · ${typeLabel} · <span style="color:#831843;font-weight:600">💍 for S/N ${it._marriedSn}</span> · <span style="color:#92400e;font-weight:600">loaded ${it.transitLoadedAt ? fmtTrackingTime(it.transitLoadedAt) : 'recently'}</span>`;
+    } else if(isTransit){
+      meta = `<strong>${it.dealer||'No dealer'}</strong> · ${typeLabel} · <span style="color:#92400e;font-weight:600">loaded ${it.transitLoadedAt ? fmtTrackingTime(it.transitLoadedAt) : 'recently'}</span>${it.transitLoadedBy ? ' by '+it.transitLoadedBy : ''}`;
+    } else {
+      meta = `<strong>${it.dealer||'No dealer'}</strong> · ${typeLabel} · expected ${it.date||'—'}`;
+    }
     return `<div style="${cardStyle};border:1.5px solid;border-radius:11px;padding:14px 16px;margin:11px 14px;display:flex;flex-direction:column;gap:11px">
       <div style="display:flex;align-items:start;justify-content:space-between;gap:12px;flex-wrap:wrap">
         <div style="flex:1 1 auto;min-width:0">
@@ -18646,6 +18718,12 @@ function rmMarriage(mid){
   addAct(`🗑 Marriage removed: ${m.accessoryName} ↔ S/N ${m.spaSn}`, 'var(--red)');
   toast('Marriage removed','ok');
   renderMarriages(); renderFactory(); drawMap(); updBadges();
+  // If the Marriage Inventory panel is open, re-render it in place so the
+  // deleted row disappears without the user needing to re-click the cell.
+  const openPanel = document.getElementById('cellDetails');
+  if(openPanel && openPanel.dataset.minvPos){
+    openMarriageInventoryPanel(openPanel.dataset.minvPos);
+  }
 }
 
 // ─── EDIT EXISTING MARRIAGE ───
@@ -18747,6 +18825,11 @@ function saveMarriageEdit(mid){
   if(typeof renderFactory === 'function') renderFactory();
   if(typeof drawMap === 'function') drawMap();
   updBadges();
+  // If the Marriage Inventory panel is open, re-render in place so updates show
+  const openPanel = document.getElementById('cellDetails');
+  if(openPanel && openPanel.dataset.minvPos){
+    openMarriageInventoryPanel(openPanel.dataset.minvPos);
+  }
 }
 
 // ─── PRINT MARRIAGE LABEL ───
