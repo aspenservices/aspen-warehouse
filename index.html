@@ -8734,6 +8734,33 @@ function collectMatItems(){
 function renderQueue(){
   const el=document.getElementById('queue-list');
   if(!el)return;
+  // ── DEFENSIVE BACKFILL ──
+  // Any 'arrived' incoming entry should have a matching queue entry so the
+  // user can drag it onto the floor map. Older versions of this app or
+  // scan-receive paths could leave arrived items without a queue mirror,
+  // making them invisible in the "Arriving to Warehouse" panel even though
+  // the top banner says "X units arrived". Backfill silently on every render.
+  try {
+    if(Array.isArray(incoming) && Array.isArray(queue)){
+      incoming.forEach(i => {
+        if(i.status !== 'arrived') return;
+        if(queue.some(q => q.id === i.id)) return;
+        // Don't mirror accessories/misc that came in as married-accessory receives
+        // (those don't appear in the floor-map queue — they live in the marriage
+        // shelf via the marriage record).
+        if(i.type === 'accessory' || i.type === 'misc') return;
+        queue.push({
+          id: i.id,
+          sn: i.sn || '',
+          dealer: i.dealer || '',
+          type: i.type || 'hot',
+          qty: 1,
+          entry: i.date || i.arrivedAt ? toDateStr(i.arrivedAt||i.date) : toISO(),
+          _fromIncoming: true
+        });
+      });
+    }
+  } catch(e){ console.warn('[renderQueue backfill]', e); }
   // Virtual queue entries for factory items currently in-transit to warehouse — these
   // appear in the Arriving sidebar so the warehouse can SEE what's coming on the truck
   // (informational only — they're not draggable until physically received).
@@ -11674,6 +11701,19 @@ function receiveTransitItem(factoryId){
     // Propagate spa info so it survives to the unit record
     model: item.model, acrylicColor: item.acrylicColor, cabinetColor: item.cabinetColor,
     plasticWrap: item.plasticWrap, cover: item.cover, looseAccessories: item.looseAccessories,
+  });
+  // Mirror into queue so the Floor Map's "Arriving to Warehouse" panel shows
+  // the unit and allows drag-drop / click-to-place onto a cell. Without this
+  // mirror, the panel reads empty even though the unit clearly arrived.
+  // Use the same id so quickPlaceFromQueue / drag-drop can remove it cleanly.
+  queue.push({
+    id: incomingId,
+    sn: item.sn || '',
+    dealer: item.dealer || '',
+    type: item.type,
+    qty: 1,
+    entry: toDateStr(at),
+    _fromIncoming: true
   });
   addAct(`📬 Received at warehouse: ${item.sn||item.trackingId} (${item.dealer||''})`,'var(--teal)');
   toast(`${item.sn||'Item'} received — assign position`,'ok');
@@ -17750,6 +17790,18 @@ function handleQRPayload(raw, mode){
         // Propagate spa info so it survives to the unit record
         model: item.model, acrylicColor: item.acrylicColor, cabinetColor: item.cabinetColor,
         plasticWrap: item.plasticWrap, cover: item.cover, looseAccessories: item.looseAccessories,
+      });
+      // Mirror into queue so the Floor Map's "Arriving to Warehouse" panel
+      // surfaces this unit for drag-drop / click-to-place. Without this
+      // mirror, the panel reads empty even after a successful scan.
+      queue.push({
+        id: incomingId,
+        sn: item.sn || '',
+        dealer: item.dealer || '',
+        type: item.type,
+        qty: 1,
+        entry: toDateStr(at),
+        _fromIncoming: true
       });
       addAct(`📬 Received at warehouse: ${item.sn||tid} (${item.dealer||''})`,'var(--teal)');
       setScanResult('ok', item.sn||tid, 'received · assigning position…');
