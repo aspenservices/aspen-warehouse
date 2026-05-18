@@ -9113,7 +9113,8 @@ function drawMap(){
     if(t === 'drv'){
       const cell = el('div','');
       cell.style.cssText = 'background:repeating-linear-gradient(45deg,#f1f5f9,#f1f5f9 6px,#e2e8f0 6px,#e2e8f0 12px);border:1px solid #e2e8f0;border-radius:5px;min-height:84px;cursor:pointer;position:relative;display:flex;align-items:flex-end;justify-content:flex-start;padding:5px';
-      cell.innerHTML = `<span style="font-size:8.5px;font-weight:700;color:#64748b;letter-spacing:.04em;opacity:.7">${pos}</span>`;
+      const _ovLabel = (getCellOverride(pos) || {}).label;
+      cell.innerHTML = `<span style="font-size:8.5px;font-weight:700;color:#64748b;letter-spacing:.04em;opacity:.7">${_ovLabel || pos}</span>`;
       cell.title = `${pos} · drive aisle — click to override cell type`;
       cell.onclick = () => openCellEditor(pos);
       if(isCellLocked(pos)){
@@ -9134,7 +9135,8 @@ function drawMap(){
       const cell = el('div','');
       cell.style.cssText = 'background:#fef2f2;border:1.5px solid #dc2626;border-radius:5px;min-height:84px;display:flex;align-items:center;justify-content:center;font-size:9.5px;font-weight:700;color:#991b1b;letter-spacing:.06em;cursor:pointer;position:relative';
       cell.title = `${pos} · elevator — click to override cell type`;
-      cell.innerHTML = `<div style="text-align:center"><div>ELEV</div><div style="font-size:7.5px;color:#dc2626;opacity:.7;margin-top:2px">${pos}</div></div>`;
+      const _ovLabel = (getCellOverride(pos) || {}).label;
+      cell.innerHTML = `<div style="text-align:center"><div>${_ovLabel || 'ELEV'}</div><div style="font-size:7.5px;color:#dc2626;opacity:.7;margin-top:2px">${pos}</div></div>`;
       cell.onclick = () => openCellEditor(pos);
       if(isCellLocked(pos)){
         cell.style.outline = '2px dashed #f59e0b';
@@ -9151,8 +9153,9 @@ function drawMap(){
         : [];
       cell.style.cssText = 'background:linear-gradient(135deg,#fdf2f8,#fce7f3);border:1.5px solid #db2777;border-radius:6px;min-height:84px;cursor:pointer;display:flex;flex-direction:column;padding:5px 6px;position:relative;overflow:hidden';
       cell.dataset.pos = pos;
+      const _ovLabel = (getCellOverride(pos) || {}).label;
       cell.innerHTML = `
-        <div style="font-size:9px;font-weight:800;color:#831843;letter-spacing:.05em;line-height:1">💍 ${pos}</div>
+        <div style="font-size:9px;font-weight:800;color:#831843;letter-spacing:.05em;line-height:1">💍 ${_ovLabel || pos}</div>
         <div style="font-size:9px;color:#be185d;margin-top:4px;line-height:1.2">${items.length ? `${items.length} marriage(s)` : 'empty'}</div>`;
       cell.title = `${pos} · Marriage Inventory · click to manage`;
       cell.onclick = () => openMarriageInventoryPanel(pos);
@@ -9163,7 +9166,13 @@ function drawMap(){
       const cell = el('div','col-stor cell-cover');
       const isBack = (t === 'cb');
       cell.style.cssText = `background:${isBack?'#dbeafe':(t==='pstor'?'#fef3c7':'#eff6ff')};border:1.5px solid ${isBack?'#1e40af':(t==='pstor'?'#b45309':'#3b82f6')};border-radius:5px;min-height:84px;cursor:pointer;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:5px;position:relative`;
-      const label = (t === 'pstor' && P_LABELS_NEW[+rowKey]) ? P_LABELS_NEW[+rowKey]
+      // Admin custom label takes precedence over the default (P-row name,
+      // cover model from coverTypeFor, or raw pos). Admins can rename
+      // cells via the cell editor (gear icon).
+      const _ovLabel = (getCellOverride(pos) || {}).label;
+      const label = _ovLabel
+                  ? _ovLabel
+                  : (t === 'pstor' && P_LABELS_NEW[+rowKey]) ? P_LABELS_NEW[+rowKey]
                   : (rowKey === '15A' || rowKey === '15B') ? coverTypeFor(colLetter)
                   : pos;
       cell.innerHTML = `<div style="font-size:11px;font-weight:700;color:${isBack?'#1e3a8a':(t==='pstor'?'#78350f':'#1e3a8a')};letter-spacing:.04em;text-align:center;line-height:1.1">${label}</div><div style="font-size:9px;font-family:var(--mono);color:${isBack?'#3b82f6':(t==='pstor'?'#b45309':'#60a5fa')};margin-top:3px">${pos}</div>
@@ -9273,7 +9282,8 @@ function drawMap(){
 
     // Empty-cell prompt
     if(filled === 0 && !isPairRightHalf){
-      cell.innerHTML = `<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;color:#94a3b8;font-size:10px;font-weight:600;gap:4px"><div style="font-size:11px;font-weight:700;letter-spacing:.04em">${pos}</div><div class="cell-empty-lbl" style="font-size:20px;color:#cbd5e1;font-weight:300;line-height:1">+</div></div>`;
+      const _ovLabel = (getCellOverride(pos) || {}).label;
+      cell.innerHTML = `<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;color:#94a3b8;font-size:10px;font-weight:600;gap:4px"><div style="font-size:11px;font-weight:700;letter-spacing:.04em">${_ovLabel || pos}</div>${_ovLabel ? `<div style="font-size:8.5px;font-weight:600;color:#cbd5e1;letter-spacing:.04em">${pos}</div>` : ''}<div class="cell-empty-lbl" style="font-size:20px;color:#cbd5e1;font-weight:300;line-height:1">+</div></div>`;
       cell.title = `${pos} · empty — click to place · click ⚙ to change cell type`;
       cell.onclick = (e) => {
         // Don't intercept gear clicks
@@ -10004,9 +10014,26 @@ function openCellEditor(pos){
   if(pos === 'MINV') currentType = 'minv';
   const override = getCellOverride(pos);
   const overrideType = (override && override.type) || '';
+  const overrideLabel = (override && override.label) || '';
   const locked = !!(override && override.locked);
   // Pull units currently at this cell (used in the warning if changing type)
   const unitsAtCell = (typeof units !== 'undefined' ? units : []).filter(u => u.pos === pos);
+
+  // Compute the default label that would render without an override, so we
+  // can show it as a placeholder in the rename input.
+  const defaultLabel = (() => {
+    if(pos === 'MINV') return 'MINV';
+    if(currentType === 'cf' || currentType === 'cb'){
+      if(parsed.valid && (parsed.row === '15A' || parsed.row === '15B') && typeof coverTypeFor === 'function'){
+        try { return coverTypeFor(parsed.col); } catch(e){}
+      }
+    }
+    if(currentType === 'pstor' && parsed.valid && typeof P_LABELS_NEW !== 'undefined' && P_LABELS_NEW[+parsed.row]){
+      return P_LABELS_NEW[+parsed.row];
+    }
+    if(currentType === 'elev') return 'ELEV';
+    return pos;
+  })();
 
   const typeOptions = [
     { v:'',      label:`— Use blueprint default (${currentType.toUpperCase()}) —` },
@@ -10046,6 +10073,12 @@ function openCellEditor(pos){
         </select>
       </div>
 
+      <div class="fg" style="margin-bottom:14px">
+        <label class="fl" style="font-size:10.5px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.06em">Custom label <span style="font-weight:500;color:var(--text3);text-transform:none;letter-spacing:0">(rename this cell — leave blank for default)</span></label>
+        <input type="text" id="ce-label" value="${(overrideLabel||'').replace(/"/g,'&quot;')}" placeholder="${(defaultLabel||'').replace(/"/g,'&quot;')}" maxlength="40" class="fi" style="font-size:13px;padding:9px 11px;width:100%;margin-top:5px;border-radius:7px;font-family:ui-monospace,monospace">
+        <div style="font-size:10.5px;color:var(--text3);margin-top:5px;line-height:1.4">Defaults to <strong style="font-family:ui-monospace,monospace;color:var(--text2)">${escapeHTML ? escapeHTML(defaultLabel) : defaultLabel}</strong>. Use for cover model overrides (e.g. "Empire 84×84"), naming swim spa slots, or any cell that needs a clearer label.</div>
+      </div>
+
       <label style="display:flex;align-items:center;gap:10px;cursor:pointer;padding:10px 12px;background:var(--bg1);border-radius:9px;margin-bottom:18px;border:1px solid var(--border)">
         <input type="checkbox" id="ce-lock" ${locked?'checked':''} style="width:18px;height:18px;cursor:pointer">
         <span style="font-size:12.5px;font-weight:700;color:var(--text1)">🔒 Lock this cell (no edits, no drag in or out)</span>
@@ -10066,6 +10099,7 @@ window.openCellEditor = openCellEditor;
 
 function saveCellOverride(pos){
   const type   = document.getElementById('ce-type').value;
+  const labelRaw = (document.getElementById('ce-label')?.value || '').trim();
   const locked = document.getElementById('ce-lock').checked;
   // If changing to a non-storage type while there are units here, warn.
   const unitsAt = units.filter(u => u.pos === pos);
@@ -10080,11 +10114,12 @@ function saveCellOverride(pos){
   }
   const ov = {};
   if(type)   ov.type   = type;
+  if(labelRaw) ov.label = labelRaw;
   if(locked) ov.locked = true;
   setCellOverride(pos, Object.keys(ov).length ? ov : null);
   document.getElementById('cellEditorModal').remove();
   if(typeof drawMap === 'function') drawMap();
-  if(typeof addAct === 'function') addAct(`⚙ Cell ${pos} updated${type?` → ${type}`:''}${locked?' (locked)':''}`, 'var(--accent)');
+  if(typeof addAct === 'function') addAct(`⚙ Cell ${pos} updated${type?` → ${type}`:''}${labelRaw?` · label "${labelRaw}"`:''}${locked?' (locked)':''}`, 'var(--accent)');
   toast(`Cell ${pos} updated`, 'ok');
 }
 window.saveCellOverride = saveCellOverride;
