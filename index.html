@@ -3362,7 +3362,7 @@ body.dark-mode .mar-card-track {
     </select>
     <div class="role-current"><span id="role-indicator">Admin</span></div>
   </div>
-  <div class="sb-foot"><div class="sb-ver">v3.99 🛡 · <span id="live-date"></span></div></div>
+  <div class="sb-foot"><div class="sb-ver">v4.00 🛡 · <span id="live-date"></span></div></div>
 </nav>
 
 <!-- MAIN -->
@@ -4444,7 +4444,7 @@ let _fbInitAttempts = 0;
 //   /app_version/current  (in Firebase console, manually, OR call
 //   pushVersionToFirebase() from the Admin console at deploy time)
 // ══════════════════════════════════════════════════════════════════
-const APP_VERSION = 'v3.99';
+const APP_VERSION = 'v4.00';
 window.APP_VERSION = APP_VERSION;
 
 let _updateBannerShown = false;
@@ -21300,31 +21300,11 @@ document.addEventListener('keydown', e=>{
     return;
   }
 });
-</script>
 
-<!-- ════════════════════════════════════════════════════════════════════
-     ASPEN PROTECTION LAYER v2 — installed 19-may-2026 (comprehensive shield)
-     ──────────────────────────────────────────────────────────────────
-     PROTECTION LAYERS:
-       1. Safe-Push Auto-Heal      — when about to push smaller data than cloud,
-                                     SILENTLY pull cloud instead (no dialog)
-       2. Safe-Pull Banner         — when remote sends much smaller data, show
-                                     banner with Accept/Reject choice
-       3. Auto-Snapshots           — auto-saved to Firebase:
-                                       • Boot snapshot every time app loads
-                                       • Hourly snapshot (overwrites each hour-of-day)
-                                       • Daily snapshot (kept 30 days)
-       4. Manual Labeled Snapshots — admin button 🛡 → "Guardar punto"
-       5. Hourly localStorage Bkp  — second LS key updated every hour
-       6. Boot Quarantine          — first 30s after boot, blocks any push
-                                     (lets listener pull cloud first)
-     ──────────────────────────────────────────────────────────────────
-     ONE-TIME RECOVERY (runs SILENTLY when admin logs in for the first time
-     after deploy): adds 8 lost tinas to factory with ORIGINAL QR codes and
-     state='ready-to-ship' so they appear directly in Loading Bay ready
-     to scan with the existing physical labels.
-     ════════════════════════════════════════════════════════════════════ -->
-<script>
+// ═══════════════════════════════════════════════════════════════════════
+// ASPEN PROTECTION LAYER v2 — INLINED inside main script for scope access
+// (was a separate <script> tag in v3.99 which had no access to _fbDb etc.)
+// ═══════════════════════════════════════════════════════════════════════
 (function aspenProtection(){
   'use strict';
   const VERSION = 'protection-v2-may19';
@@ -21365,10 +21345,10 @@ document.addEventListener('keydown', e=>{
   function whenReady(cb, attempts){
     attempts = attempts || 0;
     if(attempts > 200){ console.warn('[protection] app never ready'); return; }
-    const ok = typeof window._fbDb !== 'undefined' &&
-               typeof window.factory !== 'undefined' &&
-               typeof window.units !== 'undefined' &&
-               typeof window.fbCloudSync === 'function';
+    const ok = typeof _fbDb !== 'undefined' &&
+               typeof factory !== 'undefined' &&
+               typeof units !== 'undefined' &&
+               typeof fbCloudSync === 'function';
     if(ok) cb();
     else setTimeout(() => whenReady(cb, attempts+1), 200);
   }
@@ -21420,7 +21400,7 @@ document.addEventListener('keydown', e=>{
         if(typeof toast === 'function') toast('🛡 Auto-recuperando del cloud — data preservada', 'ok');
         _bypassNextSafePull = true;
         try {
-          window.fbApplyRemoteState(remote, cloud.timestamp);
+          fbApplyRemoteState(remote, cloud.timestamp);
         } catch(e){ console.error('[safe-push] auto-heal apply failed:', e); }
         return false; // skip the push
       } catch(e){ console.warn('[safe-push] error, allowing push:', e); return true; }
@@ -21473,12 +21453,12 @@ document.addEventListener('keydown', e=>{
     document.getElementById('asw-accept').onclick = () => {
       banner.remove();
       _bypassNextSafePull = true;
-      try { window.fbApplyRemoteState(restored, sourceTimestamp); } catch(e){ console.error(e); }
+      try { fbApplyRemoteState(restored, sourceTimestamp); } catch(e){ console.error(e); }
     };
     document.getElementById('asw-reject').onclick = () => {
       banner.remove();
       _bypassNextSafePush = true; // skip safe-push check for this defensive push
-      if(typeof window.fbCloudSync === 'function') window.fbCloudSync(true);
+      if(typeof fbCloudSync === 'function') fbCloudSync(true);
     };
     document.getElementById('asw-dismiss').onclick = () => banner.remove();
     document.getElementById('asw-x').onclick = () => banner.remove();
@@ -21613,8 +21593,8 @@ document.addEventListener('keydown', e=>{
       _bypassNextSafePull = true;
       _bypassNextSafePush = true;
       try {
-        window.fbApplyRemoteState(restored, payload.timestamp);
-        await window.fbCloudSync(true);
+        fbApplyRemoteState(restored, payload.timestamp);
+        await fbCloudSync(true);
         alert(`✓ Restaurado: "${payload.label}"`);
       } catch(e){ alert('Error: '+e.message); }
     };
@@ -21640,8 +21620,8 @@ document.addEventListener('keydown', e=>{
         if(!confirm(`Restaurar backup horario?\n\nFactory: ${(state.factory||[]).length}\nUnits: ${(state.units||[]).length}\nGuardado: ${state._saved ? new Date(state._saved).toLocaleString('es-MX') : '?'}`)) return;
         _bypassNextSafePull = true;
         _bypassNextSafePush = true;
-        window.fbApplyRemoteState(state, state._saved || Date.now());
-        window.fbCloudSync(true);
+        fbApplyRemoteState(state, state._saved || Date.now());
+        fbCloudSync(true);
       } catch(e){ alert('Error: '+e.message); }
     };
     console.log('[protection] ✓ hourly LS backup');
@@ -21744,8 +21724,8 @@ document.addEventListener('keydown', e=>{
     if(!confirm(`🏆 MEJOR\n\n${best.src}\n${new Date(best.ts).toLocaleString('es-MX')}\n\nFactory: ${(best.st.factory||[]).length}\nUnits: ${(best.st.units||[]).length}\nMarriages: ${(best.st.marriages||[]).length}\n\n¿Restaurar?`)) return;
     _bypassNextSafePull = true; _bypassNextSafePush = true;
     try {
-      window.fbApplyRemoteState(best.st, best.ts);
-      await window.fbCloudSync(true);
+      fbApplyRemoteState(best.st, best.ts);
+      await fbCloudSync(true);
       alert('✓ Restaurado');
     } catch(e){ alert('Error: '+e.message); }
   }
@@ -21880,8 +21860,8 @@ document.addEventListener('keydown', e=>{
     // Persist + push (bypass safe-push since cloud may be empty/wrong here)
     if(typeof flushSave === 'function') flushSave();
     _bypassNextSafePush = true;
-    if(typeof window.fbCloudSync === 'function'){
-      try { await window.fbCloudSync(false); } catch(e){ console.error('[recovery] push failed:', e); }
+    if(typeof fbCloudSync === 'function'){
+      try { await fbCloudSync(false); } catch(e){ console.error('[recovery] push failed:', e); }
     }
     // Save a labeled snapshot of this recovery state as a permanent marker
     try { await window.saveLabeledSnapshot('recovery_19may_8_tinas'); } catch(e){}
