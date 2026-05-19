@@ -3362,7 +3362,7 @@ body.dark-mode .mar-card-track {
     </select>
     <div class="role-current"><span id="role-indicator">Admin</span></div>
   </div>
-  <div class="sb-foot"><div class="sb-ver">v3.97 · <span id="live-date"></span></div></div>
+  <div class="sb-foot"><div class="sb-ver">v3.99 🛡 · <span id="live-date"></span></div></div>
 </nav>
 
 <!-- MAIN -->
@@ -4444,7 +4444,7 @@ let _fbInitAttempts = 0;
 //   /app_version/current  (in Firebase console, manually, OR call
 //   pushVersionToFirebase() from the Admin console at deploy time)
 // ══════════════════════════════════════════════════════════════════
-const APP_VERSION = 'v3.98';
+const APP_VERSION = 'v3.99';
 window.APP_VERSION = APP_VERSION;
 
 let _updateBannerShown = false;
@@ -4819,6 +4819,19 @@ async function fbCloudSync(showToast){
   if(!_fbDb || !_fbUser || !_fbAuthorized){
     if(showToast) toast('Sign in to enable cloud sync', 'err');
     return;
+  }
+  // ═══ ASPEN PROTECTION LAYER — SAFE-PUSH GUARD ═══
+  // Block pushes that would delete >50% of items in factory/units/marriages.
+  // Triggered when a device with stale or seed-default state would clobber a fuller cloud state.
+  if(typeof window.__aspenSafePushCheck === 'function'){
+    try {
+      const allowed = await window.__aspenSafePushCheck();
+      if(!allowed){
+        console.warn('[safe-push] BLOQUEADO por guard de seguridad');
+        if(showToast && typeof toast === 'function') toast('⚠ Push bloqueado — guard de seguridad', 'err');
+        return;
+      }
+    } catch(e){ console.warn('[safe-push] check failed:', e); }
   }
   try {
     const state = {nid, units, dispatched, incoming, materials, events, activity, queue, cfg, factory, marriages, dispatchRequests, coverInventory, colorLibrary, coverModelMapping};
@@ -5241,6 +5254,14 @@ function mergeCfgPreservingPins(localCfg, remoteCfg){
 }
 
 function fbApplyRemoteState(restored, sourceTimestamp){
+  // ═══ ASPEN PROTECTION LAYER — SAFE-PULL GUARD ═══
+  // Block remote applies that would drop >50% of items. The user gets a banner
+  // with "Accept (lose my data)" vs "Reject and push my data" buttons.
+  if(typeof window.__aspenSafePullCheck === 'function'){
+    try {
+      if(!window.__aspenSafePullCheck(restored, sourceTimestamp)) return;
+    } catch(e){ console.warn('[safe-pull] check failed:', e); }
+  }
   _fbApplyingRemote = true;
   try {
     if(typeof restored.nid === 'number') nid = Math.max(nid, restored.nid);
@@ -21279,6 +21300,605 @@ document.addEventListener('keydown', e=>{
     return;
   }
 });
+</script>
+
+<!-- ════════════════════════════════════════════════════════════════════
+     ASPEN PROTECTION LAYER v2 — installed 19-may-2026 (comprehensive shield)
+     ──────────────────────────────────────────────────────────────────
+     PROTECTION LAYERS:
+       1. Safe-Push Auto-Heal      — when about to push smaller data than cloud,
+                                     SILENTLY pull cloud instead (no dialog)
+       2. Safe-Pull Banner         — when remote sends much smaller data, show
+                                     banner with Accept/Reject choice
+       3. Auto-Snapshots           — auto-saved to Firebase:
+                                       • Boot snapshot every time app loads
+                                       • Hourly snapshot (overwrites each hour-of-day)
+                                       • Daily snapshot (kept 30 days)
+       4. Manual Labeled Snapshots — admin button 🛡 → "Guardar punto"
+       5. Hourly localStorage Bkp  — second LS key updated every hour
+       6. Boot Quarantine          — first 30s after boot, blocks any push
+                                     (lets listener pull cloud first)
+     ──────────────────────────────────────────────────────────────────
+     ONE-TIME RECOVERY (runs SILENTLY when admin logs in for the first time
+     after deploy): adds 8 lost tinas to factory with ORIGINAL QR codes and
+     state='ready-to-ship' so they appear directly in Loading Bay ready
+     to scan with the existing physical labels.
+     ════════════════════════════════════════════════════════════════════ -->
+<script>
+(function aspenProtection(){
+  'use strict';
+  const VERSION = 'protection-v2-may19';
+  const RECOVERY_FLAG_KEY = 'aspen_recovery_19may_done_v2';
+  const HOURLY_BACKUP_KEY = 'aspen_warehouse_state_hourly_backup_v1';
+  const HOURLY_BACKUP_INTERVAL = 60 * 60 * 1000;
+  const LOSS_THRESHOLD = 0.5;     // >50% loss triggers a guard
+  const MIN_BASELINE = 3;         // collections smaller than this don't trigger guards
+  const BOOT_QUARANTINE_MS = 30 * 1000;  // 30s after boot, no auto-pushes
+
+  // Auto-snapshot intervals
+  const AUTO_HOURLY_INTERVAL = 60 * 60 * 1000;     // 1 hour
+  const AUTO_DAILY_INTERVAL = 24 * 60 * 60 * 1000; // 1 day
+  const MAX_BOOT_SNAPSHOTS = 20;
+  const MAX_DAILY_SNAPSHOTS = 30;
+
+  // State
+  let _bootTime = Date.now();
+  let _hourlyBackupLast = 0;
+  let _bypassNextSafePull = false;
+  let _bypassNextSafePush = false;
+  let _autoHourlyLast = 0;
+  let _autoDailyLast = 0;
+  let _recoveryInProgress = false;
+
+  // ── ORIGINAL TRACKING IDs from QR codes decoded from physical labels ──
+  const RECOVERY_TINAS = [
+    {sn:'30955', dealer:'D & L', type:'hot', model:'Quattro GS', acrylicColor:'Alabaster White', cabinetColor:'Grey', plasticWrap:'Blanco', cover:{color:'Black', model:'Quattro (W)', source:'warehouse'}, looseAccessories:['TS-07'], trackingId:'ASPN-SPA-MJNG47'},
+    {sn:'30958', dealer:'Pool People', type:'hot', model:'Eldorado ES', acrylicColor:'Onyx Black', cabinetColor:'Venetian Bronze w/ Black Corners', plasticWrap:'Blanco', cover:{color:'Black', model:'Eldorado (W)', source:'warehouse'}, looseAccessories:[], trackingId:'ASPN-SPA-73K6VD'},
+    {sn:'30960', dealer:'Paradise Pools (Carter)', type:'hot', model:'Quattro VS 110v', acrylicColor:'Moonstone Grey', cabinetColor:'Ash Luxe w/ Black Corners', plasticWrap:'Blanco', cover:{color:'Black', model:'Quattro (W)', source:'warehouse'}, looseAccessories:[], trackingId:'ASPN-SPA-MCLAP9'},
+    {sn:'30968', dealer:"Nelson's Home Towne Rec.", type:'hot', model:'Arcadia GS', acrylicColor:'Alabaster White', cabinetColor:'Grey', plasticWrap:'Blanco', cover:{color:'Black', model:'Arcadia (W)', source:'warehouse'}, looseAccessories:[], trackingId:'ASPN-SPA-2N3WHX'},
+    {sn:'30969', dealer:'Stateside Spa Direct', type:'hot', model:'Arcadia GS', acrylicColor:'Smoky Mountains', cabinetColor:'Grey w/ Black Corners', plasticWrap:'Blanco', cover:{color:'Black', model:'Arcadia (W)', source:'warehouse'}, looseAccessories:[], trackingId:'ASPN-SPA-EKXCPB'},
+    {sn:'30991', dealer:'Fireside Spas', type:'hot', model:'Colorado VS', acrylicColor:'Onyx Black', cabinetColor:'Venetian Bronze w/ Black Corners', plasticWrap:'Blanco', cover:{color:'Black', model:'Colorado (W)', source:'warehouse'}, looseAccessories:['TS-07'], trackingId:'ASPN-SPA-ZYCJBU'},
+    {sn:'30994', dealer:'EXTRA EXTRA', type:'hot', model:'Monarch GS', acrylicColor:'Smoky Mountains', cabinetColor:'Espresso w/ Black Corners', plasticWrap:'Blanco', cover:null, looseAccessories:[], trackingId:'ASPN-SPA-WGLNX6'},
+    {sn:'30997', dealer:'Hot Tub Solutions', type:'hot', model:'Alpine Holiday', acrylicColor:'Smoky Mountains', cabinetColor:'Venetian Bronze w/ Black Corners', plasticWrap:'Blanco', cover:{color:'Black', model:'Alpine (W)', source:'warehouse'}, looseAccessories:['TS-07', "28' Steps"], trackingId:'ASPN-SPA-U528U6'}
+  ];
+
+  function whenReady(cb, attempts){
+    attempts = attempts || 0;
+    if(attempts > 200){ console.warn('[protection] app never ready'); return; }
+    const ok = typeof window._fbDb !== 'undefined' &&
+               typeof window.factory !== 'undefined' &&
+               typeof window.units !== 'undefined' &&
+               typeof window.fbCloudSync === 'function';
+    if(ok) cb();
+    else setTimeout(() => whenReady(cb, attempts+1), 200);
+  }
+  whenReady(() => setTimeout(install, 1500));
+
+  function install(){
+    console.log('%c🛡 [protection] installing ' + VERSION, 'color:#1e40af;font-weight:bold;font-size:13px');
+    installSafePushGuard();
+    installSafePullGuard();
+    installManualSnapshots();
+    installHourlyLocalBackup();
+    installAutoSnapshotSystem();
+    installAdminUI();
+    installSilentRecovery();
+    console.log('%c🛡 [protection] ✓ all 6 layers active', 'color:#16a34a;font-weight:bold');
+  }
+
+  // ─── 1. SAFE-PUSH GUARD (with AUTO-HEAL) ─────────────────────────────
+  // Before any push, check if cloud has way more data than us.
+  // If yes, SILENTLY pull cloud instead of asking. No user interaction.
+  function installSafePushGuard(){
+    window.__aspenSafePushCheck = async function(){
+      if(_bypassNextSafePush){ _bypassNextSafePush = false; return true; }
+      // Boot quarantine: skip ALL pushes for first 30s
+      if(Date.now() - _bootTime < BOOT_QUARANTINE_MS){
+        console.log('[safe-push] boot quarantine active (' + Math.round((BOOT_QUARANTINE_MS - (Date.now() - _bootTime))/1000) + 's left)');
+        return false;
+      }
+      if(!_fbDb || !_fbAuthorized) return true;
+      try {
+        const snap = await _fbDb.ref('state/shared/latest').once('value');
+        const cloud = snap.val();
+        if(!cloud || !cloud.state) return true; // cloud empty, OK to seed
+        if(cloud.deviceId === _fbDeviceId) return true; // our own previous push
+        const remote = JSON.parse(cloud.state);
+        const collections = ['factory','units','marriages','dispatched','incoming'];
+        const losses = [];
+        for(const k of collections){
+          const local = Array.isArray(window[k]) ? window[k].length : 0;
+          const cloudCnt = Array.isArray(remote[k]) ? remote[k].length : 0;
+          if(cloudCnt >= MIN_BASELINE && local < cloudCnt * (1 - LOSS_THRESHOLD)){
+            losses.push({key:k, cloud:cloudCnt, local:local});
+          }
+        }
+        if(losses.length === 0) return true;
+        // AUTO-HEAL: cloud has much more data — pull it silently instead of pushing
+        console.warn('[safe-push] AUTO-HEAL: pulling cloud (' +
+          losses.map(l => `${l.key} ${l.local}→${l.cloud}`).join(', ') + ')');
+        if(typeof toast === 'function') toast('🛡 Auto-recuperando del cloud — data preservada', 'ok');
+        _bypassNextSafePull = true;
+        try {
+          window.fbApplyRemoteState(remote, cloud.timestamp);
+        } catch(e){ console.error('[safe-push] auto-heal apply failed:', e); }
+        return false; // skip the push
+      } catch(e){ console.warn('[safe-push] error, allowing push:', e); return true; }
+    };
+    console.log('[protection] ✓ safe-push guard (auto-heal mode)');
+  }
+
+  // ─── 2. SAFE-PULL GUARD (banner with Accept/Reject) ──────────────────
+  function installSafePullGuard(){
+    window.__aspenSafePullCheck = function(restored, sourceTimestamp){
+      if(_bypassNextSafePull){ _bypassNextSafePull = false; return true; }
+      const collections = ['factory','units','marriages','dispatched','incoming'];
+      const losses = [];
+      for(const k of collections){
+        const local = Array.isArray(window[k]) ? window[k].length : 0;
+        const inc = Array.isArray(restored[k]) ? restored[k].length : 0;
+        if(local >= MIN_BASELINE && inc < local * (1 - LOSS_THRESHOLD)){
+          losses.push({key:k, local, incoming:inc});
+        }
+      }
+      if(losses.length === 0) return true;
+      showSyncWarningBanner(losses, restored, sourceTimestamp);
+      return false;
+    };
+    console.log('[protection] ✓ safe-pull guard');
+  }
+
+  function showSyncWarningBanner(losses, restored, sourceTimestamp){
+    document.getElementById('aspen-sync-warning')?.remove();
+    const totalLoss = losses.reduce((s,l)=>s+(l.local-l.incoming),0);
+    const lossList = losses.map(l => `&nbsp;&nbsp;• <strong>${l.key}</strong>: ${l.local} → ${l.incoming}`).join('<br>');
+    const banner = document.createElement('div');
+    banner.id = 'aspen-sync-warning';
+    banner.style.cssText = `position:fixed;top:0;left:0;right:0;z-index:100000;background:linear-gradient(135deg,#fef3c7,#fde68a);border-bottom:3px solid #d97706;padding:16px 22px;font-family:-apple-system,system-ui;box-shadow:0 6px 20px rgba(0,0,0,.15)`;
+    banner.innerHTML = `
+      <div style="max-width:1200px;margin:0 auto;display:flex;align-items:flex-start;gap:14px">
+        <div style="font-size:24px;line-height:1">⚠</div>
+        <div style="flex:1">
+          <div style="font-weight:800;font-size:15px;color:#78350f;margin-bottom:5px">Otro dispositivo quiere aplicar un estado MUCHO más chico</div>
+          <div style="font-size:12.5px;color:#92400e;line-height:1.55;margin-bottom:8px">Cambios entrantes:<br>${lossList}</div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <button id="asw-reject" style="background:#16a34a;color:#fff;border:0;border-radius:7px;padding:8px 14px;font-weight:700;cursor:pointer;font-size:12.5px">✓ Mantener mi data (recomendado)</button>
+            <button id="asw-accept" style="background:#dc2626;color:#fff;border:0;border-radius:7px;padding:8px 14px;font-weight:700;cursor:pointer;font-size:12.5px">⚠ Aceptar (perder ${totalLoss} items)</button>
+            <button id="asw-dismiss" style="background:#fff;color:#475569;border:1px solid #cbd5e1;border-radius:7px;padding:8px 14px;font-weight:700;cursor:pointer;font-size:12.5px">Dejar para después</button>
+          </div>
+        </div>
+        <button id="asw-x" style="background:transparent;border:0;font-size:20px;cursor:pointer;color:#78350f;padding:4px 8px">✕</button>
+      </div>`;
+    document.body.appendChild(banner);
+    document.getElementById('asw-accept').onclick = () => {
+      banner.remove();
+      _bypassNextSafePull = true;
+      try { window.fbApplyRemoteState(restored, sourceTimestamp); } catch(e){ console.error(e); }
+    };
+    document.getElementById('asw-reject').onclick = () => {
+      banner.remove();
+      _bypassNextSafePush = true; // skip safe-push check for this defensive push
+      if(typeof window.fbCloudSync === 'function') window.fbCloudSync(true);
+    };
+    document.getElementById('asw-dismiss').onclick = () => banner.remove();
+    document.getElementById('asw-x').onclick = () => banner.remove();
+  }
+
+  // ─── 3. AUTO-SNAPSHOT SYSTEM ─────────────────────────────────────────
+  function installAutoSnapshotSystem(){
+    // Boot snapshot on first successful auth
+    setTimeout(() => saveAutoSnapshot('boot'), 5000);
+    // Hourly snapshots
+    setInterval(() => {
+      if(Date.now() - _autoHourlyLast >= AUTO_HOURLY_INTERVAL) saveAutoSnapshot('hourly');
+    }, 60000); // check every minute
+    // Daily snapshots
+    setInterval(() => {
+      if(Date.now() - _autoDailyLast >= AUTO_DAILY_INTERVAL) saveAutoSnapshot('daily');
+    }, 5 * 60 * 1000); // check every 5 min
+    console.log('[protection] ✓ auto-snapshots scheduled');
+  }
+
+  async function saveAutoSnapshot(kind){
+    if(!_fbDb || !_fbAuthorized) return;
+    // Don't auto-snapshot if data is suspiciously empty (avoid persisting bad state)
+    const totalItems = (factory||[]).length + (units||[]).length + (marriages||[]).length;
+    if(totalItems < 2 && kind !== 'boot'){
+      console.log('[auto-snapshot] skipping ' + kind + ' — data looks empty (' + totalItems + ' items)');
+      return;
+    }
+    try {
+      const now = new Date();
+      const pad = n => String(n).padStart(2,'0');
+      let label;
+      if(kind === 'boot'){
+        label = `auto_boot_${now.getFullYear()}${pad(now.getMonth()+1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+      } else if(kind === 'hourly'){
+        label = `auto_hourly_${pad(now.getHours())}`;
+      } else if(kind === 'daily'){
+        label = `auto_daily_${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}`;
+      }
+      const state = {nid, units, dispatched, incoming, materials, events, activity, queue, cfg, factory, marriages, dispatchRequests, coverInventory, colorLibrary, coverModelMapping};
+      const payload = {
+        timestamp: Date.now(),
+        label,
+        kind,
+        uploadedBy: (typeof currentUser !== 'undefined' && currentUser?.name) ? currentUser.name : 'auto',
+        version: (typeof APP_VERSION !== 'undefined') ? APP_VERSION : 'unknown',
+        state: JSON.stringify(state),
+        counts: {factory:factory.length, units:units.length, marriages:marriages.length, dispatched:dispatched.length}
+      };
+      await _fbDb.ref(`state/${_fbDeviceId}/auto_snapshots/${label}`).set(payload);
+      if(kind === 'boot') _autoHourlyLast = _autoDailyLast = Date.now();
+      else if(kind === 'hourly') _autoHourlyLast = Date.now();
+      else if(kind === 'daily') _autoDailyLast = Date.now();
+      console.log('[auto-snapshot] ✓ ' + kind + ': ' + label, payload.counts);
+      // Cleanup old boot snapshots
+      if(kind === 'boot') await cleanupOldSnapshots('auto_boot_', MAX_BOOT_SNAPSHOTS);
+      // Cleanup old daily snapshots
+      if(kind === 'daily') await cleanupOldSnapshots('auto_daily_', MAX_DAILY_SNAPSHOTS);
+    } catch(e){ console.warn('[auto-snapshot] failed:', e); }
+  }
+
+  async function cleanupOldSnapshots(prefix, keep){
+    try {
+      const ref = _fbDb.ref(`state/${_fbDeviceId}/auto_snapshots`);
+      const snap = await ref.once('value');
+      const all = snap.val() || {};
+      const matching = Object.keys(all).filter(k => k.startsWith(prefix));
+      if(matching.length <= keep) return;
+      matching.sort(); // alphabetical = chronological for our labels
+      const toDelete = matching.slice(0, matching.length - keep);
+      for(const k of toDelete){
+        await ref.child(k).remove();
+      }
+      console.log('[cleanup] deleted ' + toDelete.length + ' old ' + prefix + ' snapshots');
+    } catch(e){ console.warn('[cleanup] failed:', e); }
+  }
+
+  // ─── 4. MANUAL LABELED SNAPSHOTS ─────────────────────────────────────
+  function installManualSnapshots(){
+    window.saveLabeledSnapshot = async function(label){
+      if(!_fbDb || !_fbAuthorized){ if(typeof toast==='function') toast('Firebase no conectado','err'); return; }
+      if(!label){ label = prompt('Etiqueta para este punto de restauración:\n\nEj: "antes-de-tinas-19-may", "fin-de-dia-19-may"'); if(!label) return; }
+      const safeLabel = String(label).replace(/[.#$\[\]\/\s]+/g,'_').slice(0,100);
+      if(!safeLabel){ if(typeof toast==='function') toast('Etiqueta inválida','err'); return; }
+      const state = {nid, units, dispatched, incoming, materials, events, activity, queue, cfg, factory, marriages, dispatchRequests, coverInventory, colorLibrary, coverModelMapping};
+      const payload = {
+        timestamp: Date.now(), label,
+        uploadedBy: (typeof currentUser !== 'undefined' && currentUser?.name) ? currentUser.name : 'Admin',
+        version: (typeof APP_VERSION !== 'undefined') ? APP_VERSION : 'unknown',
+        state: JSON.stringify(state),
+        counts: {factory:factory.length, units:units.length, marriages:marriages.length, dispatched:dispatched.length}
+      };
+      try {
+        await _fbDb.ref(`state/${_fbDeviceId}/manual_snapshots/${safeLabel}`).set(payload);
+        if(typeof toast==='function') toast(`💾 Punto guardado: "${label}"`,'ok');
+      } catch(e){ if(typeof toast==='function') toast('Error: '+e.message,'err'); }
+    };
+
+    window.listAllSnapshots = async function(includeAuto){
+      if(!_fbDb || !_fbAuthorized){ alert('Firebase no conectado'); return []; }
+      const snap = await _fbDb.ref('state').once('value');
+      const all = snap.val() || {};
+      const rows = [];
+      for(const dev of Object.keys(all)){
+        const d = all[dev];
+        if(d?.manual_snapshots) for(const label of Object.keys(d.manual_snapshots)){
+          const s = d.manual_snapshots[label];
+          rows.push({kind:'manual', label:s.label||label, device:dev.slice(-8), when:new Date(s.timestamp).toLocaleString('es-MX'), by:s.uploadedBy, counts:s.counts||{}, ref:`state/${dev}/manual_snapshots/${label}`});
+        }
+        if(includeAuto && d?.auto_snapshots) for(const label of Object.keys(d.auto_snapshots)){
+          const s = d.auto_snapshots[label];
+          rows.push({kind:s.kind||'auto', label:s.label||label, device:dev.slice(-8), when:new Date(s.timestamp).toLocaleString('es-MX'), by:s.uploadedBy, counts:s.counts||{}, ref:`state/${dev}/auto_snapshots/${label}`});
+        }
+      }
+      rows.sort((a,b) => (b.counts.factory||0) + (b.counts.units||0) - ((a.counts.factory||0) + (a.counts.units||0)));
+      return rows;
+    };
+
+    window.restoreLabeledSnapshot = async function(){
+      const list = await window.listAllSnapshots(true);
+      if(!list.length){ alert('No hay snapshots disponibles.'); return; }
+      const txt = list.slice(0,30).map((s,i)=>`${i}. [${s.kind}] "${s.label}" — ${s.when}\n   (factory ${s.counts.factory||0}, units ${s.counts.units||0}, marr ${s.counts.marriages||0}) dev:${s.device}`).join('\n\n');
+      const idx = prompt(`SNAPSHOTS DISPONIBLES (ordenados por cantidad de items):\n\n${txt}\n\nIngresa el número del snapshot a restaurar:`);
+      if(idx === null || idx === '') return;
+      const n = parseInt(idx);
+      if(isNaN(n) || n < 0 || n >= list.length){ alert('Número inválido'); return; }
+      const snap = await _fbDb.ref(list[n].ref).once('value');
+      const payload = snap.val();
+      if(!payload?.state){ alert('Snapshot vacío'); return; }
+      const restored = JSON.parse(payload.state);
+      if(!confirm(`Restaurar "${payload.label}"?\n\nFactory: ${(restored.factory||[]).length}\nUnits: ${(restored.units||[]).length}\nMarriages: ${(restored.marriages||[]).length}\n\nReemplaza estado actual y push al cloud.`)) return;
+      _bypassNextSafePull = true;
+      _bypassNextSafePush = true;
+      try {
+        window.fbApplyRemoteState(restored, payload.timestamp);
+        await window.fbCloudSync(true);
+        alert(`✓ Restaurado: "${payload.label}"`);
+      } catch(e){ alert('Error: '+e.message); }
+    };
+    console.log('[protection] ✓ manual snapshots');
+  }
+
+  // ─── 5. HOURLY LOCALSTORAGE BACKUP ───────────────────────────────────
+  function installHourlyLocalBackup(){
+    function maybeBackup(){
+      if(Date.now() - _hourlyBackupLast < HOURLY_BACKUP_INTERVAL) return;
+      try {
+        const main = localStorage.getItem('aspen_warehouse_state_v1');
+        if(main){ localStorage.setItem(HOURLY_BACKUP_KEY, main); _hourlyBackupLast = Date.now(); }
+      } catch(e){}
+    }
+    setInterval(maybeBackup, 60000);
+    maybeBackup();
+    window.restoreHourlyBackup = function(){
+      try {
+        const bak = localStorage.getItem(HOURLY_BACKUP_KEY);
+        if(!bak){ alert('No hay backup horario todavía'); return; }
+        const state = JSON.parse(bak);
+        if(!confirm(`Restaurar backup horario?\n\nFactory: ${(state.factory||[]).length}\nUnits: ${(state.units||[]).length}\nGuardado: ${state._saved ? new Date(state._saved).toLocaleString('es-MX') : '?'}`)) return;
+        _bypassNextSafePull = true;
+        _bypassNextSafePush = true;
+        window.fbApplyRemoteState(state, state._saved || Date.now());
+        window.fbCloudSync(true);
+      } catch(e){ alert('Error: '+e.message); }
+    };
+    console.log('[protection] ✓ hourly LS backup');
+  }
+
+  // ─── 6. ADMIN UI ─────────────────────────────────────────────────────
+  function installAdminUI(){
+    if(document.getElementById('aspen-protection-panel')) return;
+    const panel = document.createElement('div');
+    panel.id = 'aspen-protection-panel';
+    panel.style.cssText = `position:fixed;bottom:78px;right:18px;z-index:9999;font-family:-apple-system,system-ui;display:none`;
+    panel.innerHTML = `<button id="aspen-prot-btn" title="Backup & Restauración (Admin)" style="background:#1e40af;color:#fff;border:0;border-radius:50%;width:46px;height:46px;cursor:pointer;box-shadow:0 4px 14px rgba(30,64,175,.45);font-size:20px;display:flex;align-items:center;justify-content:center">🛡</button>`;
+    document.body.appendChild(panel);
+    function updateVisibility(){
+      panel.style.display = (typeof currentRole !== 'undefined' && currentRole === 'admin') ? 'block' : 'none';
+    }
+    updateVisibility();
+    setInterval(updateVisibility, 2000);
+    document.getElementById('aspen-prot-btn').onclick = () => {
+      document.getElementById('aspen-prot-menu')?.remove();
+      const menu = document.createElement('div');
+      menu.id = 'aspen-prot-menu';
+      menu.style.cssText = `position:fixed;inset:0;background:rgba(15,23,42,.7);z-index:99999;display:flex;align-items:center;justify-content:center;font-family:-apple-system,system-ui`;
+      menu.innerHTML = `
+        <div style="background:#fff;border-radius:14px;width:min(520px,92vw);box-shadow:0 30px 80px rgba(0,0,0,.4);overflow:hidden">
+          <div style="background:linear-gradient(135deg,#1e40af,#2563eb);color:#fff;padding:18px 22px">
+            <div style="font-size:17px;font-weight:800">🛡 Backup & Restauración</div>
+            <div style="font-size:11.5px;opacity:.9;margin-top:3px">6 capas de protección activas — solo Admin</div>
+          </div>
+          <div style="padding:18px 22px;display:flex;flex-direction:column;gap:9px">
+            <button id="apm-save" style="background:#16a34a;color:#fff;border:0;border-radius:9px;padding:12px;font-weight:700;cursor:pointer;font-size:13px;text-align:left">💾 Guardar punto manual (etiquetado)<div style="font-size:10.5px;opacity:.9;font-weight:500;margin-top:3px">Snapshot manual con etiqueta personalizada.</div></button>
+            <button id="apm-list" style="background:#1e40af;color:#fff;border:0;border-radius:9px;padding:12px;font-weight:700;cursor:pointer;font-size:13px;text-align:left">📋 Restaurar de cualquier snapshot<div style="font-size:10.5px;opacity:.9;font-weight:500;margin-top:3px">Lista TODOS los snapshots (manuales + auto: boot/hourly/daily).</div></button>
+            <button id="apm-hourly" style="background:#0891b2;color:#fff;border:0;border-radius:9px;padding:12px;font-weight:700;cursor:pointer;font-size:13px;text-align:left">⏰ Restaurar backup local horario<div style="font-size:10.5px;opacity:.9;font-weight:500;margin-top:3px">Copia local (≤1h atrás).</div></button>
+            <button id="apm-recover" style="background:#7c3aed;color:#fff;border:0;border-radius:9px;padding:12px;font-weight:700;cursor:pointer;font-size:13px;text-align:left">🔍 Auto-restaurar (el mejor snapshot)<div style="font-size:10.5px;opacity:.9;font-weight:500;margin-top:3px">Escanea todo Firebase y pica automáticamente.</div></button>
+            <button id="apm-stats" style="background:#374151;color:#fff;border:0;border-radius:9px;padding:12px;font-weight:700;cursor:pointer;font-size:13px;text-align:left">📊 Ver stats de protección<div style="font-size:10.5px;opacity:.9;font-weight:500;margin-top:3px">Cuántos snapshots tienes, última sincronización, etc.</div></button>
+            <button id="apm-close" style="background:#f1f5f9;color:#475569;border:0;border-radius:9px;padding:10px;font-weight:700;cursor:pointer;font-size:12.5px;margin-top:3px">Cerrar</button>
+          </div>
+        </div>`;
+      document.body.appendChild(menu);
+      document.getElementById('apm-save').onclick = () => { menu.remove(); window.saveLabeledSnapshot(); };
+      document.getElementById('apm-list').onclick = () => { menu.remove(); window.restoreLabeledSnapshot(); };
+      document.getElementById('apm-hourly').onclick = () => { menu.remove(); window.restoreHourlyBackup(); };
+      document.getElementById('apm-recover').onclick = () => { menu.remove(); autoRestoreFromFirebase(); };
+      document.getElementById('apm-stats').onclick = () => { menu.remove(); showStats(); };
+      document.getElementById('apm-close').onclick = () => menu.remove();
+      menu.onclick = (e) => { if(e.target === menu) menu.remove(); };
+    };
+    console.log('[protection] ✓ admin UI');
+  }
+
+  async function showStats(){
+    if(!_fbDb || !_fbAuthorized){ alert('Firebase no conectado'); return; }
+    const snap = await _fbDb.ref('state').once('value');
+    const all = snap.val() || {};
+    let manualCount = 0, autoCount = 0, deviceCount = 0;
+    let oldest = Infinity, newest = 0;
+    for(const dev of Object.keys(all).filter(k => k !== 'shared')){
+      deviceCount++;
+      const d = all[dev];
+      if(d?.manual_snapshots) manualCount += Object.keys(d.manual_snapshots).length;
+      if(d?.auto_snapshots) autoCount += Object.keys(d.auto_snapshots).length;
+      if(d?.snapshots) for(const ts of Object.keys(d.snapshots)){ const t = parseInt(ts) || d.snapshots[ts].timestamp; if(t < oldest) oldest = t; if(t > newest) newest = t; }
+    }
+    alert(`📊 STATS DE PROTECCIÓN\n\n` +
+          `Dispositivos sincronizados: ${deviceCount}\n` +
+          `Snapshots manuales: ${manualCount}\n` +
+          `Snapshots auto (boot/hourly/daily): ${autoCount}\n` +
+          `Snapshot más viejo: ${oldest !== Infinity ? new Date(oldest).toLocaleString('es-MX') : 'N/A'}\n` +
+          `Snapshot más reciente: ${newest ? new Date(newest).toLocaleString('es-MX') : 'N/A'}\n\n` +
+          `Estado actual:\n` +
+          `  Factory: ${factory.length}\n` +
+          `  Units: ${units.length}\n` +
+          `  Marriages: ${marriages.length}\n` +
+          `  Dispatched: ${dispatched.length}`);
+  }
+
+  async function autoRestoreFromFirebase(){
+    if(!_fbDb || !_fbAuthorized){ alert('Firebase no conectado'); return; }
+    const snap = await _fbDb.ref('state').once('value');
+    const all = snap.val() || {};
+    const cands = [];
+    for(const dev of Object.keys(all).filter(k => k !== 'shared')){
+      const d = all[dev] || {};
+      if(d.latest?.state) cands.push({src:`${dev.slice(-8)}/latest`, ts:d.latest.timestamp, raw:d.latest.state, by:d.latest.uploadedBy});
+      if(d.snapshots) for(const ts of Object.keys(d.snapshots)){
+        const s = d.snapshots[ts]; if(s?.state) cands.push({src:`${dev.slice(-8)}/snap`, ts:s.timestamp||+ts, raw:s.state, by:s.uploadedBy});
+      }
+      if(d.manual_snapshots) for(const lbl of Object.keys(d.manual_snapshots)){
+        const s = d.manual_snapshots[lbl]; if(s?.state) cands.push({src:`${dev.slice(-8)}/manual/${lbl}`, ts:s.timestamp, raw:s.state, by:s.uploadedBy});
+      }
+      if(d.auto_snapshots) for(const lbl of Object.keys(d.auto_snapshots)){
+        const s = d.auto_snapshots[lbl]; if(s?.state) cands.push({src:`${dev.slice(-8)}/auto/${lbl}`, ts:s.timestamp, raw:s.state, by:s.uploadedBy});
+      }
+    }
+    for(const c of cands){ try { c.st = JSON.parse(c.raw); c.total = (c.st.factory||[]).length + (c.st.units||[]).length + (c.st.marriages||[]).length; } catch(e){ c.bad = true; } }
+    const valid = cands.filter(c => !c.bad && c.total > 0);
+    if(!valid.length){ alert('Ningún snapshot tiene data.'); return; }
+    valid.sort((a,b) => (b.total - a.total) || (b.ts - a.ts));
+    const best = valid[0];
+    if(!confirm(`🏆 MEJOR\n\n${best.src}\n${new Date(best.ts).toLocaleString('es-MX')}\n\nFactory: ${(best.st.factory||[]).length}\nUnits: ${(best.st.units||[]).length}\nMarriages: ${(best.st.marriages||[]).length}\n\n¿Restaurar?`)) return;
+    _bypassNextSafePull = true; _bypassNextSafePush = true;
+    try {
+      window.fbApplyRemoteState(best.st, best.ts);
+      await window.fbCloudSync(true);
+      alert('✓ Restaurado');
+    } catch(e){ alert('Error: '+e.message); }
+  }
+
+  // ─── 7. SILENT ONE-TIME RECOVERY ─────────────────────────────────────
+  // Auto-adds 8 tinas DIRECTLY to factory in 'ready-to-ship' state so they
+  // appear in Loading Bay ready to scan with EXISTING physical QR labels.
+  // No modal, no prompt — just silent recovery the first time admin loads.
+  function installSilentRecovery(){
+    if(localStorage.getItem(RECOVERY_FLAG_KEY)){ console.log('[recovery] already done previously'); return; }
+    let attempts = 0;
+    const iv = setInterval(async () => {
+      attempts++;
+      if(attempts > 60){ clearInterval(iv); return; }
+      if(_recoveryInProgress) return;
+      if(typeof currentRole === 'undefined' || currentRole !== 'admin') return;
+      // Wait for safe-push boot quarantine to finish
+      if(Date.now() - _bootTime < BOOT_QUARANTINE_MS) return;
+      // Wait until Firebase is ready
+      if(!_fbDb || !_fbAuthorized) return;
+      clearInterval(iv);
+      _recoveryInProgress = true;
+      await doSilentRecovery();
+      _recoveryInProgress = false;
+    }, 2000);
+  }
+
+  async function doSilentRecovery(){
+    const today = '2026-05-19';
+    const role = (typeof ROLES !== 'undefined' && ROLES[currentRole]) ? ROLES[currentRole].label : 'Admin';
+    const now = new Date().toISOString();
+
+    // PRE-CHECK: if ALL 8 original trackingIds already present in factory, nothing to do
+    const allOriginalsPresent = RECOVERY_TINAS.every(t =>
+      (factory||[]).some(f => f.trackingId === t.trackingId)
+    );
+    if(allOriginalsPresent){
+      console.log('[recovery] all 8 original trackingIds already present — skipping');
+      try { localStorage.setItem(RECOVERY_FLAG_KEY, JSON.stringify({done:true, at:now, reason:'already complete'})); } catch(e){}
+      return;
+    }
+
+    // Check for existing S/Ns or tracking IDs
+    const existingSNsInUnitsOrIncoming = new Set([
+      ...(units||[]).filter(u => u.sn).map(u => u.sn),
+      ...(incoming||[]).filter(i => i.sn).map(i => i.sn),
+      ...(dispatched||[]).filter(d => d.sn).map(d => d.sn)
+    ]);
+    if(typeof snapshot === 'function') snapshot('silent recovery 19-may');
+    const added = [];
+    const upgraded = [];
+    const skipped = [];
+
+    for(const t of RECOVERY_TINAS){
+      // CASE 1: original trackingId already in factory → already correct, skip
+      const correctEntry = (factory||[]).find(f => f.trackingId === t.trackingId);
+      if(correctEntry){
+        console.log('[recovery] ✓ already correct:', t.sn, '(' + t.trackingId + ')');
+        // Make sure it's in ready-to-ship state for Loading Bay
+        if(correctEntry.trackingState !== 'ready-to-ship' && correctEntry.trackingState !== 'in-transit'){
+          correctEntry.trackingState = 'ready-to-ship';
+          correctEntry.trackingHistory = correctEntry.trackingHistory || [];
+          correctEntry.trackingHistory.push({state:'ready-to-ship', at:now, by:role, note:'Recuperación 19-may — movido a Loading Bay'});
+          upgraded.push(t.sn + ' (moved to ready-to-ship)');
+        }
+        continue;
+      }
+      // CASE 2: factory has entry with same S/N but WRONG trackingId (e.g. from prior recovery with random ID)
+      const wrongTidEntry = (factory||[]).find(f => f.sn === t.sn && f.type !== 'accessory' && f.trackingId !== t.trackingId);
+      if(wrongTidEntry){
+        console.log('[recovery] ↻ upgrading trackingId for', t.sn, ':', wrongTidEntry.trackingId, '→', t.trackingId);
+        wrongTidEntry.trackingId = t.trackingId;
+        wrongTidEntry.trackingState = 'ready-to-ship';
+        wrongTidEntry.trackingHistory = wrongTidEntry.trackingHistory || [];
+        wrongTidEntry.trackingHistory.push({state:'ready-to-ship', at:now, by:role, note:'TrackingId actualizado al original del label físico — listo para Loading Bay'});
+        // Fill in any missing fields from the recovery data
+        if(!wrongTidEntry.model) wrongTidEntry.model = t.model;
+        if(!wrongTidEntry.acrylicColor) wrongTidEntry.acrylicColor = t.acrylicColor;
+        if(!wrongTidEntry.cabinetColor) wrongTidEntry.cabinetColor = t.cabinetColor;
+        if(!wrongTidEntry.plasticWrap) wrongTidEntry.plasticWrap = t.plasticWrap;
+        if(!wrongTidEntry.cover && t.cover) wrongTidEntry.cover = {...t.cover, addedAt:today};
+        if(!wrongTidEntry.looseAccessories) wrongTidEntry.looseAccessories = t.looseAccessories;
+        upgraded.push(t.sn);
+        continue;
+      }
+      // CASE 3: S/N already in units/incoming/dispatched (tina already moved beyond Loading Bay)
+      if(existingSNsInUnitsOrIncoming.has(t.sn)){
+        console.log('[recovery] SKIP — S/N already past Loading Bay:', t.sn);
+        skipped.push(t.sn);
+        continue;
+      }
+      // CASE 4: completely new — add as ready-to-ship
+      const newId = ++nid;
+      const colors = [t.acrylicColor && `Acrylic: ${t.acrylicColor}`, t.cabinetColor && `Cabinet: ${t.cabinetColor}`].filter(Boolean).join(' · ');
+      factory.push({
+        id: newId, sn: t.sn, dealer: t.dealer, type: t.type, added: today,
+        notes: 'Recuperado desde foto de label original (incidente sync 19-may-2026). QR code original preservado.',
+        model: t.model, colors,
+        acrylicColor: t.acrylicColor, cabinetColor: t.cabinetColor, plasticWrap: t.plasticWrap,
+        cover: t.cover ? {...t.cover, addedAt: today, note: 'Recuperado de label — stock NO decrementado'} : null,
+        looseAccessories: t.looseAccessories,
+        trackingId: t.trackingId,
+        trackingState: 'ready-to-ship',
+        trackingHistory: [
+          {state:'created-at-factory', at: today + 'T08:00:00Z', by: role, note:'Recreación de original'},
+          {state:'ready-to-ship', at: now, by: role, note:'Recuperación automática 19-may — listo para escanear en Loading Bay'}
+        ]
+      });
+      added.push(t.sn);
+      if(typeof learnFromInput === 'function'){
+        learnFromInput('spaModel', t.model);
+        learnFromInput('acrylic', t.acrylicColor);
+        learnFromInput('cabinet', t.cabinetColor);
+        learnFromInput('plasticWrap', t.plasticWrap);
+        if(t.cover){ learnFromInput('cover', t.cover.color); learnFromInput('coverModel', t.cover.model); }
+      }
+    }
+
+    const totalAffected = added.length + upgraded.length;
+    if(totalAffected === 0){
+      console.log('[recovery] nothing to do');
+      try { localStorage.setItem(RECOVERY_FLAG_KEY, JSON.stringify({done:true, at:now, reason:'nothing-to-do'})); } catch(e){}
+      return;
+    }
+    if(typeof addAct === 'function'){
+      const parts = [];
+      if(added.length) parts.push(`agregadas ${added.length}`);
+      if(upgraded.length) parts.push(`upgraded ${upgraded.length}`);
+      if(skipped.length) parts.push(`saltadas ${skipped.length}`);
+      addAct(`🔧 Auto-recuperación 19-may: ${parts.join(', ')} con QR codes originales — listas en Loading Bay`, 'var(--accent)');
+    }
+    // Persist + push (bypass safe-push since cloud may be empty/wrong here)
+    if(typeof flushSave === 'function') flushSave();
+    _bypassNextSafePush = true;
+    if(typeof window.fbCloudSync === 'function'){
+      try { await window.fbCloudSync(false); } catch(e){ console.error('[recovery] push failed:', e); }
+    }
+    // Save a labeled snapshot of this recovery state as a permanent marker
+    try { await window.saveLabeledSnapshot('recovery_19may_8_tinas'); } catch(e){}
+    // Mark recovery as done
+    try { localStorage.setItem(RECOVERY_FLAG_KEY, JSON.stringify({done:true, at:now, added, upgraded, skipped})); } catch(e){}
+    // Re-render so Loading Bay shows the tinas
+    ['renderFactory','drawMap','renderQueue','updBadges','renderTruck'].forEach(fn => { try{ window[fn]?.(); }catch(e){} });
+    if(typeof toast === 'function'){
+      const msgParts = [];
+      if(added.length) msgParts.push(`${added.length} agregadas`);
+      if(upgraded.length) msgParts.push(`${upgraded.length} con QR original`);
+      toast(`🛡 ${msgParts.join(' · ')} — listas en Loading Bay`, 'ok');
+    }
+    console.log('%c🛡 [recovery] ✓ added=' + added.length + ', upgraded=' + upgraded.length + ', skipped=' + skipped.length, 'color:#16a34a;font-weight:bold');
+  }
+
+})();
 </script>
 
 <!-- ═══════════════════════════════════════════════════════════
