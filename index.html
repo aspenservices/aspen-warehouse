@@ -3362,7 +3362,7 @@ body.dark-mode .mar-card-track {
     </select>
     <div class="role-current"><span id="role-indicator">Admin</span></div>
   </div>
-  <div class="sb-foot"><div class="sb-ver">v4.03 🛡 · <span id="live-date"></span></div></div>
+  <div class="sb-foot"><div class="sb-ver">v4.08 🛡 · <span id="live-date"></span></div></div>
 </nav>
 
 <!-- MAIN -->
@@ -4444,8 +4444,17 @@ let _fbInitAttempts = 0;
 //   /app_version/current  (in Firebase console, manually, OR call
 //   pushVersionToFirebase() from the Admin console at deploy time)
 // ══════════════════════════════════════════════════════════════════
-const APP_VERSION = 'v4.03';
+const APP_VERSION = 'v4.08';
 window.APP_VERSION = APP_VERSION;
+
+// ── DATA EPOCH (generation guard) ────────────────────────────────────
+// Every state this build writes to the cloud is stamped with this epoch.
+// Older builds don't know about epochs, so their writes read as epoch 1.
+// v4.06 devices REJECT any incoming state with an older epoch (stale junk
+// from an out-of-date device) and re-push the clean state — so the junk can
+// never come back even if an old device keeps running. Bump this whenever you
+// need to forcibly invalidate all older devices' cloud writes.
+window.ASPEN_DATA_EPOCH = 2;
 
 let _updateBannerShown = false;
 let _versionCheckTimer = null;
@@ -4834,7 +4843,7 @@ async function fbCloudSync(showToast){
     } catch(e){ console.warn('[safe-push] check failed:', e); }
   }
   try {
-    const state = {nid, units, dispatched, incoming, materials, events, activity, queue, cfg, factory, marriages, dispatchRequests, coverInventory, colorLibrary, coverModelMapping};
+    const state = {nid, units, dispatched, incoming, materials, events, activity, queue, cfg, factory, marriages, dispatchRequests, coverInventory, colorLibrary, coverModelMapping, _epoch: (window.ASPEN_DATA_EPOCH || 1)};
     const ts = Date.now();
     // For anonymous users, _fbUser.email is null. Use the current user pill
     // name (from in-app Welcome screen) + deviceId for traceable diagnostics.
@@ -5318,6 +5327,12 @@ function fbApplyRemoteState(restored, sourceTimestamp){
   } finally {
     _fbApplyingRemote = false;
   }
+  // ── TINA GUARANTEE: after applying any cloud state, make sure the 8 tinas
+  // are still present (a junk/stale state may have dropped them). Runs OUTSIDE
+  // the _fbApplyingRemote block so its corrective push is allowed.
+  try {
+    if(typeof window.__aspenEnsureTinas === 'function') setTimeout(window.__aspenEnsureTinas, 300);
+  } catch(e){}
 }
 
 // Re-render whatever view is currently active. Called after applying a remote update.
@@ -20515,7 +20530,7 @@ async function runDiagnostics(){
 
   // ── TEST 2: state JSON serializable + within quota ──
   try {
-    const state = {nid, units, dispatched, incoming, materials, events, activity, queue, cfg, factory, marriages, dispatchRequests, coverInventory, colorLibrary, coverModelMapping};
+    const state = {nid, units, dispatched, incoming, materials, events, activity, queue, cfg, factory, marriages, dispatchRequests, coverInventory, colorLibrary, coverModelMapping, _epoch: (window.ASPEN_DATA_EPOCH || 1)};
     const json = JSON.stringify(state);
     const size = (new Blob([json]).size / 1024).toFixed(1);
     const sizeMb = (json.length / 1024 / 1024).toFixed(2);
@@ -21324,6 +21339,26 @@ document.addEventListener('keydown', e=>{
     'ASPN-SPA-EKXCPB','ASPN-SPA-ZYCJBU','ASPN-SPA-WGLNX6','ASPN-SPA-U528U6'
   ]);
 
+  // ── BASELINE TINAS (permanent guarantee) ─────────────────────────────
+  // The 8 tinas are a PERMANENT baseline. ensureTinas() guarantees they are
+  // always present in factory (ready-to-ship) until they progress to the
+  // warehouse (units/incoming/dispatched). This is NOT a one-time migration —
+  // it runs after every sync, so no stale-device push can ever wipe them.
+  const BASELINE_TINAS = [
+    {sn:'30955', dealer:'D & L', model:'Quattro GS', acrylicColor:'Alabaster White', cabinetColor:'Grey', plasticWrap:'Blanco', cover:{color:'Black', model:'Quattro (W)', source:'warehouse'}, looseAccessories:['TS-07'], trackingId:'ASPN-SPA-MJNG47'},
+    {sn:'30958', dealer:'Pool People', model:'Eldorado ES', acrylicColor:'Onyx Black', cabinetColor:'Venetian Bronze w/ Black Corners', plasticWrap:'Blanco', cover:{color:'Black', model:'Eldorado (W)', source:'warehouse'}, looseAccessories:[], trackingId:'ASPN-SPA-73K6VD'},
+    {sn:'30960', dealer:'Paradise Pools (Carter)', model:'Quattro VS 110v', acrylicColor:'Moonstone Grey', cabinetColor:'Ash Luxe w/ Black Corners', plasticWrap:'Blanco', cover:{color:'Black', model:'Quattro (W)', source:'warehouse'}, looseAccessories:[], trackingId:'ASPN-SPA-MCLAP9'},
+    {sn:'30968', dealer:"Nelson's Home Towne Rec.", model:'Arcadia GS', acrylicColor:'Alabaster White', cabinetColor:'Grey', plasticWrap:'Blanco', cover:{color:'Black', model:'Arcadia (W)', source:'warehouse'}, looseAccessories:[], trackingId:'ASPN-SPA-2N3WHX'},
+    {sn:'30969', dealer:'Stateside Spa Direct', model:'Arcadia GS', acrylicColor:'Smoky Mountains', cabinetColor:'Grey w/ Black Corners', plasticWrap:'Blanco', cover:{color:'Black', model:'Arcadia (W)', source:'warehouse'}, looseAccessories:[], trackingId:'ASPN-SPA-EKXCPB'},
+    {sn:'30991', dealer:'Fireside Spas', model:'Colorado VS', acrylicColor:'Onyx Black', cabinetColor:'Venetian Bronze w/ Black Corners', plasticWrap:'Blanco', cover:{color:'Black', model:'Colorado (W)', source:'warehouse'}, looseAccessories:['TS-07'], trackingId:'ASPN-SPA-ZYCJBU'},
+    {sn:'30994', dealer:'EXTRA EXTRA', model:'Monarch GS', acrylicColor:'Smoky Mountains', cabinetColor:'Espresso w/ Black Corners', plasticWrap:'Blanco', cover:null, looseAccessories:[], trackingId:'ASPN-SPA-WGLNX6'},
+    {sn:'30997', dealer:'Hot Tub Solutions', model:'Alpine Holiday', acrylicColor:'Smoky Mountains', cabinetColor:'Venetian Bronze w/ Black Corners', plasticWrap:'Blanco', cover:{color:'Black', model:'Alpine (W)', source:'warehouse'}, looseAccessories:['TS-07', "28' Steps"], trackingId:'ASPN-SPA-U528U6'}
+  ];
+  // Known seed-default junk S/Ns — the app's built-in demo spas (never real
+  // inventory). The one-time fresh start removes them by keeping only the 8
+  // tina trackingIds, so these are informational only.
+  let _lastEnsureTs = 0;
+
   // Auto-snapshot intervals
   const AUTO_HOURLY_INTERVAL = 60 * 60 * 1000;     // 1 hour
   const AUTO_DAILY_INTERVAL = 24 * 60 * 60 * 1000; // 1 day
@@ -21337,6 +21372,7 @@ document.addEventListener('keydown', e=>{
   let _bypassNextSafePush = false;
   let _autoHourlyLast = 0;
   let _autoDailyLast = 0;
+  let _epochRepushPending = false;
   // Set TRUE once we've successfully pulled the cloud state at least once.
   // After that, local data is COMPLETE — we trust local edits and allow pushes
   // (the auto-heal only protects the pre-initial-sync window when local could
@@ -21383,7 +21419,145 @@ document.addEventListener('keydown', e=>{
     installHourlyLocalBackup();
     installAutoSnapshotSystem();
     installAdminUI();
+    installTinaGuarantee();
+    installFreshStart();
     console.log('%c🛡 [protection] ✓ all protection layers active', 'color:#16a34a;font-weight:bold');
+  }
+
+  // ─── ONE-TIME FRESH START ────────────────────────────────────────────
+  // Establishes the clean starting point ONCE: only the 8 tinas, empty
+  // warehouse, covers counted. After this runs (flagged), the app operates
+  // normally — anything you add to the warehouse from then on is PRESERVED.
+  // It is NOT a recurring cleanup; it runs a single time per device to wipe
+  // the one-time junk, then never again.
+  const FRESH_START_FLAG = 'aspen_fresh_start_8tinas_v1';
+  function installFreshStart(){
+    if(localStorage.getItem(FRESH_START_FLAG)){ console.log('[fresh-start] already done'); return; }
+    let tries = 0;
+    const iv = setInterval(async () => {
+      tries++;
+      if(tries > 120){ clearInterval(iv); return; }
+      if(typeof currentRole === 'undefined' || currentRole !== 'admin') return;
+      if(Date.now() - _bootTime < BOOT_QUARANTINE_MS) return;
+      if(!_fbDb || !_fbAuthorized) return;
+      if(!_initialSyncDone) return;
+      if(localStorage.getItem(FRESH_START_FLAG)){ clearInterval(iv); return; }
+      clearInterval(iv);
+      await doFreshStart();
+    }, 2000);
+  }
+
+  async function doFreshStart(){
+    const now = new Date().toISOString();
+    // 1) Backup current state to Firebase BEFORE removing anything
+    try { if(typeof window.saveLabeledSnapshot === 'function') await window.saveLabeledSnapshot('BACKUP_antes_inicio_limpio_20may'); } catch(e){}
+    if(typeof snapshot === 'function') snapshot('inicio limpio 8 tinas 20-may');
+
+    const validTids = new Set(BASELINE_TINAS.map(t => t.trackingId));
+    const before = {
+      factory: (factory||[]).length, units: getCollection('units').length,
+      incoming: getCollection('incoming').length, marriages: getCollection('marriages').length,
+      requests: getCollection('dispatchRequests').length
+    };
+
+    // 2) Factory: keep ONLY the 8 tinas (one-time removal of seed/junk spas)
+    const keep = factory.filter(f => validTids.has(f.trackingId));
+    factory.length = 0; keep.forEach(f => factory.push(f));
+    // 3) Clear warehouse-side junk ONCE (leave dispatched = delivered tinas)
+    for(const coll of ['units','incoming','marriages','dispatchRequests']){
+      const a = getCollection(coll); a.length = 0;
+    }
+    if(typeof queue !== 'undefined' && Array.isArray(queue)) queue.length = 0;
+
+    // 4) Ensure the 8 tinas + count covers (reuse the guarantee logic)
+    _lastEnsureTs = 0;            // bypass the debounce so it runs now
+    ensureTinas();
+
+    if(typeof addAct === 'function'){
+      addAct(`🎬 Inicio limpio (20-may): solo las 8 tinas. Removido — units ${before.units}, incoming ${before.incoming}, marriages ${before.marriages}, requests ${before.requests}, spas extra ${before.factory - keep.length}. El warehouse queda listo para alimentarse.`, 'var(--accent)');
+    }
+    if(typeof flushSave === 'function') flushSave();
+    _bypassNextSafePush = true;
+    if(typeof fbCloudSync === 'function'){ try { await fbCloudSync(false); } catch(e){} }
+    try { if(typeof window.saveLabeledSnapshot === 'function') await window.saveLabeledSnapshot('estado_inicial_8_tinas_20may'); } catch(e){}
+    try { localStorage.setItem(FRESH_START_FLAG, JSON.stringify({done:true, at:now, before})); } catch(e){}
+    try { if(typeof renderFactory === 'function') renderFactory(); } catch(e){}
+    try { if(typeof drawMap === 'function') drawMap(); } catch(e){}
+    try { if(typeof renderCoverInventory === 'function') renderCoverInventory(); } catch(e){}
+    try { if(typeof updBadges === 'function') updBadges(); } catch(e){}
+    if(typeof toast === 'function') toast('🎬 Inicio limpio: 8 tinas listas. El warehouse ya guarda lo que agregues.', 'ok');
+    console.log('%c🎬 [fresh-start] ✓ clean start — 8 tinas, warehouse ready to grow', 'color:#1e40af;font-weight:bold', before);
+  }
+
+  // ─── PERMANENT TINA GUARANTEE ────────────────────────────────────────
+  // Runs ensureTinas() after initial sync and on a steady interval, AND
+  // exposes window.__aspenEnsureTinas so fbApplyRemoteState can call it right
+  // after any cloud pull (so an incoming junk state is immediately corrected).
+  function installTinaGuarantee(){
+    window.__aspenEnsureTinas = ensureTinas;
+    // After boot quarantine + first sync, ensure once
+    let tries = 0;
+    const iv = setInterval(() => {
+      tries++;
+      if(tries > 120){ clearInterval(iv); return; }
+      if(!_fbDb || !_fbAuthorized) return;
+      if(!_initialSyncDone) return;
+      clearInterval(iv);
+      ensureTinas();
+      // Steady backstop every 45s
+      setInterval(ensureTinas, 45000);
+    }, 2000);
+    console.log('[protection] ✓ tina guarantee armed');
+  }
+
+  function ensureTinas(){
+    if(!_fbDb || !_fbAuthorized) return;
+    if(typeof factory === 'undefined') return;
+    if(Date.now() - _lastEnsureTs < 5000) return;   // debounce 5s
+    _lastEnsureTs = Date.now();
+    const today = '2026-05-19', role = 'Admin', now = new Date().toISOString();
+    // Tinas already shipped out (delivered) — don't resurrect those.
+    const delivered = new Set(getCollection('dispatched').map(d => String(d.sn)));
+    let changed = false;
+
+    // GUARANTEE the 8 tinas exist in factory (add if missing, unless delivered).
+    // This NEVER deletes anything else — units, new spas, and any inventory you
+    // add to the warehouse are preserved. It only re-adds a tina that a sync bug
+    // dropped, so the 8 baseline tinas can never permanently disappear.
+    for(const t of BASELINE_TINAS){
+      if(delivered.has(t.sn)) continue;
+      if(factory.some(f => f.trackingId === t.trackingId)) continue;
+      const colors = [t.acrylicColor && `Acrylic: ${t.acrylicColor}`, t.cabinetColor && `Cabinet: ${t.cabinetColor}`].filter(Boolean).join(' · ');
+      factory.push({
+        id:++nid, sn:t.sn, dealer:t.dealer, type:'hot', added:today,
+        notes:'Tina base (QR original del label físico)', model:t.model, colors,
+        acrylicColor:t.acrylicColor, cabinetColor:t.cabinetColor, plasticWrap:t.plasticWrap,
+        cover: t.cover ? {...t.cover, addedAt:today} : null,
+        looseAccessories:t.looseAccessories, trackingId:t.trackingId, trackingState:'ready-to-ship',
+        trackingHistory:[{state:'created-at-factory', at:today+'T08:00:00Z', by:role},{state:'ready-to-ship', at:now, by:role}]
+      });
+      changed = true;
+    }
+    // Covers start counting: decrement each tina's cover ONCE (idempotent via
+    // cover._reconciled, which travels with the tina in the synced state).
+    if(typeof decrementCoverStock === 'function'){
+      for(const f of factory){
+        if(!f.trackingId || !PROTECTED_TIDS.has(f.trackingId)) continue; // only the 8 tinas
+        if(!f.cover || f.cover._reconciled) continue;
+        decrementCoverStock(f.cover.color, f.cover.model, f.cover.source || 'warehouse', f.sn);
+        f.cover._reconciled = true;
+        changed = true;
+      }
+    }
+    if(!changed) return;
+    if(typeof flushSave === 'function') flushSave();
+    _bypassNextSafePush = true;
+    if(typeof fbCloudSync === 'function'){ try { fbCloudSync(false); } catch(e){} }
+    try { if(typeof renderFactory === 'function') renderFactory(); } catch(e){}
+    try { if(typeof renderTruck === 'function') renderTruck(); } catch(e){}
+    try { if(typeof renderCoverInventory === 'function') renderCoverInventory(); } catch(e){}
+    try { if(typeof updBadges === 'function') updBadges(); } catch(e){}
+    console.log('%c🛟 [tina-guarantee] 8 tinas aseguradas (sin borrar nada más)', 'color:#7c3aed;font-weight:bold');
   }
 
   // ─── 1. SAFE-PUSH GUARD (with AUTO-HEAL) ─────────────────────────────
@@ -21441,6 +21615,30 @@ document.addEventListener('keydown', e=>{
   function installSafePullGuard(){
     window.__aspenSafePullCheck = function(restored, sourceTimestamp){
       if(_bypassNextSafePull){ _bypassNextSafePull = false; _initialSyncDone = true; return true; }
+      // ── EPOCH GUARD (beats stale old-version devices) ──
+      // Reject any incoming state stamped with an OLDER data epoch than ours.
+      // An out-of-date device's writes read as epoch 1; we're epoch 2+. We block
+      // the stale pull (junk never reaches the UI) AND defensively re-push our
+      // clean state so the cloud is corrected. We have local data to fall back
+      // on, so rejecting is always safe. We still mark initial-sync done because
+      // we DID hear from the cloud (so the one-time fresh start can proceed).
+      const incEpoch = Number(restored && restored._epoch) || 1;
+      const myEpoch = Number(window.ASPEN_DATA_EPOCH) || 1;
+      if(incEpoch < myEpoch){
+        _initialSyncDone = true;
+        console.warn('%c🚧 [epoch-guard] rechazado estado viejo — epoch entrante ' + incEpoch + ' < ' + myEpoch + ' (dispositivo desactualizado). Re-empujando estado limpio.', 'color:#dc2626;font-weight:bold');
+        if(!_epochRepushPending){
+          _epochRepushPending = true;
+          setTimeout(() => {
+            _epochRepushPending = false;
+            _bypassNextSafePush = true;
+            try { if(typeof fbCloudSync === 'function') fbCloudSync(false); } catch(e){}
+          }, 1500);
+        }
+        return false;
+      }
+      // Guard ALL collections against big losses so any inventory you add later
+      // (units, new spas, etc.) is protected from a stale-device overwrite.
       const collections = ['factory','units','marriages','dispatched','incoming'];
       const losses = [];
       for(const k of collections){
@@ -21451,21 +21649,9 @@ document.addEventListener('keydown', e=>{
         }
       }
       // ── PER-ITEM TINA PROTECTION ──
-      // If the incoming factory state DROPS a protected tina that we currently
-      // hold (ready-to-ship / in-transit / created), that's a REGRESSION
-      // (not a legit dispatch/receive) and we block the pull. Catches the
-      // 8→5 case the percentage threshold could miss.
-      const _localFactory = getCollection('factory');
-      const _incFactory = Array.isArray(restored.factory) ? restored.factory : [];
-      const _incTids = new Set(_incFactory.map(f => f.trackingId).filter(Boolean));
-      const _droppedTinas = _localFactory.filter(f =>
-        f.trackingId && PROTECTED_TIDS.has(f.trackingId) &&
-        (f.trackingState === 'ready-to-ship' || f.trackingState === 'in-transit' || f.trackingState === 'created-at-factory') &&
-        !_incTids.has(f.trackingId)
-      ).map(f => f.sn || f.trackingId);
-      if(_droppedTinas.length){
-        losses.push({key:`tinas protegidas (${_droppedTinas.join(', ')})`, local:_droppedTinas.length, incoming:0});
-      }
+      // (Tina drops are now auto-corrected by ensureTinas() right after the pull,
+      // so we don't raise a banner for them — that would spam the user. The
+      // count-based banner above still guards against large unexpected losses.)
       if(losses.length === 0){ _initialSyncDone = true; return true; }
       // Big incoming loss — DON'T mark initial sync done (we're rejecting this pull)
       showSyncWarningBanner(losses, restored, sourceTimestamp);
@@ -21544,7 +21730,7 @@ document.addEventListener('keydown', e=>{
       } else if(kind === 'daily'){
         label = `auto_daily_${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}`;
       }
-      const state = {nid, units, dispatched, incoming, materials, events, activity, queue, cfg, factory, marriages, dispatchRequests, coverInventory, colorLibrary, coverModelMapping};
+      const state = {nid, units, dispatched, incoming, materials, events, activity, queue, cfg, factory, marriages, dispatchRequests, coverInventory, colorLibrary, coverModelMapping, _epoch: (window.ASPEN_DATA_EPOCH || 1)};
       const payload = {
         timestamp: Date.now(),
         label,
@@ -21589,7 +21775,7 @@ document.addEventListener('keydown', e=>{
       if(!label){ label = prompt('Etiqueta para este punto de restauración:\n\nEj: "antes-de-tinas-19-may", "fin-de-dia-19-may"'); if(!label) return; }
       const safeLabel = String(label).replace(/[.#$\[\]\/\s]+/g,'_').slice(0,100);
       if(!safeLabel){ if(typeof toast==='function') toast('Etiqueta inválida','err'); return; }
-      const state = {nid, units, dispatched, incoming, materials, events, activity, queue, cfg, factory, marriages, dispatchRequests, coverInventory, colorLibrary, coverModelMapping};
+      const state = {nid, units, dispatched, incoming, materials, events, activity, queue, cfg, factory, marriages, dispatchRequests, coverInventory, colorLibrary, coverModelMapping, _epoch: (window.ASPEN_DATA_EPOCH || 1)};
       const payload = {
         timestamp: Date.now(), label,
         uploadedBy: (typeof currentUser !== 'undefined' && currentUser?.name) ? currentUser.name : 'Admin',
@@ -21703,6 +21889,7 @@ document.addEventListener('keydown', e=>{
             <button id="apm-hourly" style="background:#0891b2;color:#fff;border:0;border-radius:9px;padding:12px;font-weight:700;cursor:pointer;font-size:13px;text-align:left">⏰ Restaurar backup local horario<div style="font-size:10.5px;opacity:.9;font-weight:500;margin-top:3px">Copia local (≤1h atrás).</div></button>
             <button id="apm-recover" style="background:#7c3aed;color:#fff;border:0;border-radius:9px;padding:12px;font-weight:700;cursor:pointer;font-size:13px;text-align:left">🔍 Auto-restaurar (el mejor snapshot)<div style="font-size:10.5px;opacity:.9;font-weight:500;margin-top:3px">Escanea todo Firebase y pica automáticamente.</div></button>
             <button id="apm-stats" style="background:#374151;color:#fff;border:0;border-radius:9px;padding:12px;font-weight:700;cursor:pointer;font-size:13px;text-align:left">📊 Ver stats de protección<div style="font-size:10.5px;opacity:.9;font-weight:500;margin-top:3px">Cuántos snapshots tienes, última sincronización, etc.</div></button>
+            <button id="apm-nuclear" style="background:#dc2626;color:#fff;border:0;border-radius:9px;padding:12px;font-weight:700;cursor:pointer;font-size:13px;text-align:left">🧨 Limpieza total del cloud (definitivo)<div style="font-size:10.5px;opacity:.9;font-weight:500;margin-top:3px">Respalda todo, borra la basura de TODOS los dispositivos, deja solo las 8 tinas. Úsalo una vez.</div></button>
             <button id="apm-close" style="background:#f1f5f9;color:#475569;border:0;border-radius:9px;padding:10px;font-weight:700;cursor:pointer;font-size:12.5px;margin-top:3px">Cerrar</button>
           </div>
         </div>`;
@@ -21712,10 +21899,72 @@ document.addEventListener('keydown', e=>{
       document.getElementById('apm-hourly').onclick = () => { menu.remove(); window.restoreHourlyBackup(); };
       document.getElementById('apm-recover').onclick = () => { menu.remove(); autoRestoreFromFirebase(); };
       document.getElementById('apm-stats').onclick = () => { menu.remove(); showStats(); };
+      document.getElementById('apm-nuclear').onclick = () => { menu.remove(); nuclearCloudClean(); };
       document.getElementById('apm-close').onclick = () => menu.remove();
       menu.onclick = (e) => { if(e.target === menu) menu.remove(); };
     };
     console.log('[protection] ✓ admin UI');
+  }
+
+  // ─── NUCLEAR CLOUD CLEAN (one-shot, definitive) ─────────────────────
+  // Wipes the junk from EVERY device node in Firebase, archives the whole tree
+  // first, and writes a single clean state (8 tinas, epoch 2). Combined with the
+  // epoch guard, this removes the junk at the source so it cannot come back.
+  async function nuclearCloudClean(){
+    if(!_fbDb || !_fbAuthorized){ alert('Firebase no conectado'); return; }
+    const ok = confirm('🧨 LIMPIEZA TOTAL DEL CLOUD (definitivo)\n\nEsto va a:\n  • Respaldar TODO el estado actual en Firebase\n  • Borrar la basura de TODOS los dispositivos en el cloud\n  • Dejar SOLO las 8 tinas (listas para tránsito)\n  • Escribir el estado limpio con epoch 2 (los dispositivos viejos no pueden sobreescribirlo)\n\n⚠ Si agregaste inventario nuevo, también se borra (es un reinicio 100% limpio).\n\n¿Continuar?');
+    if(!ok) return;
+    const now = Date.now(), iso = new Date(now).toISOString();
+    try {
+      if(typeof toast === 'function') toast('🧨 Limpieza total en progreso…', 'ok');
+      // 1) Archive the ENTIRE state tree first (best-effort, under state/ so rules allow it)
+      let fullTree = {};
+      try {
+        const snap = await _fbDb.ref('state').once('value');
+        fullTree = snap.val() || {};
+        await _fbDb.ref(`state/_archive_total/${now}`).set({ at: iso, by: 'nuclear-clean', tree: JSON.stringify(fullTree) });
+        console.log('[nuclear] full tree archived to state/_archive_total/' + now);
+      } catch(e){ console.warn('[nuclear] archive failed (continuing):', e); }
+      // Local labeled snapshot too (independent safety net)
+      try { if(typeof window.saveLabeledSnapshot === 'function') await window.saveLabeledSnapshot('BACKUP_antes_limpieza_total_' + now); } catch(e){}
+
+      // 2) Reset local to ONLY the 8 tinas (clear everything else)
+      const validTids = new Set(BASELINE_TINAS.map(t => t.trackingId));
+      const keep = factory.filter(f => validTids.has(f.trackingId));
+      factory.length = 0; keep.forEach(f => factory.push(f));
+      for(const coll of ['units','incoming','marriages','dispatched','dispatchRequests']){ const a = getCollection(coll); a.length = 0; }
+      if(typeof queue !== 'undefined' && Array.isArray(queue)) queue.length = 0;
+      _lastEnsureTs = 0; ensureTinas();   // re-adds any missing tina + counts covers (idempotent)
+      if(typeof flushSave === 'function') flushSave();
+
+      // 3) Push the clean state (epoch 2) to the cloud
+      _bypassNextSafePush = true;
+      if(typeof fbCloudSync === 'function') await fbCloudSync(false);
+
+      // 4) DELETE every other device's node (the junk lives there). Keep 'shared'
+      //    (our fresh clean state) and '_archive_total' (the backup we just made).
+      const devKeys = Object.keys(fullTree).filter(k => k !== 'shared' && k !== '_archive_total' && k !== _fbDeviceId);
+      let deleted = 0;
+      for(const k of devKeys){ try { await _fbDb.ref(`state/${k}`).remove(); deleted++; } catch(e){ console.warn('[nuclear] could not remove', k, e); } }
+      // Also clear THIS device's old snapshot history (may hold junk); latest stays clean.
+      try { await _fbDb.ref(`state/${_fbDeviceId}/snapshots`).remove(); } catch(e){}
+
+      // 5) Flag so the one-time fresh start doesn't double-run
+      try { localStorage.setItem(FRESH_START_FLAG, JSON.stringify({done:true, at:iso, via:'nuclear'})); } catch(e){}
+
+      // 6) Re-render
+      try { renderFactory && renderFactory(); } catch(e){}
+      try { drawMap && drawMap(); } catch(e){}
+      try { renderCoverInventory && renderCoverInventory(); } catch(e){}
+      try { renderInTransit && renderInTransit(); } catch(e){}
+      try { updBadges && updBadges(); } catch(e){}
+
+      alert(`✅ LIMPIEZA TOTAL COMPLETA\n\n  • Respaldo: state/_archive_total/${now}\n  • Nodos de dispositivos borrados: ${deleted}\n  • Quedan SOLO las 8 tinas\n  • Covers contados\n\nSi un dispositivo viejo sigue abierto, el epoch guard rechaza su basura automáticamente. Para que pare del todo, actualízalo a v4.07.`);
+      console.log('%c🧨 [nuclear] ✓ cloud limpio — 8 tinas, ' + deleted + ' nodos borrados', 'color:#dc2626;font-weight:bold');
+    } catch(e){
+      console.error('[nuclear] failed:', e);
+      alert('Error en limpieza total: ' + e.message + '\n\nTu respaldo (si se hizo) está en state/_archive_total/. Nada se perdió.');
+    }
   }
 
   async function showStats(){
