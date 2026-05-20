@@ -3362,7 +3362,7 @@ body.dark-mode .mar-card-track {
     </select>
     <div class="role-current"><span id="role-indicator">Admin</span></div>
   </div>
-  <div class="sb-foot"><div class="sb-ver">v4.00 🛡 · <span id="live-date"></span></div></div>
+  <div class="sb-foot"><div class="sb-ver">v4.01 🛡 · <span id="live-date"></span></div></div>
 </nav>
 
 <!-- MAIN -->
@@ -4444,7 +4444,7 @@ let _fbInitAttempts = 0;
 //   /app_version/current  (in Firebase console, manually, OR call
 //   pushVersionToFirebase() from the Admin console at deploy time)
 // ══════════════════════════════════════════════════════════════════
-const APP_VERSION = 'v4.00';
+const APP_VERSION = 'v4.01';
 window.APP_VERSION = APP_VERSION;
 
 let _updateBannerShown = false;
@@ -21329,6 +21329,31 @@ document.addEventListener('keydown', e=>{
   let _autoHourlyLast = 0;
   let _autoDailyLast = 0;
   let _recoveryInProgress = false;
+  // Set TRUE once we've successfully pulled the cloud state at least once.
+  // After that, local data is COMPLETE — we trust local edits and allow pushes
+  // (the auto-heal only protects the pre-initial-sync window when local could
+  // still be seed/stale). This prevents the auto-heal from reverting a
+  // legitimate scan/edit just because some collection is momentarily smaller.
+  let _initialSyncDone = false;
+
+  // CRITICAL: the data collections (factory, units, …) are `let`-declared at
+  // main-script scope, so they are NOT on `window`. Reading `window['factory']`
+  // returns undefined → length 0 → the guards mis-fire (auto-heal on every push,
+  // safe-pull never fires). Because this protection block is now INLINED inside
+  // the main script, we can reference the live bindings directly here.
+  function getCollection(k){
+    switch(k){
+      case 'factory':         return typeof factory         !== 'undefined' ? factory         : [];
+      case 'units':           return typeof units           !== 'undefined' ? units           : [];
+      case 'marriages':       return typeof marriages       !== 'undefined' ? marriages       : [];
+      case 'dispatched':      return typeof dispatched      !== 'undefined' ? dispatched      : [];
+      case 'incoming':        return typeof incoming        !== 'undefined' ? incoming        : [];
+      case 'materials':       return typeof materials       !== 'undefined' ? materials       : [];
+      case 'dispatchRequests':return typeof dispatchRequests!== 'undefined' ? dispatchRequests: [];
+      case 'coverInventory':  return typeof coverInventory  !== 'undefined' ? coverInventory  : [];
+      default: return [];
+    }
+  }
 
   // ── ORIGINAL TRACKING IDs from QR codes decoded from physical labels ──
   const RECOVERY_TINAS = [
@@ -21363,6 +21388,7 @@ document.addEventListener('keydown', e=>{
     installAutoSnapshotSystem();
     installAdminUI();
     installSilentRecovery();
+    installCoverReconciliation();
     console.log('%c🛡 [protection] ✓ all 6 layers active', 'color:#16a34a;font-weight:bold');
   }
 
@@ -21378,6 +21404,13 @@ document.addEventListener('keydown', e=>{
         return false;
       }
       if(!_fbDb || !_fbAuthorized) return true;
+      // ── KEY FIX (v4.01): once we've pulled the cloud at least once, our local
+      // data is COMPLETE. Trust local edits (scan→in-transit, etc.) and allow the
+      // push. The auto-heal below ONLY protects the pre-initial-sync window — i.e.
+      // a device that booted with seed/stale localStorage and is about to clobber
+      // a populated cloud BEFORE it has pulled the real state. After initial sync,
+      // a smaller count is a legitimate change (or we already merged), not stale data.
+      if(_initialSyncDone) return true;
       try {
         const snap = await _fbDb.ref('state/shared/latest').once('value');
         const cloud = snap.val();
@@ -21387,20 +21420,22 @@ document.addEventListener('keydown', e=>{
         const collections = ['factory','units','marriages','dispatched','incoming'];
         const losses = [];
         for(const k of collections){
-          const local = Array.isArray(window[k]) ? window[k].length : 0;
+          const local = getCollection(k).length;
           const cloudCnt = Array.isArray(remote[k]) ? remote[k].length : 0;
           if(cloudCnt >= MIN_BASELINE && local < cloudCnt * (1 - LOSS_THRESHOLD)){
             losses.push({key:k, cloud:cloudCnt, local:local});
           }
         }
         if(losses.length === 0) return true;
-        // AUTO-HEAL: cloud has much more data — pull it silently instead of pushing
-        console.warn('[safe-push] AUTO-HEAL: pulling cloud (' +
+        // AUTO-HEAL: cloud has much more data and we haven't synced yet — pull it
+        // silently instead of pushing our (likely seed/stale) state.
+        console.warn('[safe-push] AUTO-HEAL (pre-initial-sync): pulling cloud (' +
           losses.map(l => `${l.key} ${l.local}→${l.cloud}`).join(', ') + ')');
-        if(typeof toast === 'function') toast('🛡 Auto-recuperando del cloud — data preservada', 'ok');
+        if(typeof toast === 'function') toast('🛡 Sincronizando data del cloud…', 'ok');
         _bypassNextSafePull = true;
         try {
           fbApplyRemoteState(remote, cloud.timestamp);
+          _initialSyncDone = true;  // we now have the full cloud state
         } catch(e){ console.error('[safe-push] auto-heal apply failed:', e); }
         return false; // skip the push
       } catch(e){ console.warn('[safe-push] error, allowing push:', e); return true; }
@@ -21411,17 +21446,18 @@ document.addEventListener('keydown', e=>{
   // ─── 2. SAFE-PULL GUARD (banner with Accept/Reject) ──────────────────
   function installSafePullGuard(){
     window.__aspenSafePullCheck = function(restored, sourceTimestamp){
-      if(_bypassNextSafePull){ _bypassNextSafePull = false; return true; }
+      if(_bypassNextSafePull){ _bypassNextSafePull = false; _initialSyncDone = true; return true; }
       const collections = ['factory','units','marriages','dispatched','incoming'];
       const losses = [];
       for(const k of collections){
-        const local = Array.isArray(window[k]) ? window[k].length : 0;
+        const local = getCollection(k).length;
         const inc = Array.isArray(restored[k]) ? restored[k].length : 0;
         if(local >= MIN_BASELINE && inc < local * (1 - LOSS_THRESHOLD)){
           losses.push({key:k, local, incoming:inc});
         }
       }
-      if(losses.length === 0) return true;
+      if(losses.length === 0){ _initialSyncDone = true; return true; }
+      // Big incoming loss — DON'T mark initial sync done (we're rejecting this pull)
       showSyncWarningBanner(losses, restored, sourceTimestamp);
       return false;
     };
@@ -21753,6 +21789,77 @@ document.addEventListener('keydown', e=>{
     }, 2000);
   }
 
+  // ─── 8. ONE-TIME COVER RECONCILIATION ───────────────────────────────
+  // The silent/force recovery re-created the 8 tinas but SKIPPED the cover
+  // stock decrement (the original assumption — "covers were already
+  // decremented" — was wrong: the data wipe ALSO reverted cover inventory to
+  // the pre-creation count, so the covers were never actually decremented in
+  // the current state). This runs once to decrement the 7 covers (all tinas
+  // except 30994/EXTRA EXTRA which has cover:null), exactly mirroring what
+  // addFactorySpa() does when a spa is created with a cover.
+  const COVER_RECON_FLAG_KEY = 'aspen_cover_recon_19may_done_v1';
+  function installCoverReconciliation(){
+    if(localStorage.getItem(COVER_RECON_FLAG_KEY)){ console.log('[cover-recon] already done'); return; }
+    let attempts = 0;
+    const iv = setInterval(async () => {
+      attempts++;
+      if(attempts > 90){ clearInterval(iv); return; }
+      if(typeof currentRole === 'undefined' || currentRole !== 'admin') return;
+      if(Date.now() - _bootTime < BOOT_QUARANTINE_MS) return;
+      if(!_fbDb || !_fbAuthorized) return;
+      if(!_initialSyncDone) return;            // wait for full cloud data
+      if(_recoveryInProgress) return;          // let tina recovery finish first
+      // Ensure the tinas actually exist before reconciling their covers
+      const present = RECOVERY_TINAS.filter(t => t.cover).every(t =>
+        (factory||[]).some(f => f.trackingId === t.trackingId)
+      );
+      if(!present) return;
+      clearInterval(iv);
+      await doCoverReconciliation();
+    }, 2000);
+  }
+
+  async function doCoverReconciliation(){
+    if(typeof decrementCoverStock !== 'function'){
+      console.warn('[cover-recon] decrementCoverStock not available');
+      return;
+    }
+    const now = new Date().toISOString();
+    let decremented = 0;
+    const done = [];
+    const skipped = [];
+    if(typeof snapshot === 'function') snapshot('cover reconciliation 19-may');
+    for(const t of RECOVERY_TINAS){
+      if(!t.cover) continue;  // 30994 EXTRA EXTRA has no cover
+      const f = (factory||[]).find(x => x.trackingId === t.trackingId);
+      if(!f || !f.cover){ skipped.push(t.sn + ' (no cover on item)'); continue; }
+      // Idempotency: never double-decrement. Mark the cover once reconciled.
+      if(f.cover._reconciled){ skipped.push(t.sn + ' (already reconciled)'); continue; }
+      const ok = decrementCoverStock(f.cover.color, f.cover.model, f.cover.source || 'warehouse', f.sn);
+      f.cover._reconciled = true;  // permanent marker travels with the item
+      if(ok){ decremented++; done.push(`${t.sn}: ${f.cover.color} ${f.cover.model||''}`.trim()); }
+    }
+    if(decremented === 0){
+      console.log('[cover-recon] nothing decremented', {skipped});
+      try { localStorage.setItem(COVER_RECON_FLAG_KEY, JSON.stringify({done:true, at:now, reason:'nothing-to-do', skipped})); } catch(e){}
+      return;
+    }
+    if(typeof addAct === 'function'){
+      addAct(`🛌 Reconciliación de covers (recuperación 19-may): ${decremented} cover${decremented>1?'s':''} descontado${decremented>1?'s':''} del inventario`, 'var(--purple)');
+    }
+    if(typeof flushSave === 'function') flushSave();
+    _bypassNextSafePush = true;
+    if(typeof fbCloudSync === 'function'){ try { await fbCloudSync(false); } catch(e){ console.error('[cover-recon] push failed:', e); } }
+    try { localStorage.setItem(COVER_RECON_FLAG_KEY, JSON.stringify({done:true, at:now, decremented, done, skipped})); } catch(e){}
+    // Re-render cover inventory views (bare refs — these fns are NOT on window)
+    try { if(typeof renderCoverInventory === 'function') renderCoverInventory(); } catch(e){}
+    try { if(typeof renderMaterials === 'function') renderMaterials(); } catch(e){}
+    try { if(typeof updBadges === 'function') updBadges(); } catch(e){}
+    try { if(typeof drawMap === 'function') drawMap(); } catch(e){}
+    if(typeof toast === 'function') toast(`🛌 ${decremented} cover${decremented>1?'s':''} descontado${decremented>1?'s':''} del inventario`, 'ok');
+    console.log('%c🛌 [cover-recon] ✓ decremented ' + decremented + ' covers', 'color:#7c3aed;font-weight:bold', {done, skipped});
+  }
+
   async function doSilentRecovery(){
     const today = '2026-05-19';
     const role = (typeof ROLES !== 'undefined' && ROLES[currentRole]) ? ROLES[currentRole].label : 'Admin';
@@ -21868,7 +21975,12 @@ document.addEventListener('keydown', e=>{
     // Mark recovery as done
     try { localStorage.setItem(RECOVERY_FLAG_KEY, JSON.stringify({done:true, at:now, added, upgraded, skipped})); } catch(e){}
     // Re-render so Loading Bay shows the tinas
-    ['renderFactory','drawMap','renderQueue','updBadges','renderTruck'].forEach(fn => { try{ window[fn]?.(); }catch(e){} });
+    // Re-render so Loading Bay shows the tinas (bare refs — fns are NOT on window)
+    try { if(typeof renderFactory === 'function') renderFactory(); } catch(e){}
+    try { if(typeof drawMap === 'function') drawMap(); } catch(e){}
+    try { if(typeof renderQueue === 'function') renderQueue(); } catch(e){}
+    try { if(typeof updBadges === 'function') updBadges(); } catch(e){}
+    try { if(typeof renderTruck === 'function') renderTruck(); } catch(e){}
     if(typeof toast === 'function'){
       const msgParts = [];
       if(added.length) msgParts.push(`${added.length} agregadas`);
