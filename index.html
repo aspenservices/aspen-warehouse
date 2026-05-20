@@ -3362,7 +3362,7 @@ body.dark-mode .mar-card-track {
     </select>
     <div class="role-current"><span id="role-indicator">Admin</span></div>
   </div>
-  <div class="sb-foot"><div class="sb-ver">v4.01 🛡 · <span id="live-date"></span></div></div>
+  <div class="sb-foot"><div class="sb-ver">v4.03 🛡 · <span id="live-date"></span></div></div>
 </nav>
 
 <!-- MAIN -->
@@ -4444,7 +4444,7 @@ let _fbInitAttempts = 0;
 //   /app_version/current  (in Firebase console, manually, OR call
 //   pushVersionToFirebase() from the Admin console at deploy time)
 // ══════════════════════════════════════════════════════════════════
-const APP_VERSION = 'v4.01';
+const APP_VERSION = 'v4.03';
 window.APP_VERSION = APP_VERSION;
 
 let _updateBannerShown = false;
@@ -21307,13 +21307,22 @@ document.addEventListener('keydown', e=>{
 // ═══════════════════════════════════════════════════════════════════════
 (function aspenProtection(){
   'use strict';
-  const VERSION = 'protection-v2-may19';
-  const RECOVERY_FLAG_KEY = 'aspen_recovery_19may_done_v2';
+  const VERSION = 'protection-v4-may20';
   const HOURLY_BACKUP_KEY = 'aspen_warehouse_state_hourly_backup_v1';
   const HOURLY_BACKUP_INTERVAL = 60 * 60 * 1000;
-  const LOSS_THRESHOLD = 0.5;     // >50% loss triggers a guard
+  const LOSS_THRESHOLD = 0.25;    // >25% loss triggers a guard (was 0.5 — too loose; 8→5 slipped through)
   const MIN_BASELINE = 3;         // collections smaller than this don't trigger guards
   const BOOT_QUARANTINE_MS = 30 * 1000;  // 30s after boot, no auto-pushes
+
+  // ── PROTECTED TINAS ──────────────────────────────────────────────────
+  // The 8 tinas, by their original QR tracking IDs. These must NEVER silently
+  // vanish from factory via a sync. If an incoming cloud state would drop one
+  // we currently hold (ready-to-ship / in-transit / created), that's a
+  // REGRESSION (not a legit dispatch/receive) and we block the pull.
+  const PROTECTED_TIDS = new Set([
+    'ASPN-SPA-MJNG47','ASPN-SPA-73K6VD','ASPN-SPA-MCLAP9','ASPN-SPA-2N3WHX',
+    'ASPN-SPA-EKXCPB','ASPN-SPA-ZYCJBU','ASPN-SPA-WGLNX6','ASPN-SPA-U528U6'
+  ]);
 
   // Auto-snapshot intervals
   const AUTO_HOURLY_INTERVAL = 60 * 60 * 1000;     // 1 hour
@@ -21328,7 +21337,6 @@ document.addEventListener('keydown', e=>{
   let _bypassNextSafePush = false;
   let _autoHourlyLast = 0;
   let _autoDailyLast = 0;
-  let _recoveryInProgress = false;
   // Set TRUE once we've successfully pulled the cloud state at least once.
   // After that, local data is COMPLETE — we trust local edits and allow pushes
   // (the auto-heal only protects the pre-initial-sync window when local could
@@ -21339,8 +21347,8 @@ document.addEventListener('keydown', e=>{
   // CRITICAL: the data collections (factory, units, …) are `let`-declared at
   // main-script scope, so they are NOT on `window`. Reading `window['factory']`
   // returns undefined → length 0 → the guards mis-fire (auto-heal on every push,
-  // safe-pull never fires). Because this protection block is now INLINED inside
-  // the main script, we can reference the live bindings directly here.
+  // safe-pull never fires). Because this protection block is INLINED inside
+  // the main script, we reference the live bindings directly here.
   function getCollection(k){
     switch(k){
       case 'factory':         return typeof factory         !== 'undefined' ? factory         : [];
@@ -21354,18 +21362,6 @@ document.addEventListener('keydown', e=>{
       default: return [];
     }
   }
-
-  // ── ORIGINAL TRACKING IDs from QR codes decoded from physical labels ──
-  const RECOVERY_TINAS = [
-    {sn:'30955', dealer:'D & L', type:'hot', model:'Quattro GS', acrylicColor:'Alabaster White', cabinetColor:'Grey', plasticWrap:'Blanco', cover:{color:'Black', model:'Quattro (W)', source:'warehouse'}, looseAccessories:['TS-07'], trackingId:'ASPN-SPA-MJNG47'},
-    {sn:'30958', dealer:'Pool People', type:'hot', model:'Eldorado ES', acrylicColor:'Onyx Black', cabinetColor:'Venetian Bronze w/ Black Corners', plasticWrap:'Blanco', cover:{color:'Black', model:'Eldorado (W)', source:'warehouse'}, looseAccessories:[], trackingId:'ASPN-SPA-73K6VD'},
-    {sn:'30960', dealer:'Paradise Pools (Carter)', type:'hot', model:'Quattro VS 110v', acrylicColor:'Moonstone Grey', cabinetColor:'Ash Luxe w/ Black Corners', plasticWrap:'Blanco', cover:{color:'Black', model:'Quattro (W)', source:'warehouse'}, looseAccessories:[], trackingId:'ASPN-SPA-MCLAP9'},
-    {sn:'30968', dealer:"Nelson's Home Towne Rec.", type:'hot', model:'Arcadia GS', acrylicColor:'Alabaster White', cabinetColor:'Grey', plasticWrap:'Blanco', cover:{color:'Black', model:'Arcadia (W)', source:'warehouse'}, looseAccessories:[], trackingId:'ASPN-SPA-2N3WHX'},
-    {sn:'30969', dealer:'Stateside Spa Direct', type:'hot', model:'Arcadia GS', acrylicColor:'Smoky Mountains', cabinetColor:'Grey w/ Black Corners', plasticWrap:'Blanco', cover:{color:'Black', model:'Arcadia (W)', source:'warehouse'}, looseAccessories:[], trackingId:'ASPN-SPA-EKXCPB'},
-    {sn:'30991', dealer:'Fireside Spas', type:'hot', model:'Colorado VS', acrylicColor:'Onyx Black', cabinetColor:'Venetian Bronze w/ Black Corners', plasticWrap:'Blanco', cover:{color:'Black', model:'Colorado (W)', source:'warehouse'}, looseAccessories:['TS-07'], trackingId:'ASPN-SPA-ZYCJBU'},
-    {sn:'30994', dealer:'EXTRA EXTRA', type:'hot', model:'Monarch GS', acrylicColor:'Smoky Mountains', cabinetColor:'Espresso w/ Black Corners', plasticWrap:'Blanco', cover:null, looseAccessories:[], trackingId:'ASPN-SPA-WGLNX6'},
-    {sn:'30997', dealer:'Hot Tub Solutions', type:'hot', model:'Alpine Holiday', acrylicColor:'Smoky Mountains', cabinetColor:'Venetian Bronze w/ Black Corners', plasticWrap:'Blanco', cover:{color:'Black', model:'Alpine (W)', source:'warehouse'}, looseAccessories:['TS-07', "28' Steps"], trackingId:'ASPN-SPA-U528U6'}
-  ];
 
   function whenReady(cb, attempts){
     attempts = attempts || 0;
@@ -21387,9 +21383,7 @@ document.addEventListener('keydown', e=>{
     installHourlyLocalBackup();
     installAutoSnapshotSystem();
     installAdminUI();
-    installSilentRecovery();
-    installCoverReconciliation();
-    console.log('%c🛡 [protection] ✓ all 6 layers active', 'color:#16a34a;font-weight:bold');
+    console.log('%c🛡 [protection] ✓ all protection layers active', 'color:#16a34a;font-weight:bold');
   }
 
   // ─── 1. SAFE-PUSH GUARD (with AUTO-HEAL) ─────────────────────────────
@@ -21455,6 +21449,22 @@ document.addEventListener('keydown', e=>{
         if(local >= MIN_BASELINE && inc < local * (1 - LOSS_THRESHOLD)){
           losses.push({key:k, local, incoming:inc});
         }
+      }
+      // ── PER-ITEM TINA PROTECTION ──
+      // If the incoming factory state DROPS a protected tina that we currently
+      // hold (ready-to-ship / in-transit / created), that's a REGRESSION
+      // (not a legit dispatch/receive) and we block the pull. Catches the
+      // 8→5 case the percentage threshold could miss.
+      const _localFactory = getCollection('factory');
+      const _incFactory = Array.isArray(restored.factory) ? restored.factory : [];
+      const _incTids = new Set(_incFactory.map(f => f.trackingId).filter(Boolean));
+      const _droppedTinas = _localFactory.filter(f =>
+        f.trackingId && PROTECTED_TIDS.has(f.trackingId) &&
+        (f.trackingState === 'ready-to-ship' || f.trackingState === 'in-transit' || f.trackingState === 'created-at-factory') &&
+        !_incTids.has(f.trackingId)
+      ).map(f => f.sn || f.trackingId);
+      if(_droppedTinas.length){
+        losses.push({key:`tinas protegidas (${_droppedTinas.join(', ')})`, local:_droppedTinas.length, incoming:0});
       }
       if(losses.length === 0){ _initialSyncDone = true; return true; }
       // Big incoming loss — DON'T mark initial sync done (we're rejecting this pull)
@@ -21766,229 +21776,7 @@ document.addEventListener('keydown', e=>{
     } catch(e){ alert('Error: '+e.message); }
   }
 
-  // ─── 7. SILENT ONE-TIME RECOVERY ─────────────────────────────────────
-  // Auto-adds 8 tinas DIRECTLY to factory in 'ready-to-ship' state so they
-  // appear in Loading Bay ready to scan with EXISTING physical QR labels.
-  // No modal, no prompt — just silent recovery the first time admin loads.
-  function installSilentRecovery(){
-    if(localStorage.getItem(RECOVERY_FLAG_KEY)){ console.log('[recovery] already done previously'); return; }
-    let attempts = 0;
-    const iv = setInterval(async () => {
-      attempts++;
-      if(attempts > 60){ clearInterval(iv); return; }
-      if(_recoveryInProgress) return;
-      if(typeof currentRole === 'undefined' || currentRole !== 'admin') return;
-      // Wait for safe-push boot quarantine to finish
-      if(Date.now() - _bootTime < BOOT_QUARANTINE_MS) return;
-      // Wait until Firebase is ready
-      if(!_fbDb || !_fbAuthorized) return;
-      clearInterval(iv);
-      _recoveryInProgress = true;
-      await doSilentRecovery();
-      _recoveryInProgress = false;
-    }, 2000);
-  }
-
-  // ─── 8. ONE-TIME COVER RECONCILIATION ───────────────────────────────
-  // The silent/force recovery re-created the 8 tinas but SKIPPED the cover
-  // stock decrement (the original assumption — "covers were already
-  // decremented" — was wrong: the data wipe ALSO reverted cover inventory to
-  // the pre-creation count, so the covers were never actually decremented in
-  // the current state). This runs once to decrement the 7 covers (all tinas
-  // except 30994/EXTRA EXTRA which has cover:null), exactly mirroring what
-  // addFactorySpa() does when a spa is created with a cover.
-  const COVER_RECON_FLAG_KEY = 'aspen_cover_recon_19may_done_v1';
-  function installCoverReconciliation(){
-    if(localStorage.getItem(COVER_RECON_FLAG_KEY)){ console.log('[cover-recon] already done'); return; }
-    let attempts = 0;
-    const iv = setInterval(async () => {
-      attempts++;
-      if(attempts > 90){ clearInterval(iv); return; }
-      if(typeof currentRole === 'undefined' || currentRole !== 'admin') return;
-      if(Date.now() - _bootTime < BOOT_QUARANTINE_MS) return;
-      if(!_fbDb || !_fbAuthorized) return;
-      if(!_initialSyncDone) return;            // wait for full cloud data
-      if(_recoveryInProgress) return;          // let tina recovery finish first
-      // Ensure the tinas actually exist before reconciling their covers
-      const present = RECOVERY_TINAS.filter(t => t.cover).every(t =>
-        (factory||[]).some(f => f.trackingId === t.trackingId)
-      );
-      if(!present) return;
-      clearInterval(iv);
-      await doCoverReconciliation();
-    }, 2000);
-  }
-
-  async function doCoverReconciliation(){
-    if(typeof decrementCoverStock !== 'function'){
-      console.warn('[cover-recon] decrementCoverStock not available');
-      return;
-    }
-    const now = new Date().toISOString();
-    let decremented = 0;
-    const done = [];
-    const skipped = [];
-    if(typeof snapshot === 'function') snapshot('cover reconciliation 19-may');
-    for(const t of RECOVERY_TINAS){
-      if(!t.cover) continue;  // 30994 EXTRA EXTRA has no cover
-      const f = (factory||[]).find(x => x.trackingId === t.trackingId);
-      if(!f || !f.cover){ skipped.push(t.sn + ' (no cover on item)'); continue; }
-      // Idempotency: never double-decrement. Mark the cover once reconciled.
-      if(f.cover._reconciled){ skipped.push(t.sn + ' (already reconciled)'); continue; }
-      const ok = decrementCoverStock(f.cover.color, f.cover.model, f.cover.source || 'warehouse', f.sn);
-      f.cover._reconciled = true;  // permanent marker travels with the item
-      if(ok){ decremented++; done.push(`${t.sn}: ${f.cover.color} ${f.cover.model||''}`.trim()); }
-    }
-    if(decremented === 0){
-      console.log('[cover-recon] nothing decremented', {skipped});
-      try { localStorage.setItem(COVER_RECON_FLAG_KEY, JSON.stringify({done:true, at:now, reason:'nothing-to-do', skipped})); } catch(e){}
-      return;
-    }
-    if(typeof addAct === 'function'){
-      addAct(`🛌 Reconciliación de covers (recuperación 19-may): ${decremented} cover${decremented>1?'s':''} descontado${decremented>1?'s':''} del inventario`, 'var(--purple)');
-    }
-    if(typeof flushSave === 'function') flushSave();
-    _bypassNextSafePush = true;
-    if(typeof fbCloudSync === 'function'){ try { await fbCloudSync(false); } catch(e){ console.error('[cover-recon] push failed:', e); } }
-    try { localStorage.setItem(COVER_RECON_FLAG_KEY, JSON.stringify({done:true, at:now, decremented, done, skipped})); } catch(e){}
-    // Re-render cover inventory views (bare refs — these fns are NOT on window)
-    try { if(typeof renderCoverInventory === 'function') renderCoverInventory(); } catch(e){}
-    try { if(typeof renderMaterials === 'function') renderMaterials(); } catch(e){}
-    try { if(typeof updBadges === 'function') updBadges(); } catch(e){}
-    try { if(typeof drawMap === 'function') drawMap(); } catch(e){}
-    if(typeof toast === 'function') toast(`🛌 ${decremented} cover${decremented>1?'s':''} descontado${decremented>1?'s':''} del inventario`, 'ok');
-    console.log('%c🛌 [cover-recon] ✓ decremented ' + decremented + ' covers', 'color:#7c3aed;font-weight:bold', {done, skipped});
-  }
-
-  async function doSilentRecovery(){
-    const today = '2026-05-19';
-    const role = (typeof ROLES !== 'undefined' && ROLES[currentRole]) ? ROLES[currentRole].label : 'Admin';
-    const now = new Date().toISOString();
-
-    // PRE-CHECK: if ALL 8 original trackingIds already present in factory, nothing to do
-    const allOriginalsPresent = RECOVERY_TINAS.every(t =>
-      (factory||[]).some(f => f.trackingId === t.trackingId)
-    );
-    if(allOriginalsPresent){
-      console.log('[recovery] all 8 original trackingIds already present — skipping');
-      try { localStorage.setItem(RECOVERY_FLAG_KEY, JSON.stringify({done:true, at:now, reason:'already complete'})); } catch(e){}
-      return;
-    }
-
-    // Check for existing S/Ns or tracking IDs
-    const existingSNsInUnitsOrIncoming = new Set([
-      ...(units||[]).filter(u => u.sn).map(u => u.sn),
-      ...(incoming||[]).filter(i => i.sn).map(i => i.sn),
-      ...(dispatched||[]).filter(d => d.sn).map(d => d.sn)
-    ]);
-    if(typeof snapshot === 'function') snapshot('silent recovery 19-may');
-    const added = [];
-    const upgraded = [];
-    const skipped = [];
-
-    for(const t of RECOVERY_TINAS){
-      // CASE 1: original trackingId already in factory → already correct, skip
-      const correctEntry = (factory||[]).find(f => f.trackingId === t.trackingId);
-      if(correctEntry){
-        console.log('[recovery] ✓ already correct:', t.sn, '(' + t.trackingId + ')');
-        // Make sure it's in ready-to-ship state for Loading Bay
-        if(correctEntry.trackingState !== 'ready-to-ship' && correctEntry.trackingState !== 'in-transit'){
-          correctEntry.trackingState = 'ready-to-ship';
-          correctEntry.trackingHistory = correctEntry.trackingHistory || [];
-          correctEntry.trackingHistory.push({state:'ready-to-ship', at:now, by:role, note:'Recuperación 19-may — movido a Loading Bay'});
-          upgraded.push(t.sn + ' (moved to ready-to-ship)');
-        }
-        continue;
-      }
-      // CASE 2: factory has entry with same S/N but WRONG trackingId (e.g. from prior recovery with random ID)
-      const wrongTidEntry = (factory||[]).find(f => f.sn === t.sn && f.type !== 'accessory' && f.trackingId !== t.trackingId);
-      if(wrongTidEntry){
-        console.log('[recovery] ↻ upgrading trackingId for', t.sn, ':', wrongTidEntry.trackingId, '→', t.trackingId);
-        wrongTidEntry.trackingId = t.trackingId;
-        wrongTidEntry.trackingState = 'ready-to-ship';
-        wrongTidEntry.trackingHistory = wrongTidEntry.trackingHistory || [];
-        wrongTidEntry.trackingHistory.push({state:'ready-to-ship', at:now, by:role, note:'TrackingId actualizado al original del label físico — listo para Loading Bay'});
-        // Fill in any missing fields from the recovery data
-        if(!wrongTidEntry.model) wrongTidEntry.model = t.model;
-        if(!wrongTidEntry.acrylicColor) wrongTidEntry.acrylicColor = t.acrylicColor;
-        if(!wrongTidEntry.cabinetColor) wrongTidEntry.cabinetColor = t.cabinetColor;
-        if(!wrongTidEntry.plasticWrap) wrongTidEntry.plasticWrap = t.plasticWrap;
-        if(!wrongTidEntry.cover && t.cover) wrongTidEntry.cover = {...t.cover, addedAt:today};
-        if(!wrongTidEntry.looseAccessories) wrongTidEntry.looseAccessories = t.looseAccessories;
-        upgraded.push(t.sn);
-        continue;
-      }
-      // CASE 3: S/N already in units/incoming/dispatched (tina already moved beyond Loading Bay)
-      if(existingSNsInUnitsOrIncoming.has(t.sn)){
-        console.log('[recovery] SKIP — S/N already past Loading Bay:', t.sn);
-        skipped.push(t.sn);
-        continue;
-      }
-      // CASE 4: completely new — add as ready-to-ship
-      const newId = ++nid;
-      const colors = [t.acrylicColor && `Acrylic: ${t.acrylicColor}`, t.cabinetColor && `Cabinet: ${t.cabinetColor}`].filter(Boolean).join(' · ');
-      factory.push({
-        id: newId, sn: t.sn, dealer: t.dealer, type: t.type, added: today,
-        notes: 'Recuperado desde foto de label original (incidente sync 19-may-2026). QR code original preservado.',
-        model: t.model, colors,
-        acrylicColor: t.acrylicColor, cabinetColor: t.cabinetColor, plasticWrap: t.plasticWrap,
-        cover: t.cover ? {...t.cover, addedAt: today, note: 'Recuperado de label — stock NO decrementado'} : null,
-        looseAccessories: t.looseAccessories,
-        trackingId: t.trackingId,
-        trackingState: 'ready-to-ship',
-        trackingHistory: [
-          {state:'created-at-factory', at: today + 'T08:00:00Z', by: role, note:'Recreación de original'},
-          {state:'ready-to-ship', at: now, by: role, note:'Recuperación automática 19-may — listo para escanear en Loading Bay'}
-        ]
-      });
-      added.push(t.sn);
-      if(typeof learnFromInput === 'function'){
-        learnFromInput('spaModel', t.model);
-        learnFromInput('acrylic', t.acrylicColor);
-        learnFromInput('cabinet', t.cabinetColor);
-        learnFromInput('plasticWrap', t.plasticWrap);
-        if(t.cover){ learnFromInput('cover', t.cover.color); learnFromInput('coverModel', t.cover.model); }
-      }
-    }
-
-    const totalAffected = added.length + upgraded.length;
-    if(totalAffected === 0){
-      console.log('[recovery] nothing to do');
-      try { localStorage.setItem(RECOVERY_FLAG_KEY, JSON.stringify({done:true, at:now, reason:'nothing-to-do'})); } catch(e){}
-      return;
-    }
-    if(typeof addAct === 'function'){
-      const parts = [];
-      if(added.length) parts.push(`agregadas ${added.length}`);
-      if(upgraded.length) parts.push(`upgraded ${upgraded.length}`);
-      if(skipped.length) parts.push(`saltadas ${skipped.length}`);
-      addAct(`🔧 Auto-recuperación 19-may: ${parts.join(', ')} con QR codes originales — listas en Loading Bay`, 'var(--accent)');
-    }
-    // Persist + push (bypass safe-push since cloud may be empty/wrong here)
-    if(typeof flushSave === 'function') flushSave();
-    _bypassNextSafePush = true;
-    if(typeof fbCloudSync === 'function'){
-      try { await fbCloudSync(false); } catch(e){ console.error('[recovery] push failed:', e); }
-    }
-    // Save a labeled snapshot of this recovery state as a permanent marker
-    try { await window.saveLabeledSnapshot('recovery_19may_8_tinas'); } catch(e){}
-    // Mark recovery as done
-    try { localStorage.setItem(RECOVERY_FLAG_KEY, JSON.stringify({done:true, at:now, added, upgraded, skipped})); } catch(e){}
-    // Re-render so Loading Bay shows the tinas
-    // Re-render so Loading Bay shows the tinas (bare refs — fns are NOT on window)
-    try { if(typeof renderFactory === 'function') renderFactory(); } catch(e){}
-    try { if(typeof drawMap === 'function') drawMap(); } catch(e){}
-    try { if(typeof renderQueue === 'function') renderQueue(); } catch(e){}
-    try { if(typeof updBadges === 'function') updBadges(); } catch(e){}
-    try { if(typeof renderTruck === 'function') renderTruck(); } catch(e){}
-    if(typeof toast === 'function'){
-      const msgParts = [];
-      if(added.length) msgParts.push(`${added.length} agregadas`);
-      if(upgraded.length) msgParts.push(`${upgraded.length} con QR original`);
-      toast(`🛡 ${msgParts.join(' · ')} — listas en Loading Bay`, 'ok');
-    }
-    console.log('%c🛡 [recovery] ✓ added=' + added.length + ', upgraded=' + upgraded.length + ', skipped=' + skipped.length, 'color:#16a34a;font-weight:bold');
-  }
+  // (migration functions removed in v4.03 — data is clean & safe in cloud)
 
 })();
 </script>
