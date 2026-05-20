@@ -3362,7 +3362,7 @@ body.dark-mode .mar-card-track {
     </select>
     <div class="role-current"><span id="role-indicator">Admin</span></div>
   </div>
-  <div class="sb-foot"><div class="sb-ver">v4.08 🛡 · <span id="live-date"></span></div></div>
+  <div class="sb-foot"><div class="sb-ver">v4.09 🛡 · <span id="live-date"></span></div></div>
 </nav>
 
 <!-- MAIN -->
@@ -4444,7 +4444,7 @@ let _fbInitAttempts = 0;
 //   /app_version/current  (in Firebase console, manually, OR call
 //   pushVersionToFirebase() from the Admin console at deploy time)
 // ══════════════════════════════════════════════════════════════════
-const APP_VERSION = 'v4.08';
+const APP_VERSION = 'v4.09';
 window.APP_VERSION = APP_VERSION;
 
 // ── DATA EPOCH (generation guard) ────────────────────────────────────
@@ -17923,6 +17923,36 @@ function handleQRPayload(raw, mode){
         return;
       }
       factory.splice(factory.indexOf(item), 1);
+      // ── IDEMPOTENCY GUARD ──
+      // If this S/N (or tracking ID) was already received, don't create a second
+      // incoming entry. A QR belongs to exactly ONE physical tina, so scanning it
+      // twice must NOT spawn a duplicate. Reuse the existing entry instead.
+      const dupExisting =
+        incoming.find(x => (item.sn && String(x.sn) === String(item.sn)) || (item.trackingId && x.trackingId === item.trackingId)) ||
+        null;
+      const dupUnit = units.find(u => (item.sn && String(u.sn) === String(item.sn)) || (item.trackingId && u.trackingId === item.trackingId));
+      if(dupUnit){
+        // Already placed on the floor — nothing to receive again.
+        addAct(`📬 Re-scan ignorado: ${item.sn||tid} ya está colocado en ${dupUnit.pos||'el mapa'}`,'var(--teal)');
+        setScanResult('ok', item.sn||tid, `ya colocado en ${dupUnit.pos||'el mapa'}`);
+        toast(`${item.sn||'Item'} ya está en el warehouse (${dupUnit.pos||'mapa'})`,'ok');
+        renderIncoming(); renderQueue(); renderBanner(); drawMap(); updBadges();
+        if(_qrScanState) _qrScanState.scanning = true;
+        return;
+      }
+      if(dupExisting){
+        // Already in the incoming list — just make sure it's marked arrived and
+        // open the picker for the EXISTING entry (no new row).
+        dupExisting.status = 'arrived';
+        dupExisting.arrivedAt = dupExisting.arrivedAt || at;
+        if(!queue.some(q => String(q.sn) === String(item.sn) && q._fromIncoming)){
+          queue.push({ id: dupExisting.id, sn: item.sn || '', dealer: item.dealer || '', type: item.type, qty: 1, entry: toDateStr(at), _fromIncoming: true });
+        }
+        addAct(`📬 Re-scan: ${item.sn||tid} ya estaba recibido — sin duplicar`,'var(--teal)');
+        setScanResult('ok', item.sn||tid, 'ya recibido · asignar posición…');
+        toast(`${item.sn||'Item'} ya recibido — asignar posición`,'ok');
+        incomingIdToOpen = dupExisting.id;
+      } else {
       const incomingId = ++nid;
       incoming.push({
         id: incomingId, sn: item.sn, dealer: item.dealer, type: item.type,
@@ -17950,6 +17980,7 @@ function handleQRPayload(raw, mode){
       setScanResult('ok', item.sn||tid, 'received · assigning position…');
       toast(`${item.sn||'Item'} received — assign position`,'ok');
       incomingIdToOpen = incomingId;
+      }
     } else if(found.source === 'units'){
       // Already placed in warehouse — just confirm
       item.trackingState = 'received-at-warehouse';
@@ -21510,23 +21541,69 @@ document.addEventListener('keydown', e=>{
     console.log('[protection] ✓ tina guarantee armed');
   }
 
+  // Remove duplicate entries that share the same serial number within ONE
+  // collection (each physical spa = one S/N = one entry). Skips entries with
+  // no S/N (accessories/marriages). Keeps the last occurrence. Returns true if
+  // anything was removed.
+  function dedupBySn(arr){
+    if(!Array.isArray(arr)) return false;
+    const seen = new Set(); let removed = false;
+    for(let i = arr.length - 1; i >= 0; i--){
+      const sn = String(arr[i] && arr[i].sn || '');
+      if(!sn) continue;
+      if(seen.has(sn)){ arr.splice(i, 1); removed = true; }
+      else seen.add(sn);
+    }
+    return removed;
+  }
+
   function ensureTinas(){
     if(!_fbDb || !_fbAuthorized) return;
     if(typeof factory === 'undefined') return;
     if(Date.now() - _lastEnsureTs < 5000) return;   // debounce 5s
     _lastEnsureTs = Date.now();
     const today = '2026-05-19', role = 'Admin', now = new Date().toISOString();
-    // Tinas already shipped out (delivered) — don't resurrect those.
-    const delivered = new Set(getCollection('dispatched').map(d => String(d.sn)));
     let changed = false;
 
-    // GUARANTEE the 8 tinas exist in factory (add if missing, unless delivered).
-    // This NEVER deletes anything else — units, new spas, and any inventory you
-    // add to the warehouse are preserved. It only re-adds a tina that a sync bug
-    // dropped, so the 8 baseline tinas can never permanently disappear.
+    // ── 1) DEDUP: a physical tina's S/N must appear at most ONCE per collection.
+    //    Fixes the "scanned twice → two entries" bug at the data level.
+    changed = dedupBySn(getCollection('incoming')) || changed;
+    changed = dedupBySn(getCollection('units')) || changed;
+    changed = dedupBySn(getCollection('dispatched')) || changed;
+    if(typeof queue !== 'undefined' && Array.isArray(queue)) changed = dedupBySn(queue) || changed;
+
+    // Where does each tina currently live? (computed after dedup so sets are clean)
+    const snUnits      = new Set(getCollection('units').map(u => String(u.sn)));
+    const snIncoming   = new Set(getCollection('incoming').map(i => String(i.sn)));
+    const snDispatched = new Set(getCollection('dispatched').map(d => String(d.sn)));
+    const snMarried    = new Set(getCollection('marriages').map(m => String(m.spaSn)));
+
+    // ── 2) PROGRESSION: if a tina has moved on to the warehouse (incoming/units)
+    //    or shipped out (dispatched), it must NOT also sit in factory. Remove the
+    //    stale factory copy. This is what makes a tina DISAPPEAR from factory once
+    //    the truck takes it and it's received — and stops the re-add that created
+    //    duplicates. (In-transit copies stay: those are still "at" the factory data
+    //    side until received.)
     for(const t of BASELINE_TINAS){
-      if(delivered.has(t.sn)) continue;
-      if(factory.some(f => f.trackingId === t.trackingId)) continue;
+      const progressed = snUnits.has(t.sn) || snIncoming.has(t.sn) || snDispatched.has(t.sn);
+      if(!progressed) continue;
+      for(let i = factory.length - 1; i >= 0; i--){
+        const f = factory[i];
+        if((f.trackingId === t.trackingId || String(f.sn) === t.sn) && f.trackingState !== 'in-transit'){
+          factory.splice(i, 1); changed = true;
+        }
+      }
+    }
+
+    // ── 3) GUARANTEE: re-add a tina ONLY if it is absent EVERYWHERE (a genuine
+    //    sync-loss). If it exists in factory/units/incoming/dispatched/marriages,
+    //    we leave it exactly where it is — never resurrect a tina that legitimately
+    //    moved through the workflow.
+    for(const t of BASELINE_TINAS){
+      const existsAnywhere =
+        factory.some(f => f.trackingId === t.trackingId || String(f.sn) === t.sn) ||
+        snUnits.has(t.sn) || snIncoming.has(t.sn) || snDispatched.has(t.sn) || snMarried.has(t.sn);
+      if(existsAnywhere) continue;
       const colors = [t.acrylicColor && `Acrylic: ${t.acrylicColor}`, t.cabinetColor && `Cabinet: ${t.cabinetColor}`].filter(Boolean).join(' · ');
       factory.push({
         id:++nid, sn:t.sn, dealer:t.dealer, type:'hot', added:today,
@@ -21538,8 +21615,8 @@ document.addEventListener('keydown', e=>{
       });
       changed = true;
     }
-    // Covers start counting: decrement each tina's cover ONCE (idempotent via
-    // cover._reconciled, which travels with the tina in the synced state).
+
+    // ── 4) Covers: decrement each tina's cover ONCE (idempotent via _reconciled).
     if(typeof decrementCoverStock === 'function'){
       for(const f of factory){
         if(!f.trackingId || !PROTECTED_TIDS.has(f.trackingId)) continue; // only the 8 tinas
@@ -21555,9 +21632,12 @@ document.addEventListener('keydown', e=>{
     if(typeof fbCloudSync === 'function'){ try { fbCloudSync(false); } catch(e){} }
     try { if(typeof renderFactory === 'function') renderFactory(); } catch(e){}
     try { if(typeof renderTruck === 'function') renderTruck(); } catch(e){}
+    try { if(typeof renderIncoming === 'function') renderIncoming(); } catch(e){}
+    try { if(typeof renderQueue === 'function') renderQueue(); } catch(e){}
+    try { if(typeof drawMap === 'function') drawMap(); } catch(e){}
     try { if(typeof renderCoverInventory === 'function') renderCoverInventory(); } catch(e){}
     try { if(typeof updBadges === 'function') updBadges(); } catch(e){}
-    console.log('%c🛟 [tina-guarantee] 8 tinas aseguradas (sin borrar nada más)', 'color:#7c3aed;font-weight:bold');
+    console.log('%c🛟 [tina-guarantee] reconciliado (dedup + progresión + garantía)', 'color:#7c3aed;font-weight:bold');
   }
 
   // ─── 1. SAFE-PUSH GUARD (with AUTO-HEAL) ─────────────────────────────
@@ -21585,14 +21665,26 @@ document.addEventListener('keydown', e=>{
         if(!cloud || !cloud.state) return true; // cloud empty, OK to seed
         if(cloud.deviceId === _fbDeviceId) return true; // our own previous push
         const remote = JSON.parse(cloud.state);
-        const collections = ['factory','units','marriages','dispatched','incoming'];
-        const losses = [];
-        for(const k of collections){
-          const local = getCollection(k).length;
-          const cloudCnt = Array.isArray(remote[k]) ? remote[k].length : 0;
-          if(cloudCnt >= MIN_BASELINE && local < cloudCnt * (1 - LOSS_THRESHOLD)){
-            losses.push({key:k, cloud:cloudCnt, local:local});
+        // Don't auto-heal toward a STALE (old-epoch) cloud — that's junk from an
+        // out-of-date device. Allow our own (clean) push instead.
+        const cloudEpoch = Number(remote && remote._epoch) || 1;
+        const myEpoch = Number(window.ASPEN_DATA_EPOCH) || 1;
+        if(cloudEpoch < myEpoch) return true;
+        // Movement-aware: compare TOTAL distinct spa S/Ns, not per-collection, so a
+        // spa that simply moved between collections doesn't look like a loss.
+        const countSns = (getArr) => {
+          const s = new Set();
+          for(const k of ['factory','units','incoming','dispatched']){
+            const arr = getArr(k) || [];
+            for(const it of arr){ const sn = String(it && it.sn || ''); if(sn) s.add(sn); }
           }
+          return s.size;
+        };
+        const localTotal = countSns(k => getCollection(k));
+        const cloudTotal = countSns(k => Array.isArray(remote[k]) ? remote[k] : []);
+        const losses = [];
+        if(cloudTotal >= MIN_BASELINE && localTotal < cloudTotal * (1 - LOSS_THRESHOLD)){
+          losses.push({key:'inventario total', cloud:cloudTotal, local:localTotal});
         }
         if(losses.length === 0) return true;
         // AUTO-HEAL: cloud has much more data and we haven't synced yet — pull it
@@ -21637,21 +21729,32 @@ document.addEventListener('keydown', e=>{
         }
         return false;
       }
-      // Guard ALL collections against big losses so any inventory you add later
-      // (units, new spas, etc.) is protected from a stale-device overwrite.
-      const collections = ['factory','units','marriages','dispatched','incoming'];
-      const losses = [];
-      for(const k of collections){
-        const local = getCollection(k).length;
-        const inc = Array.isArray(restored[k]) ? restored[k].length : 0;
-        if(local >= MIN_BASELINE && inc < local * (1 - LOSS_THRESHOLD)){
-          losses.push({key:k, local, incoming:inc});
+      // ── LOSS GUARD (system-wide, movement-aware) ──
+      // A spa moving between collections (factory → in-transit → incoming →
+      // units → dispatched) is NOT a loss — it's the normal workflow. We only
+      // raise the banner when the TOTAL number of distinct spa S/Ns across the
+      // whole system drops sharply (a genuine wipe). This stops false alarms
+      // when ensureTinas moves a received tina out of factory.
+      const countSns = (getArr) => {
+        const s = new Set();
+        for(const k of ['factory','units','incoming','dispatched']){
+          const arr = getArr(k) || [];
+          for(const it of arr){ const sn = String(it && it.sn || ''); if(sn) s.add(sn); }
         }
+        return s.size;
+      };
+      const localTotal = countSns(k => getCollection(k));
+      const incTotal   = countSns(k => Array.isArray(restored[k]) ? restored[k] : []);
+      const losses = [];
+      if(localTotal >= MIN_BASELINE && incTotal < localTotal * (1 - LOSS_THRESHOLD)){
+        losses.push({key:'inventario total (tinas/spas)', local:localTotal, incoming:incTotal});
       }
-      // ── PER-ITEM TINA PROTECTION ──
-      // (Tina drops are now auto-corrected by ensureTinas() right after the pull,
-      // so we don't raise a banner for them — that would spam the user. The
-      // count-based banner above still guards against large unexpected losses.)
+      // Marriages are tracked separately (no S/N), so guard their count on its own.
+      const localMar = getCollection('marriages').length;
+      const incMar = Array.isArray(restored.marriages) ? restored.marriages.length : 0;
+      if(localMar >= MIN_BASELINE && incMar < localMar * (1 - LOSS_THRESHOLD)){
+        losses.push({key:'marriages', local:localMar, incoming:incMar});
+      }
       if(losses.length === 0){ _initialSyncDone = true; return true; }
       // Big incoming loss — DON'T mark initial sync done (we're rejecting this pull)
       showSyncWarningBanner(losses, restored, sourceTimestamp);
