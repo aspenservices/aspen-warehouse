@@ -3362,7 +3362,7 @@ body.dark-mode .mar-card-track {
     </select>
     <div class="role-current"><span id="role-indicator">Admin</span></div>
   </div>
-  <div class="sb-foot"><div class="sb-ver">v4.09 🛡 · <span id="live-date"></span></div></div>
+  <div class="sb-foot"><div class="sb-ver">v4.12 🛡 · <span id="live-date"></span></div></div>
 </nav>
 
 <!-- MAIN -->
@@ -4060,6 +4060,9 @@ body.dark-mode .mar-card-track {
         <button class="btn btn-sm scan-load-btn" style="background:#fef3c7;border-color:#f59e0b;color:#78350f;font-weight:600" onclick="openQRScanner('load')" title="Driver: scan items as you load them on the truck heading to warehouse">
           📷 Scan to Load on Truck
         </button>
+        <button class="btn btn-sm scan-pickup-btn" style="background:#ede9fe;border-color:#8b5cf6;color:#5b21b6;font-weight:600" onclick="openQRScanner('factory-pickup')" title="Factory only: scan a spa's QR when the dealer picks it up directly at the factory">
+          🤝 Scan Dealer Pickup
+        </button>
         <button class="btn btn-sm" style="background:#fef2f2;border-color:#fecaca;color:#991b1b;font-weight:600" onclick="openQRScanner('factory-receive')" title="Scan when a returned spa arrives back at the factory">
           ↩ Scan Return
         </button>
@@ -4444,7 +4447,7 @@ let _fbInitAttempts = 0;
 //   /app_version/current  (in Firebase console, manually, OR call
 //   pushVersionToFirebase() from the Admin console at deploy time)
 // ══════════════════════════════════════════════════════════════════
-const APP_VERSION = 'v4.09';
+const APP_VERSION = 'v4.12';
 window.APP_VERSION = APP_VERSION;
 
 // ── DATA EPOCH (generation guard) ────────────────────────────────────
@@ -7402,7 +7405,7 @@ const typeColor = t => ({hot:'var(--accent)',swim:'var(--teal)',extra:'var(--pur
 // These all mean Marriages crew is still waiting for the accessory to arrive.
 function isMarriageActive(m){
   if(!m || !m.status) return false;
-  return m.status === 'pending' || m.status === 'ready-to-ship' || m.status === 'in-transit' || m.status === 'split-pending';
+  return m.status === 'pending' || m.status === 'ready-to-ship' || m.status === 'ready-for-pickup' || m.status === 'in-transit' || m.status === 'split-pending';
 }
 
 // Get all active marriages for a given S/N (still waiting on accessory arrival).
@@ -16414,16 +16417,20 @@ function renderFactory(){
     const cardClass = f.type==='accessory' ? 'fct-card-acc' : f.type==='swim' ? 'fct-card-swim' : f.type==='extra' ? 'fct-card-extra' : f.type==='misc' ? 'fct-card-misc' : 'fct-card-spa';
     const isAcc = f.type==='accessory' || f.type==='misc';
     const isReady = f.trackingState === 'ready-to-ship';
+    const isPickup = f.trackingState === 'ready-for-pickup';
     const isReturned = f.trackingState === 'received-back-at-factory';
     const marTag = f.marriedSn ? `<span style="display:inline-block;background:#fef2f2;color:#991b1b;border:1px solid #fecaca;font-size:9px;font-weight:700;padding:2px 7px;border-radius:6px;margin-top:5px">🔗 Married → S/N ${f.marriedSn}</span>` : '';
-    // Visual states: ready-to-ship (waiting for truck), or received-back (returned post-rejection)
+    // Visual states: ready-to-ship (waiting for truck), ready-for-pickup (dealer
+    // collects at factory), or received-back (returned post-rejection)
     const readyTag = isReady
       ? `<div style="display:inline-flex;align-items:center;gap:5px;background:#dbeafe;color:#1e40af;font-size:10px;font-weight:700;letter-spacing:.05em;padding:3px 10px;border-radius:11px;margin:6px 0;text-transform:uppercase">📦 Ready · waiting for Truck pickup</div>`
+      : isPickup
+      ? `<div style="display:inline-flex;align-items:center;gap:5px;background:#ede9fe;color:#5b21b6;font-size:10px;font-weight:700;letter-spacing:.05em;padding:3px 10px;border-radius:11px;margin:6px 0;text-transform:uppercase">🤝 Ready · dealer pickup at factory</div>`
       : '';
     const returnedTag = isReturned
       ? `<div style="display:inline-flex;align-items:center;gap:5px;background:#7c2d12;color:#fff;font-size:10px;font-weight:700;letter-spacing:.05em;padding:3px 10px;border-radius:11px;margin:6px 0;text-transform:uppercase">↩ Returned to factory</div>`
       : '';
-    const cardStyle = isReady ? 'style="background:#eff6ff;border-left-color:#3b82f6"' : isReturned ? 'style="background:#fef2f2;border-left-color:#7c2d12"' : '';
+    const cardStyle = isReady ? 'style="background:#eff6ff;border-left-color:#3b82f6"' : isPickup ? 'style="background:#f5f3ff;border-left-color:#8b5cf6"' : isReturned ? 'style="background:#fef2f2;border-left-color:#7c2d12"' : '';
     // Action buttons: when 'ready-to-ship' the spa is locked (waiting for truck pickup); only Admin can cancel
     const isHeld = !!f.onHold;
     const holdBadge = isHeld
@@ -16433,17 +16440,26 @@ function renderFactory(){
       ? `<button class="btn btn-sm" style="background:#dcfce7;border-color:#86efac;color:#15803d" onclick="resumeFactoryItem(${f.id})">▶ Resume</button>`
       : `<button class="btn btn-sm" style="background:#f3f4f6;border-color:#d1d5db;color:#374151" onclick="holdFactoryItem(${f.id})" title="Pause this spa — exclude from aging reports and dispatch pressure">⏸ Hold</button>`;
     const isReadyMarriedAcc = isReady && isAcc && f.marriedSn;
-    const actsHtml = isReady
+    const actsHtml = isPickup
+      ? `<div class="fct-acts" style="margin-top:8px">
+          <button class="btn btn-sm btn-p" style="background:#7c3aed;border-color:#7c3aed" onclick="dispatchPickupFromFactory(${f.id})" title="Dealer picked it up at the factory — dispatch it">🤝 Dealer Picked Up (Dispatch)</button>
+          <button class="btn btn-sm" style="background:#f3f4f6;border-color:#d1d5db;color:#374151" onclick="undoFactoryReady(${f.id})" title="Back to factory inventory">↶ Undo</button>
+          <button class="btn btn-sm" style="background:#fef9c3;border-color:#f59e0b;color:#78350f" onclick="printQRLabel(${f.id}, 'factory')" title="Print QR label (factory dispatches by scanning this)">🏷 Label</button>
+          <button class="btn btn-sm tracking-btn" onclick="openTrackingHistory('factory',${f.id})" title="View tracking history">📜</button>
+        </div>`
+      : isReady
       ? `<div class="fct-acts" style="margin-top:8px">
           ${isReadyMarriedAcc
             ? `<button class="btn btn-sm btn-p" onclick="shipFromFactory(${f.id})" title="Complete ship — sends to warehouse, marks marriage delivered">📤 Send to WH Now</button>`
             : `<span style="font-size:10px;color:var(--text2);font-style:italic;padding:4px 8px">🔒 Waiting for Truck / Transit to scan QR</span>`}
+          <button class="btn btn-sm" style="background:#f3f4f6;border-color:#d1d5db;color:#374151" onclick="undoFactoryReady(${f.id})" title="Back to factory inventory (Factory/Admin)">↶ Undo</button>
           <button class="btn btn-sm" style="background:#fef9c3;border-color:#f59e0b;color:#78350f" onclick="printQRLabel(${f.id}, 'factory')" title="Print QR shipping label">🏷 Label</button>
           <button class="btn btn-sm tracking-btn" onclick="openTrackingHistory('factory',${f.id})" title="View tracking history (admin only)">📜</button>
           <button class="btn btn-sm intransit-admin-only" style="background:#fef2f2;border-color:#fecaca;color:#7c2d12" onclick="adminCancelReady(${f.id})" title="Cancel ready state — back to created (admin only)">↶ Cancel Ready</button>
         </div>`
       : `<div class="fct-acts" style="margin-top:8px">
           ${isHeld ? '' : `<button class="btn btn-sm btn-p" onclick="shipFromFactory(${f.id})">${isReturned ? '🔧 Re-ship to WH' : '📦 Ship to WH'}</button>`}
+          ${isHeld || isAcc ? '' : `<button class="btn btn-sm" style="background:#ede9fe;border-color:#8b5cf6;color:#5b21b6;font-weight:600" onclick="markReadyForPickup(${f.id})" title="Dealer collects at the factory — Truck won't take it to the warehouse">🤝 Ready to Pick Up</button>`}
           ${holdToggleBtn}
           <button class="btn btn-sm" style="background:#fef9c3;border-color:#f59e0b;color:#78350f" onclick="printQRLabel(${f.id}, 'factory')" title="Print QR shipping label">🏷 Label</button>
           <button class="btn btn-sm" onclick="openFactoryEdit(${f.id})">Edit</button>
@@ -16868,6 +16884,17 @@ function decrementCoverStock(color, model, source, spaSn){
     toast(`New cover row created for ${color}${model?' ('+model+')':''} at ${srcLabel} — see Cover Inventory`,'info');
   }
   row.pending = row.pending || [];
+  row.history = row.history || [];
+  // ── IDEMPOTENT PER SPA ──
+  // A given spa needs exactly ONE cover. If this cover was already decremented
+  // (or queued as pending) for this spaSn, do nothing. Prevents the duplicate
+  // "Owed to" entries that a re-processed/duplicated spa would otherwise create.
+  if(spaSn){
+    const sn = String(spaSn);
+    const alreadyDec = row.history.some(h => h.action === 'decrement' && String(h.spaSn) === sn);
+    const alreadyPending = row.pending.some(p => String(p.spaSn) === sn);
+    if(alreadyDec || alreadyPending) return true;
+  }
   // ── If out of stock: don't go negative. Add to pending queue instead. ──
   if(row.qty <= 0){
     // Add this spa to the pending queue
@@ -16910,6 +16937,53 @@ function decrementCoverStock(color, model, source, spaSn){
   row.history = row.history || [];
   row.history.push({at: toISO(), action:'decrement', spaSn: spaSn||'', by: ROLES[currentRole].label});
   return true;
+}
+
+// ── COVER RECONCILIATION (fixes duplicate "Owed to" entries) ──────────
+// Each physical spa needs exactly ONE cover. The earlier duplicate-tina bug
+// caused some covers to be decremented/queued multiple times for the same S/N.
+// This removes those duplicates: dedups the pending queue by S/N and dedups the
+// decrement history by S/N (restoring 1 unit of qty for each duplicate decrement
+// that wrongly reduced stock). Idempotent — safe to run repeatedly.
+function reconcileCovers(){
+  if(typeof coverInventory === 'undefined' || !Array.isArray(coverInventory)) return false;
+  let changed = false;
+  coverInventory.forEach(row => {
+    // 1) Dedup pending by S/N (keep the first entry per spa)
+    if(Array.isArray(row.pending) && row.pending.length){
+      const seen = new Set(); const deduped = [];
+      for(const p of row.pending){
+        const sn = String(p && p.spaSn || '');
+        if(sn && seen.has(sn)) continue;       // drop duplicate
+        if(sn) seen.add(sn);
+        deduped.push(p);
+      }
+      if(deduped.length !== row.pending.length){ row.pending = deduped; changed = true; }
+    }
+    // 2) Dedup decrement history by S/N; restore qty for each duplicate decrement
+    if(Array.isArray(row.history) && row.history.length){
+      const decSeen = new Set(); let restored = 0; const newHist = [];
+      for(const h of row.history){
+        if(h && h.action === 'decrement'){
+          const sn = String(h.spaSn || '');
+          if(sn && decSeen.has(sn)){ restored++; continue; }   // drop dup, count for restore
+          if(sn) decSeen.add(sn);
+        }
+        newHist.push(h);
+      }
+      if(restored > 0){
+        row.qty = (row.qty || 0) + restored;
+        row.history = newHist;
+        row.history.push({at: toISO(), action:'reconcile-restore', restored, by:'system', note:'duplicate cover decrements removed'});
+        changed = true;
+        // If restoring stock now covers some pending spas, fulfill them.
+        if(typeof fulfillPendingCovers === 'function' && row.qty > 0 && Array.isArray(row.pending) && row.pending.length){
+          try { fulfillPendingCovers(row); } catch(e){}
+        }
+      }
+    }
+  });
+  return changed;
 }
 
 // Try to fulfill pending cover queue from current stock (called when stock is added)
@@ -17366,11 +17440,12 @@ async function openQRScanner(mode){
   const overlay = document.createElement('div');
   overlay.id = 'qr-scan-overlay';
   overlay.style.cssText = 'position:fixed;inset:0;background:rgba(15,23,42,.92);z-index:9999;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:18px;color:#fff';
-  const titleByMode = {load:'Scan to Load on Truck', receive:'Scan to Receive at Warehouse', dispatch:'Scan to Dispatch', 'factory-receive':'Scan to Receive Back at Factory'};
+  const titleByMode = {load:'Scan to Load on Truck', receive:'Scan to Receive at Warehouse', dispatch:'Scan to Dispatch', 'factory-receive':'Scan to Receive Back at Factory', 'factory-pickup':'Scan Dealer Pickup'};
   const subByMode = {
     load: 'Driver: scan each item as it goes onto the truck.',
     receive: 'Manager: scan each item as it arrives at the warehouse.',
-    dispatch: 'Loader: scan each spa being loaded for dealer pickup.'
+    dispatch: 'Loader: scan each spa being loaded for dealer pickup.',
+    'factory-pickup': 'Factory only: scan a spa as the dealer collects it at the factory.'
   };
   overlay.innerHTML = `
     <div style="width:100%;max-width:480px;background:#0f172a;border-radius:14px;overflow:hidden;border:1px solid rgba(255,255,255,.1);position:relative">
@@ -17855,6 +17930,15 @@ function handleQRPayload(raw, mode){
       if(_qrScanState) _qrScanState.scanning = true;  // resume scanning so user can try next QR
       return;
     }
+    // ── BLOCK: dealer-pickup spas never go on the truck ──
+    // A spa marked "Ready to Pick Up" is collected by the dealer AT the factory.
+    // The Truck/Transit crew must NOT be able to load it for the warehouse.
+    if(item.trackingState === 'ready-for-pickup'){
+      setScanResult('err', item.sn||tid, '🤝 dealer pickup — NOT for the truck');
+      toast(`🚫 ${item.sn||tid} is for DEALER PICKUP at the factory — Truck can't take it. Factory dispatches it.`,'err');
+      if(_qrScanState) _qrScanState.scanning = true;  // resume scanning
+      return;
+    }
     if(item.trackingState === 'in-transit'){
       setScanResult('warn', item.sn||tid, 'already on truck (in transit)');
       toast(`${item.sn||tid} already loaded on truck`,'err');
@@ -17869,6 +17953,33 @@ function handleQRPayload(raw, mode){
     syncMarriageOnAccessoryTransit(item);
     setScanResult('ok', item.sn||tid, 'on truck · removed from factory');
     toast(`${item.sn||'Item'} on truck — removed from factory inventory`,'ok');
+  } else if(mode === 'factory-pickup'){
+    // ── FACTORY-ONLY: dealer pickup dispatch ──
+    // Factory scans a spa's QR when the dealer collects it at the factory. ONLY the
+    // Factory role (or Admin) may do this — the spa never goes to the warehouse.
+    if(currentRole !== 'factory' && currentRole !== 'admin'){
+      setScanResult('err', item.sn||tid, '🔒 only Factory can dispatch a dealer pickup');
+      toast(`🔒 Only the Factory role can scan a dealer pickup`,'err');
+      if(_qrScanState) _qrScanState.scanning = true;
+      return;
+    }
+    if(found.source !== 'factory'){
+      setScanResult('err', item.sn||tid, 'is not at the factory');
+      toast(`${item.sn||tid} is not at the factory`,'err');
+      if(_qrScanState) _qrScanState.scanning = true;
+      return;
+    }
+    if(item.trackingState !== 'ready-for-pickup'){
+      setScanResult('err', item.sn||tid, 'not marked "Ready to Pick Up"');
+      toast(`${item.sn||tid} isn't marked Ready to Pick Up — mark it first`,'err');
+      if(_qrScanState) _qrScanState.scanning = true;
+      return;
+    }
+    setScanResult('ok', item.sn||tid, '🤝 dealer pickup · dispatched from factory');
+    toast(`${item.sn||'Item'} dispatched — dealer pickup at factory`,'ok');
+    dispatchPickupFromFactory(item.id, true);   // viaScan = true (no confirm dialog)
+    if(_qrScanState) _qrScanState.scanning = true;
+    return;
   } else if(mode === 'receive'){
     let incomingIdToOpen = null;
 
@@ -18255,6 +18366,83 @@ function shipFromFactory(id){
   }, 80);
 }
 
+// ══════════════════════════════════════════════════════════════════
+// READY TO PICK UP — dealer collects directly at the factory.
+// Parallel flow to "Ship to Warehouse". The spa stays at the factory in
+// Loading Bay; the Truck/Transit crew CANNOT scan it (it never goes to the
+// warehouse). Only Factory dispatches it — by button or by scanning the QR.
+// ══════════════════════════════════════════════════════════════════
+function markReadyForPickup(id){
+  const f = factory.find(x=>x.id===id); if(!f) return;
+  if(f.onHold){ toast(`⛔ "${f.sn||f.dealer}" is ON HOLD. Click ▶ Resume first.`,'err'); return; }
+  if(f.trackingState === 'in-transit'){ toast(`${f.sn||f.dealer} already on truck (going to warehouse)`,'err'); return; }
+  if(f.trackingState === 'ready-for-pickup'){ toast(`${f.sn||f.dealer} already ready for dealer pickup`,'err'); return; }
+  if(f.trackingState === 'ready-to-ship'){ toast(`${f.sn||f.dealer} is marked to ship to warehouse — undo that first`,'err'); return; }
+  const isAcc = f.type==='accessory' || f.type==='misc';
+  if(!confirm(`Mark "${f.sn||f.dealer}" as READY FOR DEALER PICKUP?\n\n• Stays at the factory in Loading Bay\n• Truck / Transit CANNOT scan it (it's not going to the warehouse)\n• When the dealer collects it, Factory marks it dispatched (button or 🤝 Scan Dealer Pickup)`)) return;
+  snapshot('mark ready-for-pickup');
+  f.trackingState = 'ready-for-pickup';
+  f.trackingId = f.trackingId || makeTrackingId(isAcc ? 'ACC' : 'SPA');
+  f.trackingHistory = f.trackingHistory || [];
+  f.trackingHistory.push({state:'ready-for-pickup', at:toISO(), by:ROLES[currentRole].label, note:'Dealer pickup at factory'});
+  if(isAcc && f.marriedSn){
+    const lm = marriages.find(m => m.accessoryId === f.id && m.status === 'pending');
+    if(lm){ lm.status = 'ready-for-pickup'; lm.readyAt = toISO(); }
+  }
+  addAct(`🤝 Ready for dealer pickup at factory: ${f.sn||f.dealer}`,'var(--purple)');
+  toast(`${f.sn||f.dealer} ready for dealer pickup — Truck can't scan it`,'ok');
+  renderFactory(); if(typeof renderMarriages==='function') renderMarriages(); if(typeof renderTruck==='function') renderTruck(); updBadges();
+  setTimeout(()=>{ try { printQRLabel(f.id, 'factory'); } catch(e){} }, 80);
+}
+
+// Undo EITHER ready state (ship-to-WH or ready-for-pickup) → back to factory
+// inventory. Available to Factory and Admin (the people who set it).
+function undoFactoryReady(id){
+  if(currentRole !== 'factory' && currentRole !== 'admin'){ toast('Only Factory or Admin can undo this','err'); return; }
+  const f = factory.find(x=>x.id===id); if(!f) return;
+  const wasState = f.trackingState;
+  if(wasState !== 'ready-to-ship' && wasState !== 'ready-for-pickup'){ toast('Item is not in a ready state','err'); return; }
+  const label = wasState === 'ready-to-ship' ? 'Ship to Warehouse' : 'Ready for Dealer Pickup';
+  if(!confirm(`Undo "${label}" for ${f.sn||f.dealer}?\n\nThe spa returns to factory inventory ("created at factory"). You can mark it ready again anytime.`)) return;
+  snapshot('undo factory ready');
+  f.trackingHistory = (f.trackingHistory||[]).filter(h => h.state !== wasState);
+  f.trackingState = 'created-at-factory';
+  f.trackingHistory.push({state:'created-at-factory', at:toISO(), by:ROLES[currentRole].label, note:`Undo ${wasState}`});
+  const lm = marriages.find(m => m.accessoryId === f.id && (m.status === 'ready-to-ship' || m.status === 'ready-for-pickup'));
+  if(lm){ lm.status = 'pending'; delete lm.readyAt; }
+  addAct(`↶ Returned to factory inventory: ${f.sn||f.dealer}`,'var(--text2)');
+  toast(`${f.sn||f.dealer} back in factory inventory`,'ok');
+  renderFactory(); if(typeof renderMarriages==='function') renderMarriages(); if(typeof renderTruck==='function') renderTruck(); if(typeof renderInTransit==='function') renderInTransit(); updBadges();
+}
+
+// Dealer picked it up at the factory — dispatch it (terminal). Factory + Admin only.
+// `viaScan` skips the confirm dialog (the scan itself is the confirmation).
+function dispatchPickupFromFactory(id, viaScan){
+  if(currentRole !== 'factory' && currentRole !== 'admin'){ toast('🔒 Only Factory can dispatch a dealer pickup','err'); return; }
+  const f = factory.find(x=>x.id===id); if(!f) return;
+  if(f.trackingState !== 'ready-for-pickup'){ toast(`${f.sn||f.dealer} is not marked ready for dealer pickup`,'err'); return; }
+  if(!viaScan && !confirm(`Confirm the dealer PICKED UP "${f.sn||f.dealer}" at the factory?\n\nThis dispatches it directly from the factory — it never goes to the warehouse.`)) return;
+  snapshot('dispatch dealer pickup from factory');
+  const at = toISO();
+  f.trackingHistory = f.trackingHistory || [];
+  f.trackingHistory.push({state:'dispatched-from-factory', at, by:ROLES[currentRole].label, note:'Dealer pickup at factory'});
+  if(typeof dispatched !== 'undefined' && Array.isArray(dispatched)){
+    dispatched.unshift({
+      id:++nid, sn:f.sn, dealer:f.dealer, type:f.type, date:toDateStr(at), dispatchedAt:at,
+      trackingId:f.trackingId, trackingState:'dispatched-from-factory', via:'dealer-pickup-at-factory',
+      model:f.model, acrylicColor:f.acrylicColor, cabinetColor:f.cabinetColor,
+      plasticWrap:f.plasticWrap, cover:f.cover, looseAccessories:f.looseAccessories,
+      trackingHistory:[...(f.trackingHistory||[])]
+    });
+  }
+  const lm = marriages.find(m => m.accessoryId === f.id && m.status !== 'delivered' && m.status !== 'completed');
+  if(lm){ lm.status = 'delivered'; lm.deliveredDate = at; lm.via = 'dealer-pickup-at-factory'; }
+  factory = factory.filter(x => x.id !== id);
+  addAct(`🤝🚚 Dealer picked up at factory: ${f.sn||f.dealer}`,'var(--accent)');
+  toast(`${f.sn||f.dealer} dispatched — dealer pickup at factory`,'ok');
+  renderFactory(); if(typeof renderMarriages==='function') renderMarriages(); if(typeof renderTruck==='function') renderTruck(); if(typeof renderDispatched==='function') renderDispatched(); updBadges(); if(typeof drawMap==='function') drawMap();
+}
+
 function rmFromFactory(id){
   if(!canEdit()){ toast('View-only mode','err'); return; }
   const f = factory.find(x=>x.id===id); if(!f) return;
@@ -18513,12 +18701,13 @@ function renderMarriages(){
   }
   // Status visual config — covers all marriage states
   const stCfg = {
-    'pending':       { color:'#dc2626', bg:'#fef2f2', icon:'⏳', label:'AT FACTORY',    rowBg:'',          urgent:false },
-    'ready-to-ship': { color:'#1e40af', bg:'#eff6ff', icon:'📦', label:'READY · TRUCK', rowBg:'',          urgent:false },
-    'in-transit':    { color:'#0d9e78', bg:'#ecfdf5', icon:'🚛', label:'IN TRANSIT',    rowBg:'',          urgent:false },
-    'delivered':     { color:'#0d9e78', bg:'#ecfdf5', icon:'✓',  label:'DELIVERED',     rowBg:'',          urgent:false },
-    'completed':     { color:'#6b7280', bg:'#f3f4f6', icon:'🏁', label:'COMPLETED',     rowBg:'',          urgent:false },
-    'split-pending': { color:'#ffffff', bg:'#dc2626', icon:'🔴', label:'SPLIT-PENDING', rowBg:'#fef2f2',   urgent:true  },
+    'pending':         { color:'#dc2626', bg:'#fef2f2', icon:'⏳', label:'AT FACTORY',    rowBg:'',          urgent:false },
+    'ready-to-ship':   { color:'#1e40af', bg:'#eff6ff', icon:'📦', label:'READY · TRUCK', rowBg:'',          urgent:false },
+    'ready-for-pickup':{ color:'#5b21b6', bg:'#f5f3ff', icon:'🤝', label:'DEALER PICKUP', rowBg:'',          urgent:false },
+    'in-transit':      { color:'#0d9e78', bg:'#ecfdf5', icon:'🚛', label:'IN TRANSIT',    rowBg:'',          urgent:false },
+    'delivered':       { color:'#0d9e78', bg:'#ecfdf5', icon:'✓',  label:'DELIVERED',     rowBg:'',          urgent:false },
+    'completed':       { color:'#6b7280', bg:'#f3f4f6', icon:'🏁', label:'COMPLETED',     rowBg:'',          urgent:false },
+    'split-pending':   { color:'#ffffff', bg:'#dc2626', icon:'🔴', label:'SPLIT-PENDING', rowBg:'#fef2f2',   urgent:true  },
   };
 
   // ── CARD VIEW for Marriages role ──
@@ -18532,6 +18721,7 @@ function renderMarriages(){
       // Active states + their visual cues
       const isPending = m.status === 'pending';           // accessory at factory, no action yet
       const isReady = m.status === 'ready-to-ship';        // marked ready, waiting for Truck scan
+      const isPickupMar = m.status === 'ready-for-pickup'; // dealer collects at factory
       const isInTransit = m.status === 'in-transit';       // Truck scanned, on the way
       const isDelivered = m.status === 'delivered';        // arrived at warehouse
       const isSplit = m.status === 'split-pending';
@@ -18588,6 +18778,9 @@ function renderMarriages(){
         ${trackInfo}
         <div class="mar-card-acts">
           ${isPending ? `<button class="btn btn-sm mar-btn-primary" onclick="shipMarriageFromMarriages(${m.id})" title="Send the accessory to the warehouse — marks marriage as Delivered">📤 Send to WH</button>` : ''}
+          ${isPending ? `<button class="btn btn-sm" style="background:#ede9fe;border-color:#8b5cf6;color:#5b21b6;font-weight:600" onclick="markMarriageReadyForPickup(${m.id})" title="Dealer collects at the factory — Truck won't take it">🤝 Ready to Pick Up</button>` : ''}
+          ${isPickupMar ? `<button class="btn btn-sm btn-p" style="background:#7c3aed;border-color:#7c3aed" onclick="dispatchMarriagePickup(${m.id})" title="Dealer picked it up at the factory — dispatch it">🤝 Dealer Picked Up</button>` : ''}
+          ${isPickupMar ? `<button class="btn btn-sm" style="background:#f3f4f6;border-color:#d1d5db;color:#374151" onclick="undoMarriageReady(${m.id})" title="Back to factory inventory">↶ Undo</button>` : ''}
           ${isSplit ? `<button class="btn btn-sm" style="background:#fef9c3;border-color:#f59e0b;color:#78350f" onclick="goV('requests')" title="View follow-up Factory Request">📋 Follow-up</button>` : ''}
           <button class="btn btn-sm" onclick="printMarriageLabel(${m.id})" title="Print physical label">🏷 Label</button>
           ${m.status !== 'completed' ? `<button class="btn btn-sm" onclick="openMarriageEdit(${m.id})" title="Edit this marriage">✎ Edit</button>` : ''}
@@ -19266,6 +19459,76 @@ function shipMarriageFromMarriages(mid){
   }, 80);
 }
 window.shipMarriageFromMarriages = shipMarriageFromMarriages;
+
+// ── MARRIAGE: READY TO PICK UP (dealer collects accessory at factory) ──
+// Same concept as the spa flow. The accessory stays at the factory; the Truck
+// can't scan it; Factory dispatches it when the dealer collects.
+function markMarriageReadyForPickup(mid){
+  const m = marriages.find(x => x.id === mid);
+  if(!m){ toast('Marriage not found','err'); return; }
+  if(m.status !== 'pending'){ toast(`Marriage already ${m.status} — undo first`,'err'); return; }
+  if(!confirm(`Mark "${m.accessoryName}" (S/N ${m.spaSn}) as READY FOR DEALER PICKUP?\n\n• Stays at the factory\n• Truck / Transit CANNOT scan it\n• Factory dispatches it when the dealer collects (button or 🤝 Scan Dealer Pickup)`)) return;
+  snapshot('marriage ready-for-pickup');
+  const acc = factory.find(f => f.id === m.accessoryId);
+  if(acc){
+    acc.trackingState = 'ready-for-pickup';
+    acc.trackingId = acc.trackingId || makeTrackingId('ACC');
+    acc.trackingHistory = acc.trackingHistory || [];
+    acc.trackingHistory.push({state:'ready-for-pickup', at:toISO(), by:ROLES[currentRole].label, note:'Dealer pickup at factory (Marriages crew)'});
+  }
+  m.status = 'ready-for-pickup';
+  m.readyAt = toISO();
+  addAct(`🤝 Marriage ready for dealer pickup: ${m.accessoryName} → S/N ${m.spaSn}`,'var(--purple)');
+  toast(`Marked ready for dealer pickup — Truck can't scan it`,'ok');
+  renderMarriages(); if(typeof renderFactory === 'function') renderFactory(); if(typeof renderTruck === 'function') renderTruck(); updBadges();
+  setTimeout(() => { try { printMarriageLabel(m.id); } catch(e){} }, 80);
+}
+window.markMarriageReadyForPickup = markMarriageReadyForPickup;
+
+function undoMarriageReady(mid){
+  const m = marriages.find(x => x.id === mid);
+  if(!m){ toast('Marriage not found','err'); return; }
+  if(m.status !== 'ready-for-pickup' && m.status !== 'ready-to-ship'){ toast('Marriage is not in a ready state','err'); return; }
+  if(!confirm(`Return "${m.accessoryName}" to factory inventory?\n\nThe marriage goes back to "at factory" (pending).`)) return;
+  snapshot('undo marriage ready');
+  const wasState = m.status;
+  const acc = factory.find(f => f.id === m.accessoryId);
+  if(acc && (acc.trackingState === 'ready-for-pickup' || acc.trackingState === 'ready-to-ship')){
+    acc.trackingHistory = (acc.trackingHistory||[]).filter(h => h.state !== acc.trackingState);
+    acc.trackingState = 'created-at-factory';
+    acc.trackingHistory.push({state:'created-at-factory', at:toISO(), by:ROLES[currentRole].label, note:`Undo ${wasState}`});
+  }
+  m.status = 'pending';
+  delete m.readyAt;
+  addAct(`↶ Marriage back to factory: ${m.accessoryName} → S/N ${m.spaSn}`,'var(--text2)');
+  toast(`${m.accessoryName} back in factory inventory`,'ok');
+  renderMarriages(); if(typeof renderFactory === 'function') renderFactory(); if(typeof renderTruck === 'function') renderTruck(); if(typeof renderInTransit === 'function') renderInTransit(); updBadges();
+}
+window.undoMarriageReady = undoMarriageReady;
+
+function dispatchMarriagePickup(mid){
+  if(currentRole !== 'factory' && currentRole !== 'admin'){ toast('🔒 Only Factory can dispatch a dealer pickup','err'); return; }
+  const m = marriages.find(x => x.id === mid);
+  if(!m){ toast('Marriage not found','err'); return; }
+  if(m.status !== 'ready-for-pickup'){ toast('Marriage is not marked ready for dealer pickup','err'); return; }
+  if(!confirm(`Confirm the dealer PICKED UP "${m.accessoryName}" (S/N ${m.spaSn}) at the factory?`)) return;
+  snapshot('dispatch marriage dealer pickup');
+  const at = toISO();
+  const acc = factory.find(f => f.id === m.accessoryId);
+  if(acc){
+    acc.trackingHistory = acc.trackingHistory || [];
+    acc.trackingHistory.push({state:'dispatched-from-factory', at, by:ROLES[currentRole].label, note:'Dealer pickup at factory'});
+    factory = factory.filter(f => f.id !== acc.id);
+  }
+  m.status = 'delivered';
+  m.deliveredDate = at;
+  m.via = 'dealer-pickup-at-factory';
+  if(!m.location) m.location = 'MINV';
+  addAct(`🤝🚚 Marriage dealer pickup at factory: ${m.accessoryName} → S/N ${m.spaSn}`,'var(--accent)');
+  toast(`${m.accessoryName} dispatched — dealer pickup at factory`,'ok');
+  renderMarriages(); if(typeof renderFactory === 'function') renderFactory(); if(typeof renderTruck === 'function') renderTruck(); if(typeof renderInTransit === 'function') renderInTransit(); updBadges();
+}
+window.dispatchMarriagePickup = dispatchMarriagePickup;
 
 // ═══════════════════════════════════════════════════════
 // COVER INVENTORY — render, add, edit, remove
@@ -21616,7 +21879,11 @@ document.addEventListener('keydown', e=>{
       changed = true;
     }
 
-    // ── 4) Covers: decrement each tina's cover ONCE (idempotent via _reconciled).
+    // ── 4) Covers: first clean any duplicate "owed to" entries from the old
+    //    duplicate-tina bug, then decrement each tina's cover ONCE. The decrement
+    //    is now idempotent per S/N inside decrementCoverStock, so even covers on
+    //    re-added tinas (without _reconciled) can't double-count.
+    if(typeof reconcileCovers === 'function'){ if(reconcileCovers()) changed = true; }
     if(typeof decrementCoverStock === 'function'){
       for(const f of factory){
         if(!f.trackingId || !PROTECTED_TIDS.has(f.trackingId)) continue; // only the 8 tinas
@@ -21963,6 +22230,15 @@ document.addEventListener('keydown', e=>{
   }
 
   // ─── 6. ADMIN UI ─────────────────────────────────────────────────────
+  function isAdminRole(){ return typeof currentRole !== 'undefined' && currentRole === 'admin'; }
+  function requireAdmin(){
+    if(!isAdminRole()){
+      if(typeof toast === 'function') toast('🔒 Solo el rol Admin puede usar esto','err');
+      return false;
+    }
+    return true;
+  }
+
   function installAdminUI(){
     if(document.getElementById('aspen-protection-panel')) return;
     const panel = document.createElement('div');
@@ -21971,11 +22247,16 @@ document.addEventListener('keydown', e=>{
     panel.innerHTML = `<button id="aspen-prot-btn" title="Backup & Restauración (Admin)" style="background:#1e40af;color:#fff;border:0;border-radius:50%;width:46px;height:46px;cursor:pointer;box-shadow:0 4px 14px rgba(30,64,175,.45);font-size:20px;display:flex;align-items:center;justify-content:center">🛡</button>`;
     document.body.appendChild(panel);
     function updateVisibility(){
-      panel.style.display = (typeof currentRole !== 'undefined' && currentRole === 'admin') ? 'block' : 'none';
+      const admin = isAdminRole();
+      panel.style.display = admin ? 'block' : 'none';
+      // If the role changed away from admin while the menu was open, close it
+      // immediately — the floating button hiding alone wouldn't dismiss the modal.
+      if(!admin){ document.getElementById('aspen-prot-menu')?.remove(); }
     }
     updateVisibility();
-    setInterval(updateVisibility, 2000);
+    setInterval(updateVisibility, 1000);
     document.getElementById('aspen-prot-btn').onclick = () => {
+      if(!requireAdmin()) return;   // defensive: never open for non-admin
       document.getElementById('aspen-prot-menu')?.remove();
       const menu = document.createElement('div');
       menu.id = 'aspen-prot-menu';
@@ -21997,12 +22278,12 @@ document.addEventListener('keydown', e=>{
           </div>
         </div>`;
       document.body.appendChild(menu);
-      document.getElementById('apm-save').onclick = () => { menu.remove(); window.saveLabeledSnapshot(); };
-      document.getElementById('apm-list').onclick = () => { menu.remove(); window.restoreLabeledSnapshot(); };
-      document.getElementById('apm-hourly').onclick = () => { menu.remove(); window.restoreHourlyBackup(); };
-      document.getElementById('apm-recover').onclick = () => { menu.remove(); autoRestoreFromFirebase(); };
-      document.getElementById('apm-stats').onclick = () => { menu.remove(); showStats(); };
-      document.getElementById('apm-nuclear').onclick = () => { menu.remove(); nuclearCloudClean(); };
+      document.getElementById('apm-save').onclick = () => { if(!requireAdmin())return; menu.remove(); window.saveLabeledSnapshot(); };
+      document.getElementById('apm-list').onclick = () => { if(!requireAdmin())return; menu.remove(); window.restoreLabeledSnapshot(); };
+      document.getElementById('apm-hourly').onclick = () => { if(!requireAdmin())return; menu.remove(); window.restoreHourlyBackup(); };
+      document.getElementById('apm-recover').onclick = () => { if(!requireAdmin())return; menu.remove(); autoRestoreFromFirebase(); };
+      document.getElementById('apm-stats').onclick = () => { if(!requireAdmin())return; menu.remove(); showStats(); };
+      document.getElementById('apm-nuclear').onclick = () => { if(!requireAdmin())return; menu.remove(); nuclearCloudClean(); };
       document.getElementById('apm-close').onclick = () => menu.remove();
       menu.onclick = (e) => { if(e.target === menu) menu.remove(); };
     };
@@ -22014,6 +22295,7 @@ document.addEventListener('keydown', e=>{
   // first, and writes a single clean state (8 tinas, epoch 2). Combined with the
   // epoch guard, this removes the junk at the source so it cannot come back.
   async function nuclearCloudClean(){
+    if(!requireAdmin()) return;
     if(!_fbDb || !_fbAuthorized){ alert('Firebase no conectado'); return; }
     const ok = confirm('🧨 LIMPIEZA TOTAL DEL CLOUD (definitivo)\n\nEsto va a:\n  • Respaldar TODO el estado actual en Firebase\n  • Borrar la basura de TODOS los dispositivos en el cloud\n  • Dejar SOLO las 8 tinas (listas para tránsito)\n  • Escribir el estado limpio con epoch 2 (los dispositivos viejos no pueden sobreescribirlo)\n\n⚠ Si agregaste inventario nuevo, también se borra (es un reinicio 100% limpio).\n\n¿Continuar?');
     if(!ok) return;
