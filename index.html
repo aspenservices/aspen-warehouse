@@ -4447,7 +4447,7 @@ let _fbInitAttempts = 0;
 //   /app_version/current  (in Firebase console, manually, OR call
 //   pushVersionToFirebase() from the Admin console at deploy time)
 // ══════════════════════════════════════════════════════════════════
-const APP_VERSION = 'v4.12';
+const APP_VERSION = 'v4.13';
 window.APP_VERSION = APP_VERSION;
 
 // ── DATA EPOCH (generation guard) ────────────────────────────────────
@@ -4457,7 +4457,14 @@ window.APP_VERSION = APP_VERSION;
 // from an out-of-date device) and re-push the clean state — so the junk can
 // never come back even if an old device keeps running. Bump this whenever you
 // need to forcibly invalidate all older devices' cloud writes.
-window.ASPEN_DATA_EPOCH = 2;
+window.ASPEN_DATA_EPOCH = 3;   // bumped 21-may-2026 — invalida los devices que aún corren v4.12 (epoch 2) con el bug del fresh-start
+
+// ── KILL SWITCH (21-may-2026) ─────────────────────────────────────────────
+// Cuando es false, ensureTinas() solo de-duplica: NUNCA resucita el baseline
+// hardcodeado de 8 tinas. Esto es lo que hacía que "todo se desconfigura otra
+// vez": el baseline del 19-may se reimponía cada 45s. El cloud es ahora la
+// única fuente de verdad. Ponlo en true SOLO para un reseed manual deliberado.
+window.ASPEN_ENFORCE_BASELINE = false;
 
 let _updateBannerShown = false;
 let _versionCheckTimer = null;
@@ -4490,6 +4497,111 @@ function pushVersionToFirebase(){
   }).catch(e => alert('Failed: ' + e.message));
 }
 window.pushVersionToFirebase = pushVersionToFirebase;
+
+// ══════════════════════════════════════════════════════════════════════════
+// AUTO-UPDATE POR RED (21-may-2026) — el index desplegado ES la fuente de verdad
+// ──────────────────────────────────────────────────────────────────────────
+// PROBLEMA que arregla: el watcher viejo dependía de que alguien apretara
+// "Anunciar versión" (escribía la versión en Firebase). Como Alberto despliega
+// subiendo el index directo y nunca aprieta ese botón, los devices se quedaban
+// con código viejo cacheado para siempre.
+//
+// CÓMO FUNCIONA AHORA (sin botones, sin Firebase):
+//   • Al abrir la app, al volver a la pestaña, y cada 2 min, el device hace un
+//     GET a su PROPIO index.html con cache:'no-store' y lee el APP_VERSION
+//     desplegado (aborta el stream apenas lo encuentra, ~liviano).
+//   • Si la versión desplegada ≠ la que está corriendo → estás en código viejo
+//     → recarga sola con cache-bust (?v=timestamp) para traer el index fresco.
+//   • Respaldo: si el APP_VERSION coincide pero el archivo cambió en sesión
+//     (redeploy sin subir el número), el ETag/Last-Modified lo detecta igual.
+//
+// RESULTADO: tú subes el index nuevo a GitHub → en el próximo open/focus de
+// cada device, entran solos a la última versión. Nada de "Finish update".
+let _deployFingerprint = null;
+let _autoUpdateBusy = false;
+
+async function _fetchDeployInfo(){
+  const url = location.pathname + '?_fp=' + Date.now();  // cache-bust del request
+  const ctrl = new AbortController();
+  let etag = null, ver = null;
+  try {
+    const r = await fetch(url, { method:'GET', cache:'no-store', signal: ctrl.signal });
+    etag = r.headers.get('etag') || r.headers.get('last-modified') || null;
+    if(r.body && r.body.getReader){
+      const reader = r.body.getReader();
+      const dec = new TextDecoder();
+      let buf = '';
+      while(true){
+        const { done, value } = await reader.read();
+        if(done) break;
+        buf += dec.decode(value, { stream:true });
+        const m = buf.match(/APP_VERSION\s*=\s*['"]([^'"]+)['"]/);
+        if(m){ ver = m[1]; try { ctrl.abort(); } catch(e){} break; }
+        if(buf.length > 600000) break;  // tope de seguridad (~600KB)
+      }
+    } else {
+      const txt = await r.text();
+      const m = txt.match(/APP_VERSION\s*=\s*['"]([^'"]+)['"]/);
+      if(m) ver = m[1];
+    }
+  } catch(e){ /* abort esperado, o red caída → reintenta luego */ }
+  return { ver, etag };
+}
+
+function _doAutoReload(reason){
+  // Evita loops: no recargar dos veces en <25s
+  try {
+    const last = Number(sessionStorage.getItem('aspen_last_autoreload') || 0);
+    if(Date.now() - last < 25000){ console.warn('[auto-update] reload suprimido (anti-loop)'); return; }
+    sessionStorage.setItem('aspen_last_autoreload', String(Date.now()));
+  } catch(e){}
+  console.log('%c[auto-update] recargando a la última versión (' + reason + ')', 'color:#1e40af;font-weight:bold');
+  try { if(typeof toast === 'function') toast('🔄 Versión nueva — actualizando…', 'ok'); } catch(e){}
+  setTimeout(() => {
+    const u = new URL(location.href);
+    u.searchParams.set('v', Date.now());   // URL nueva → el cache no la tiene → index fresco
+    location.replace(u.toString());
+  }, 700);
+}
+
+async function _checkForNewDeploy(reason){
+  if(_autoUpdateBusy) return;
+  _autoUpdateBusy = true;
+  try {
+    const info = await _fetchDeployInfo();
+    if(!info || (!info.ver && !info.etag)) return;
+    // 1) ¿El index desplegado tiene OTRA versión que la que corre? → código viejo cacheado
+    if(info.ver && info.ver !== APP_VERSION){
+      console.log('[auto-update] desplegado ' + info.ver + ' ≠ corriendo ' + APP_VERSION + ' (' + reason + ')');
+      _doAutoReload('version ' + info.ver);
+      return;
+    }
+    // 2) Misma versión pero el archivo cambió en sesión (redeploy sin bump) → ETag
+    if(info.etag){
+      if(_deployFingerprint === null){ _deployFingerprint = info.etag; }
+      else if(info.etag !== _deployFingerprint){
+        _doAutoReload('etag');
+      }
+    }
+  } finally { _autoUpdateBusy = false; }
+}
+
+function installAutoUpdate(){
+  if(window.__aspenAutoUpdateInstalled) return;  // idempotente
+  window.__aspenAutoUpdateInstalled = true;
+  // chequeo al arrancar (toma baseline + detecta código viejo de una)
+  setTimeout(() => _checkForNewDeploy('boot'), 2500);
+  // "cuando ellos abran la app" = vuelven a la pestaña / enfocan la ventana
+  document.addEventListener('visibilitychange', () => { if(!document.hidden) _checkForNewDeploy('focus'); });
+  window.addEventListener('focus', () => _checkForNewDeploy('window-focus'));
+  window.addEventListener('online', () => _checkForNewDeploy('online'));
+  // respaldo: cada 2 min mientras la pestaña esté visible
+  setInterval(() => { if(!document.hidden) _checkForNewDeploy('interval'); }, 120000);
+  console.log('%c[auto-update] ✓ instalado — el index desplegado manda; recarga sola en open/focus/cada 2min', 'color:#16a34a;font-weight:bold');
+}
+window.installAutoUpdate = installAutoUpdate;
+// Arranca de inmediato — NO depende de Firebase ni del login.
+try { installAutoUpdate(); } catch(e){ console.warn('[auto-update] install falló:', e); }
 
 // ══════════════════════════════════════════════════════════════════════════
 // SYNC DIAGNOSTIC — full status report + active sync test
@@ -21726,19 +21838,19 @@ document.addEventListener('keydown', e=>{
   // the one-time junk, then never again.
   const FRESH_START_FLAG = 'aspen_fresh_start_8tinas_v1';
   function installFreshStart(){
-    if(localStorage.getItem(FRESH_START_FLAG)){ console.log('[fresh-start] already done'); return; }
-    let tries = 0;
-    const iv = setInterval(async () => {
-      tries++;
-      if(tries > 120){ clearInterval(iv); return; }
-      if(typeof currentRole === 'undefined' || currentRole !== 'admin') return;
-      if(Date.now() - _bootTime < BOOT_QUARANTINE_MS) return;
-      if(!_fbDb || !_fbAuthorized) return;
-      if(!_initialSyncDone) return;
-      if(localStorage.getItem(FRESH_START_FLAG)){ clearInterval(iv); return; }
-      clearInterval(iv);
-      await doFreshStart();
-    }, 2000);
+    // ── DESACTIVADO PERMANENTEMENTE 21-may-2026 ───────────────────────────
+    // CAUSA RAÍZ del "accedí de otro dispositivo y jaló la basura":
+    // El "inicio limpio" borraba el warehouse hasta dejar SOLO las 8 tinas
+    // hardcodeadas y EMPUJABA ese borrado al cloud (saltándose el safe-push).
+    // Como el flag que lo dispara vive en localStorage (es POR-DISPOSITIVO),
+    // CADA device/navegador nuevo corría este borrado destructivo la primera
+    // vez que abría la app — pisando el inventario real de todos los demás.
+    // Ya cumplió su trabajo de una sola vez en mayo; de aquí en adelante NUNCA
+    // debe volver a correr. Estampamos el flag defensivamente por si algún
+    // code path viejo lo evalúa.
+    try { localStorage.setItem(FRESH_START_FLAG, JSON.stringify({done:true, disabled:true, at:new Date().toISOString()})); } catch(e){}
+    console.log('%c[fresh-start] DESACTIVADO permanentemente (fix 21-may-2026)', 'color:#dc2626;font-weight:bold');
+    return;
   }
 
   async function doFreshStart(){
@@ -21834,6 +21946,23 @@ document.addEventListener('keydown', e=>{
     changed = dedupBySn(getCollection('units')) || changed;
     changed = dedupBySn(getCollection('dispatched')) || changed;
     if(typeof queue !== 'undefined' && Array.isArray(queue)) changed = dedupBySn(queue) || changed;
+
+    // ── BASELINE ENFORCEMENT DESACTIVADO 21-may-2026 ─────────────────────
+    // Las secciones 2-4 de abajo resucitan un baseline HARDCODEADO de 8 tinas
+    // (snapshot del 19-may) cada 45s. Eso es lo que hacía que el warehouse
+    // "se desconfigura otra vez": cualquier tina que despacharas/borraras y
+    // coincidiera con el baseline, volvía a aparecer sola. El cloud es ahora
+    // la única fuente de verdad — aquí solo de-duplicamos S/N repetidos.
+    if(!window.ASPEN_ENFORCE_BASELINE){
+      if(changed){
+        if(typeof flushSave === 'function') flushSave();
+        _bypassNextSafePush = true;
+        if(typeof fbCloudSync === 'function'){ try { fbCloudSync(false); } catch(e){} }
+        try { renderFactory && renderFactory(); renderQueue && renderQueue(); updBadges && updBadges(); } catch(e){}
+        console.log('[tina-guarantee] solo dedup (baseline enforcement OFF)');
+      }
+      return;
+    }
 
     // Where does each tina currently live? (computed after dedup so sets are clean)
     const snUnits      = new Set(getCollection('units').map(u => String(u.sn)));
