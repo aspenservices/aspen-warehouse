@@ -3362,7 +3362,7 @@ body.dark-mode .mar-card-track {
     </select>
     <div class="role-current"><span id="role-indicator">Admin</span></div>
   </div>
-  <div class="sb-foot"><div class="sb-ver">v4.12 🛡 · <span id="live-date"></span></div></div>
+  <div class="sb-foot"><div class="sb-ver"><span id="sb-ver-num">v4.12</span> 🛡 · <span id="live-date"></span></div></div>
 </nav>
 
 <!-- MAIN -->
@@ -4447,7 +4447,7 @@ let _fbInitAttempts = 0;
 //   /app_version/current  (in Firebase console, manually, OR call
 //   pushVersionToFirebase() from the Admin console at deploy time)
 // ══════════════════════════════════════════════════════════════════
-const APP_VERSION = 'v4.14';
+const APP_VERSION = 'v4.15';
 window.APP_VERSION = APP_VERSION;
 
 // ── DATA EPOCH (generation guard) ────────────────────────────────────
@@ -4457,7 +4457,7 @@ window.APP_VERSION = APP_VERSION;
 // from an out-of-date device) and re-push the clean state — so the junk can
 // never come back even if an old device keeps running. Bump this whenever you
 // need to forcibly invalidate all older devices' cloud writes.
-window.ASPEN_DATA_EPOCH = 3;   // bumped 21-may-2026 — invalida los devices que aún corren v4.12 (epoch 2) con el bug del fresh-start
+window.ASPEN_DATA_EPOCH = 4;   // bumped 21-may-2026 (v4.15) — tras el reset final, invalida TODO device en epoch ≤3
 
 // ── KILL SWITCH (21-may-2026) ─────────────────────────────────────────────
 // Cuando es false, ensureTinas() solo de-duplica: NUNCA resucita el baseline
@@ -21542,6 +21542,9 @@ if(_bootFindings.length){
 
 saveState();              // persist migration result
 document.getElementById('live-date').textContent=new Date().toLocaleDateString('en-US',{month:'short',day:'numeric'});
+// El número de versión del footer ahora sale de APP_VERSION (antes estaba hardcodeado
+// en "v4.12", lo que hacía imposible saber qué build estaba corriendo de verdad).
+try { var _vn=document.getElementById('sb-ver-num'); if(_vn && typeof APP_VERSION!=='undefined') _vn.textContent=APP_VERSION; } catch(e){}
 document.getElementById('mat-date').value=toISO();
 document.getElementById('in-date').value=toISO();
 // Set role-selector dropdown to current role + apply visibility
@@ -22438,6 +22441,7 @@ document.addEventListener('keydown', e=>{
             <button id="apm-recover" style="background:#7c3aed;color:#fff;border:0;border-radius:9px;padding:12px;font-weight:700;cursor:pointer;font-size:13px;text-align:left">🔍 Auto-restaurar (el mejor snapshot)<div style="font-size:10.5px;opacity:.9;font-weight:500;margin-top:3px">Escanea todo Firebase y pica automáticamente.</div></button>
             <button id="apm-stats" style="background:#374151;color:#fff;border:0;border-radius:9px;padding:12px;font-weight:700;cursor:pointer;font-size:13px;text-align:left">📊 Ver stats de protección<div style="font-size:10.5px;opacity:.9;font-weight:500;margin-top:3px">Cuántos snapshots tienes, última sincronización, etc.</div></button>
             <button id="apm-nuclear" style="background:#dc2626;color:#fff;border:0;border-radius:9px;padding:12px;font-weight:700;cursor:pointer;font-size:13px;text-align:left">🧨 Limpieza total del cloud (definitivo)<div style="font-size:10.5px;opacity:.9;font-weight:500;margin-top:3px">Respalda todo, borra la basura de TODOS los dispositivos, deja solo las 8 tinas. Úsalo una vez.</div></button>
+            <button id="apm-reset-empty" style="background:#0f766e;color:#fff;border:0;border-radius:9px;padding:12px;font-weight:700;cursor:pointer;font-size:13px;text-align:left">🧼 Empezar de cero (VACÍO)<div style="font-size:10.5px;opacity:.9;font-weight:500;margin-top:3px">Respalda todo, borra TODOS los dispositivos y deja el warehouse 100% vacío con epoch 4. Solución final — empiezas limpio y nada viejo puede volver.</div></button>
             <button id="apm-close" style="background:#f1f5f9;color:#475569;border:0;border-radius:9px;padding:10px;font-weight:700;cursor:pointer;font-size:12.5px;margin-top:3px">Cerrar</button>
           </div>
         </div>`;
@@ -22448,6 +22452,7 @@ document.addEventListener('keydown', e=>{
       document.getElementById('apm-recover').onclick = () => { if(!requireAdmin())return; menu.remove(); autoRestoreFromFirebase(); };
       document.getElementById('apm-stats').onclick = () => { if(!requireAdmin())return; menu.remove(); showStats(); };
       document.getElementById('apm-nuclear').onclick = () => { if(!requireAdmin())return; menu.remove(); nuclearCloudClean(); };
+      { const _re = document.getElementById('apm-reset-empty'); if(_re) _re.onclick = () => { if(!requireAdmin())return; menu.remove(); factoryResetEmpty(); }; }
       document.getElementById('apm-close').onclick = () => menu.remove();
       menu.onclick = (e) => { if(e.target === menu) menu.remove(); };
     };
@@ -22515,6 +22520,75 @@ document.addEventListener('keydown', e=>{
       alert('Error en limpieza total: ' + e.message + '\n\nTu respaldo (si se hizo) está en state/_archive_total/. Nada se perdió.');
     }
   }
+
+  // ─── EMPEZAR DE CERO (VACÍO) — reset final 21-may-2026 (v4.15) ───────
+  // Como la limpieza nuclear, pero deja el warehouse 100% VACÍO (sin las 8
+  // tinas hardcodeadas). Respalda todo primero, borra los nodos de TODOS los
+  // dispositivos, y escribe un estado limpio vacío con el epoch actual (4) — así
+  // ningún device viejo (epoch ≤3) puede repoblar con basura. Desde aquí, solo
+  // lo que agregues a mano queda guardado y protegido.
+  async function factoryResetEmpty(){
+    if(!requireAdmin()) return;
+    if(!_fbDb || !_fbAuthorized){ alert('Firebase no conectado'); return; }
+    const ok = confirm('🧼 EMPEZAR DE CERO — REINICIO TOTAL A VACÍO\n\nEsto va a:\n  • Respaldar TODO el estado actual en Firebase (recuperable)\n  • Borrar la data de TODOS los dispositivos en el cloud\n  • Dejar el warehouse COMPLETAMENTE VACÍO (sin tinas, sin units, sin nada)\n  • Escribir el estado limpio con epoch 4 (ningún device viejo puede sobreescribirlo)\n\n⚠ Se borra TODO el inventario. Empiezas de cero y solo lo que agregues desde ahora se guarda.\n\n¿Continuar?');
+    if(!ok) return;
+    if(!confirm('Confirmación final: ¿borrar TODO y empezar de cero vacío?\n\nEl respaldo queda en state/_archive_total/ por si necesitas recuperarlo.')) return;
+    const now = Date.now(), iso = new Date(now).toISOString();
+    try {
+      if(typeof toast === 'function') toast('🧼 Reiniciando a vacío…', 'ok');
+      // 1) Archivar TODO el árbol primero (recuperable)
+      let fullTree = {};
+      try {
+        const snap = await _fbDb.ref('state').once('value');
+        fullTree = snap.val() || {};
+        await _fbDb.ref(`state/_archive_total/${now}`).set({ at: iso, by: 'factory-reset-empty', tree: JSON.stringify(fullTree) });
+        console.log('[reset-empty] árbol completo archivado en state/_archive_total/' + now);
+      } catch(e){ console.warn('[reset-empty] archive falló (continúo):', e); }
+      try { if(typeof window.saveLabeledSnapshot === 'function') await window.saveLabeledSnapshot('BACKUP_antes_empezar_de_cero_' + now); } catch(e){}
+
+      // 2) Vaciar TODAS las colecciones de inventario (cfg/colorLibrary/coverModelMapping se conservan)
+      for(const coll of ['factory','units','incoming','dispatched','marriages','dispatchRequests','materials']){
+        const a = getCollection(coll); if(Array.isArray(a)) a.length = 0;
+      }
+      if(typeof coverInventory !== 'undefined' && Array.isArray(coverInventory)) coverInventory.length = 0;
+      if(typeof queue !== 'undefined' && Array.isArray(queue)) queue.length = 0;
+      if(typeof events !== 'undefined' && Array.isArray(events)) events.length = 0;
+      if(typeof activity !== 'undefined' && Array.isArray(activity)) activity.length = 0;
+
+      // 3) Marcar flags para que NADA automático re-corra (fresh-start ya está OFF)
+      try { localStorage.setItem(FRESH_START_FLAG, JSON.stringify({done:true, disabled:true, at:iso, via:'reset-empty'})); } catch(e){}
+      if(typeof window.ASPEN_ENFORCE_BASELINE !== 'undefined') window.ASPEN_ENFORCE_BASELINE = false;
+
+      if(typeof flushSave === 'function') flushSave();
+
+      // 4) Empujar el estado vacío limpio (lleva epoch 4 desde el builder de fbCloudSync)
+      _bypassNextSafePush = true;
+      if(typeof fbCloudSync === 'function') await fbCloudSync(false);
+
+      // 5) Borrar el nodo de TODOS los demás dispositivos (ahí vive la basura). Conserva
+      //    'shared' (estado limpio) y '_archive_total' (respaldo recién hecho).
+      const devKeys = Object.keys(fullTree).filter(k => k !== 'shared' && k !== '_archive_total' && k !== _fbDeviceId);
+      let deleted = 0;
+      for(const k of devKeys){ try { await _fbDb.ref(`state/${k}`).remove(); deleted++; } catch(e){ console.warn('[reset-empty] no se pudo borrar', k, e); } }
+      try { await _fbDb.ref(`state/${_fbDeviceId}/snapshots`).remove(); } catch(e){}
+
+      // 6) Re-render
+      try { renderFactory && renderFactory(); } catch(e){}
+      try { drawMap && drawMap(); } catch(e){}
+      try { renderCoverInventory && renderCoverInventory(); } catch(e){}
+      try { renderInTransit && renderInTransit(); } catch(e){}
+      try { renderIncoming && renderIncoming(); } catch(e){}
+      try { renderRequests && renderRequests(); } catch(e){}
+      try { updBadges && updBadges(); } catch(e){}
+
+      alert(`✅ LISTO — EMPEZASTE DE CERO\n\n  • Respaldo: state/_archive_total/${now}\n  • Nodos de dispositivos borrados: ${deleted}\n  • Warehouse VACÍO, epoch 4\n\nDesde ahora solo lo que agregues se guarda. Ningún dispositivo viejo (epoch ≤3) puede traer basura — el epoch-guard lo rechaza. Asegúrate de que todos los devices estén en v4.15.`);
+      console.log('%c🧼 [reset-empty] ✓ warehouse vacío, ' + deleted + ' nodos borrados, epoch 4', 'color:#16a34a;font-weight:bold');
+    } catch(e){
+      console.error('[reset-empty] falló:', e);
+      alert('Error en el reinicio: ' + e.message + '\n\nTu respaldo (si se hizo) está en state/_archive_total/. Nada se perdió.');
+    }
+  }
+  window.empezarDeCero = factoryResetEmpty;
 
   async function showStats(){
     if(!_fbDb || !_fbAuthorized){ alert('Firebase no conectado'); return; }
