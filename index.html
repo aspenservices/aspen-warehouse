@@ -4447,7 +4447,7 @@ let _fbInitAttempts = 0;
 //   /app_version/current  (in Firebase console, manually, OR call
 //   pushVersionToFirebase() from the Admin console at deploy time)
 // ══════════════════════════════════════════════════════════════════
-const APP_VERSION = 'v4.13';
+const APP_VERSION = 'v4.14';
 window.APP_VERSION = APP_VERSION;
 
 // ── DATA EPOCH (generation guard) ────────────────────────────────────
@@ -17548,23 +17548,30 @@ async function printQRLabel(itemId, source){
 //   'receive'   → mark as 'received-at-warehouse' + prompt for position assignment
 //   'dispatch'  → mark as 'dispatched-out' (loading at warehouse for dealer delivery)
 let _qrScanState = null;
-async function openQRScanner(mode){
+async function openQRScanner(mode, hint){
   const overlay = document.createElement('div');
   overlay.id = 'qr-scan-overlay';
   overlay.style.cssText = 'position:fixed;inset:0;background:rgba(15,23,42,.92);z-index:9999;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:18px;color:#fff';
-  const titleByMode = {load:'Scan to Load on Truck', receive:'Scan to Receive at Warehouse', dispatch:'Scan to Dispatch', 'factory-receive':'Scan to Receive Back at Factory', 'factory-pickup':'Scan Dealer Pickup'};
+  const titleByMode = {load:'Scan to Load on Truck', receive:'Scan to Receive at Warehouse', dispatch:'Scan to Dispatch', 'factory-receive':'Scan to Receive Back at Factory', 'factory-pickup':'Scan Dealer Pickup', 'factory-request':'Scan Item · Factory Request'};
   const subByMode = {
     load: 'Driver: scan each item as it goes onto the truck.',
     receive: 'Manager: scan each item as it arrives at the warehouse.',
     dispatch: 'Loader: scan each spa being loaded for dealer pickup.',
     'factory-pickup': 'Factory only: scan a spa as the dealer collects it at the factory.'
   };
+  // El modo factory-request avanza el request del item por rol (pending→approved→
+  // shipped→received). El subtítulo muestra la S/N esperada cuando se conoce.
+  let sub = subByMode[mode] || '';
+  if(mode === 'factory-request'){
+    sub = hint ? `Escanea la S/N ${hint} para avanzar su request (aprobar · cargar al truck · recibir en factory).`
+               : 'Escanea el item para avanzar su request de factory.';
+  }
   overlay.innerHTML = `
     <div style="width:100%;max-width:480px;background:#0f172a;border-radius:14px;overflow:hidden;border:1px solid rgba(255,255,255,.1);position:relative">
       <div style="padding:14px 18px;border-bottom:1px solid rgba(255,255,255,.1);display:flex;justify-content:space-between;align-items:center">
         <div>
           <div style="font-size:14px;font-weight:700">📷 ${titleByMode[mode]||'Scan QR'}</div>
-          <div style="font-size:11px;color:rgba(255,255,255,.6);margin-top:2px">${subByMode[mode]||''}</div>
+          <div style="font-size:11px;color:rgba(255,255,255,.6);margin-top:2px">${sub}</div>
         </div>
         <button onclick="closeQRScanner()" style="background:rgba(255,255,255,.1);border:0;color:#fff;width:32px;height:32px;border-radius:50%;cursor:pointer;font-size:16px">✕</button>
       </div>
@@ -17585,7 +17592,7 @@ async function openQRScanner(mode){
         <div style="margin-top:10px;padding-top:10px;border-top:1px solid rgba(255,255,255,.08)">
           <div style="font-size:10px;color:rgba(255,255,255,.5);margin-bottom:5px">Or enter tracking ID manually:</div>
           <div style="display:flex;gap:6px">
-            <input id="qr-manual" placeholder="ASPN-SPA-XXXXXX" style="flex:1;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.15);color:#fff;padding:8px 10px;border-radius:6px;font-family:ui-monospace,monospace;font-size:12px" onkeydown="if(event.key==='Enter')handleQRPayload(this.value, '${mode}')">
+            <input id="qr-manual" placeholder="ASPN-SPA-XXXXXX" value="${hint||''}" style="flex:1;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.15);color:#fff;padding:8px 10px;border-radius:6px;font-family:ui-monospace,monospace;font-size:12px" onkeydown="if(event.key==='Enter')handleQRPayload(this.value, '${mode}')">
             <button onclick="handleQRPayload(document.getElementById('qr-manual').value, '${mode}')" style="background:#fbbf24;color:#0f172a;border:0;padding:8px 14px;border-radius:6px;font-weight:700;font-size:12px;cursor:pointer">Submit</button>
           </div>
         </div>
@@ -18009,6 +18016,16 @@ function handleQRPayload(raw, mode){
     setScanResult('ok', snForLookup||tid, 'matched factory request · advancing state');
     handleFactoryRequestScanByRole(activeReq, currentRole);
     if(_qrScanState) _qrScanState.scanning = true;  // continue scanning next item
+    return;
+  }
+
+  // En modo factory-request SOLO avanzamos requests por rol. Si el item escaneado
+  // no tiene un request activo, avisamos y NO tocamos su estado normal (evita que
+  // un escaneo equivocado dispare lógica de receive/load por accidente).
+  if(mode === 'factory-request'){
+    setScanResult('warn', snForLookup||tid, 'sin request de factory activo');
+    toast('Ese item no tiene un request de factory pendiente','err');
+    if(_qrScanState) _qrScanState.scanning = true;
     return;
   }
 
@@ -20173,8 +20190,14 @@ function renderRequests(){
         actions.push(`<button class="btn btn-sm btn-p" onclick="approveRequest(${r.id})" title="Manual approve (admin fallback — normally done via QR scan)">✓ Approve (manual)</button>`);
         actions.push(`<button class="btn btn-sm btn-r" onclick="rejectRequest(${r.id})">Reject</button>`);
       } else if(currentRole === 'warehouse'){
-        // Warehouse: show scan instruction + reject option
-        actions.push(`<span style="font-size:10.5px;color:#0369a1;background:#e0f2fe;border:1px solid #7dd3fc;padding:5px 10px;border-radius:6px;font-weight:600">📷 Scan item QR to approve</span>`);
+        // Warehouse aprueba el request. Tub con S/N → abre el scanner (escanea
+        // el QR del item para aprobar). Cover/material no tienen QR único por
+        // pieza → botón de aprobar directo.
+        if(r.type === 'tub' && r.sn){
+          actions.push(`<button class="btn btn-sm btn-p" onclick="openQRScanner('factory-request','${r.sn}')">📷 Scan to approve</button>`);
+        } else {
+          actions.push(`<button class="btn btn-sm btn-p" onclick="approveRequest(${r.id})">✓ Approve</button>`);
+        }
         actions.push(`<button class="btn btn-sm btn-r" onclick="rejectRequest(${r.id})">Reject</button>`);
       }
       // Factory or admin can cancel their own request
@@ -20187,7 +20210,13 @@ function renderRequests(){
       if(isAdmin){
         actions.push(`<button class="btn btn-sm btn-p" onclick="markRequestShipped(${r.id})" title="Manual ship (admin fallback — normally done via truck QR scan)">📤 Ship (manual)</button>`);
       } else if(currentRole === 'transit' || currentRole === 'warehouse'){
-        actions.push(`<span style="font-size:10.5px;color:#0369a1;background:#e0f2fe;border:1px solid #7dd3fc;padding:5px 10px;border-radius:6px;font-weight:600">📷 Truck scans QR to load</span>`);
+        // Cargar al truck en el loading bay → pasa a "en tránsito a factory".
+        // Tub con S/N → escanea el QR; cover/material → botón directo.
+        if(r.type === 'tub' && r.sn){
+          actions.push(`<button class="btn btn-sm btn-p" onclick="openQRScanner('factory-request','${r.sn}')">📷 Scan to load on truck</button>`);
+        } else {
+          actions.push(`<button class="btn btn-sm btn-p" onclick="markRequestShipped(${r.id})">📤 Mark loaded · ship</button>`);
+        }
       }
     } else if(r.status === 'shipped'){
       // PRIMARY: factory scans QR to mark as received
@@ -20195,7 +20224,13 @@ function renderRequests(){
       if(isAdmin){
         actions.push(`<button class="btn btn-sm btn-p" onclick="markRequestReceived(${r.id})" title="Manual receive (admin fallback — normally done via factory QR scan)">📥 Receive (manual)</button>`);
       } else if(currentRole === 'factory'){
-        actions.push(`<span style="font-size:10.5px;color:#0369a1;background:#e0f2fe;border:1px solid #7dd3fc;padding:5px 10px;border-radius:6px;font-weight:600">📷 Scan QR at factory dock to receive</span>`);
+        // Factory recibe de vuelta → el item reaparece en su almacén.
+        // Tub con S/N → escanea el QR en el dock; cover/material → botón directo.
+        if(r.type === 'tub' && r.sn){
+          actions.push(`<button class="btn btn-sm btn-p" onclick="openQRScanner('factory-request','${r.sn}')">📷 Scan to receive at factory</button>`);
+        } else {
+          actions.push(`<button class="btn btn-sm btn-p" onclick="markRequestReceived(${r.id})">📥 Receive at factory</button>`);
+        }
       }
     }
 
