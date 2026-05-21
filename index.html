@@ -4447,7 +4447,7 @@ let _fbInitAttempts = 0;
 //   /app_version/current  (in Firebase console, manually, OR call
 //   pushVersionToFirebase() from the Admin console at deploy time)
 // ══════════════════════════════════════════════════════════════════
-const APP_VERSION = 'v4.15';
+const APP_VERSION = 'v4.17';
 window.APP_VERSION = APP_VERSION;
 
 // ── DATA EPOCH (generation guard) ────────────────────────────────────
@@ -4520,6 +4520,40 @@ window.pushVersionToFirebase = pushVersionToFirebase;
 let _deployFingerprint = null;
 let _autoUpdateBusy = false;
 
+// ── CANDADO DE VERSIÓN (v4.17) ─────────────────────────────────────────────
+// Si la versión desplegada es MÁS NUEVA que la que corre esta pantalla, el
+// cliente entra en SOLO LECTURA: no puede empujar cambios al cloud (no afecta a
+// nadie) y muestra un aviso para que actualice. Así, por más que alguien quede
+// en una versión vieja, no puede operar — solo observar. (Igual el auto-updater
+// recarga solo en segundos; esto es la garantía por si la recarga se demora o
+// se bloquea.)
+window.__aspenStale = false;
+function _verNum(v){
+  const p = String(v||'').replace(/^v/i,'').split('.').map(n=>parseInt(n,10)||0);
+  return (p[0]||0)*10000 + (p[1]||0);   // v4.16 → 40016, v4.9 → 40009
+}
+function _enterReadOnlyMode(deployedVer){
+  if(window.__aspenStale) return;
+  window.__aspenStale = true;
+  console.warn('%c🔒 [version-lock] pantalla desactualizada ('+APP_VERSION+') vs desplegada ('+deployedVer+') → SOLO LECTURA', 'color:#dc2626;font-weight:bold');
+  if(document.getElementById('aspen-stale-banner')) return;
+  const b = document.createElement('div');
+  b.id = 'aspen-stale-banner';
+  b.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:100001;background:linear-gradient(135deg,#7f1d1d,#b91c1c);color:#fff;padding:13px 18px;font-family:-apple-system,system-ui;box-shadow:0 4px 16px rgba(0,0,0,.3);font-size:13.5px;line-height:1.4';
+  b.innerHTML = `
+    <div style="max-width:900px;margin:0 auto;display:flex;align-items:center;gap:13px;flex-wrap:wrap;justify-content:center;text-align:center">
+      <span style="font-size:22px">🔒</span>
+      <div style="flex:1 1 280px;min-width:0">
+        <div style="font-weight:800">Pantalla desactualizada — SOLO LECTURA</div>
+        <div style="font-size:11.5px;opacity:.92;margin-top:2px">Estás en ${APP_VERSION} y hay una versión nueva (${deployedVer}). No puedes hacer cambios hasta actualizar. Toca actualizar para volver a operar.</div>
+      </div>
+      <button onclick="_doAutoReload('manual-stale')" style="background:#fff;color:#b91c1c;border:0;border-radius:8px;padding:9px 16px;font-weight:800;font-size:13px;cursor:pointer;flex:0 0 auto">🔄 Actualizar ahora</button>
+    </div>`;
+  document.body.appendChild(b);
+  try { if(typeof toast === 'function') toast('🔒 Pantalla desactualizada — solo lectura. Actualiza para operar.', 'err'); } catch(e){}
+}
+window._enterReadOnlyMode = _enterReadOnlyMode;
+
 async function _fetchDeployInfo(){
   const url = location.pathname + '?_fp=' + Date.now();  // cache-bust del request
   const ctrl = new AbortController();
@@ -4573,6 +4607,11 @@ async function _checkForNewDeploy(reason){
     // 1) ¿El index desplegado tiene OTRA versión que la que corre? → código viejo cacheado
     if(info.ver && info.ver !== APP_VERSION){
       console.log('[auto-update] desplegado ' + info.ver + ' ≠ corriendo ' + APP_VERSION + ' (' + reason + ')');
+      // Si la desplegada es MÁS NUEVA, candado de solo-lectura YA (por si la recarga
+      // tarda o el navegador la bloquea), y luego recarga.
+      if(_verNum(info.ver) > _verNum(APP_VERSION)){
+        _enterReadOnlyMode(info.ver);
+      }
       _doAutoReload('version ' + info.ver);
       return;
     }
@@ -4940,6 +4979,15 @@ async function fbSignOut(){
 
 // Push current localStorage state to Firebase (snapshot + latest + shared realtime)
 async function fbCloudSync(showToast){
+  // ═══ CANDADO DE VERSIÓN — bloquea TODO push si la pantalla está desactualizada ═══
+  // Garantía dura: un cliente en versión vieja no puede afectar el estado compartido.
+  // Solo puede observar. La excepción es el push del propio reset/limpieza (que corre
+  // antes de detectarse stale) — pero si ya estamos stale, no empujamos nada.
+  if(window.__aspenStale){
+    if(showToast && typeof toast === 'function') toast('🔒 Pantalla desactualizada — actualiza para hacer cambios', 'err');
+    console.warn('[version-lock] push bloqueado — pantalla en solo lectura');
+    return;
+  }
   if(!_fbDb || !_fbUser || !_fbAuthorized){
     if(showToast) toast('Sign in to enable cloud sync', 'err');
     return;
@@ -5124,15 +5172,22 @@ function fbStartRealtimeSync(){
     }
     // Echo guard: ignore writes that came from us
     if(payload.deviceId === _fbDeviceId) return;
-    // Newness guard: ignore if older than our last local write (we have fresher data)
+    // ── CLOUD WINS ON OPEN (v4.16) ──────────────────────────────────────
+    // En el PRIMER evento del listener adoptamos SIEMPRE el estado del cloud,
+    // sin comparar timestamps. Antes, si la copia local parecía "más nueva"
+    // (porque tenía basura vieja con _saved reciente), re-empujaba esa basura y
+    // pisaba el cloud limpio — ese era el otro lado del loop. Ahora, al abrir, el
+    // cloud es la única fuente de verdad y la basura local queda descartada.
+    if(wasInitial){
+      try {
+        const restored = JSON.parse(payload.state);
+        fbApplyRemoteState(restored, payload.timestamp);
+        console.log('[firebase] CLOUD WINS on open — adoptado estado del cloud de', payload.uploadedBy);
+      } catch(e){ console.error('[cloud-wins] apply falló:', e); }
+      return;
+    }
+    // Newness guard (post-initial): ignore if older than our last local write
     if(payload.timestamp <= _fbLastLocalWriteAt){
-      // ── INITIAL FIRE: local is newer than cloud → push local NOW ──
-      // This is the recovery path for mobile sessions where fbAutoPush's
-      // debounce got cancelled by iOS Safari backgrounding the tab.
-      if(wasInitial && _fbLastLocalWriteAt > payload.timestamp){
-        console.log('[firebase] Local state ('+new Date(_fbLastLocalWriteAt).toLocaleString()+') is newer than cloud ('+new Date(payload.timestamp).toLocaleString()+') — pushing local to recover from lost writes');
-        fbCloudSync(false);
-      }
       return;
     }
     // Race-condition guard: if we have unpushed local edits, defer this remote update
@@ -22163,36 +22218,17 @@ document.addEventListener('keydown', e=>{
         }
         return false;
       }
-      // ── LOSS GUARD (system-wide, movement-aware) ──
-      // A spa moving between collections (factory → in-transit → incoming →
-      // units → dispatched) is NOT a loss — it's the normal workflow. We only
-      // raise the banner when the TOTAL number of distinct spa S/Ns across the
-      // whole system drops sharply (a genuine wipe). This stops false alarms
-      // when ensureTinas moves a received tina out of factory.
-      const countSns = (getArr) => {
-        const s = new Set();
-        for(const k of ['factory','units','incoming','dispatched']){
-          const arr = getArr(k) || [];
-          for(const it of arr){ const sn = String(it && it.sn || ''); if(sn) s.add(sn); }
-        }
-        return s.size;
-      };
-      const localTotal = countSns(k => getCollection(k));
-      const incTotal   = countSns(k => Array.isArray(restored[k]) ? restored[k] : []);
-      const losses = [];
-      if(localTotal >= MIN_BASELINE && incTotal < localTotal * (1 - LOSS_THRESHOLD)){
-        losses.push({key:'inventario total (tinas/spas)', local:localTotal, incoming:incTotal});
-      }
-      // Marriages are tracked separately (no S/N), so guard their count on its own.
-      const localMar = getCollection('marriages').length;
-      const incMar = Array.isArray(restored.marriages) ? restored.marriages.length : 0;
-      if(localMar >= MIN_BASELINE && incMar < localMar * (1 - LOSS_THRESHOLD)){
-        losses.push({key:'marriages', local:localMar, incoming:incMar});
-      }
-      if(losses.length === 0){ _initialSyncDone = true; return true; }
-      // Big incoming loss — DON'T mark initial sync done (we're rejecting this pull)
-      showSyncWarningBanner(losses, restored, sourceTimestamp);
-      return false;
+      // ── LOSS GUARD DESACTIVADO 21-may-2026 (v4.16) ──────────────────────
+      // Antes esto bloqueaba aceptar un estado más CHICO (lo trataba como
+      // "pérdida" y mostraba un banner / re-empujaba el estado grande). Ese era
+      // el loop: una compu con basura vieja en memoria se negaba a aceptar el
+      // cloud limpio y volvía a inyectar la basura, una y otra vez.
+      // MODELO NUEVO Y SIMPLE: EL CLOUD MANDA. Aceptamos siempre el estado del
+      // cloud. La red de seguridad son los snapshots/backups (que siguen activos),
+      // no un guard que pelea con el usuario. Mantengo solo el epoch-guard de
+      // arriba (rechaza dispositivos viejos en epoch menor), que no estorba.
+      _initialSyncDone = true;
+      return true;
     };
     console.log('[protection] ✓ safe-pull guard');
   }
@@ -22442,6 +22478,7 @@ document.addEventListener('keydown', e=>{
             <button id="apm-stats" style="background:#374151;color:#fff;border:0;border-radius:9px;padding:12px;font-weight:700;cursor:pointer;font-size:13px;text-align:left">📊 Ver stats de protección<div style="font-size:10.5px;opacity:.9;font-weight:500;margin-top:3px">Cuántos snapshots tienes, última sincronización, etc.</div></button>
             <button id="apm-nuclear" style="background:#dc2626;color:#fff;border:0;border-radius:9px;padding:12px;font-weight:700;cursor:pointer;font-size:13px;text-align:left">🧨 Limpieza total del cloud (definitivo)<div style="font-size:10.5px;opacity:.9;font-weight:500;margin-top:3px">Respalda todo, borra la basura de TODOS los dispositivos, deja solo las 8 tinas. Úsalo una vez.</div></button>
             <button id="apm-reset-empty" style="background:#0f766e;color:#fff;border:0;border-radius:9px;padding:12px;font-weight:700;cursor:pointer;font-size:13px;text-align:left">🧼 Empezar de cero (VACÍO)<div style="font-size:10.5px;opacity:.9;font-weight:500;margin-top:3px">Respalda todo, borra TODOS los dispositivos y deja el warehouse 100% vacío con epoch 4. Solución final — empiezas limpio y nada viejo puede volver.</div></button>
+            <button id="apm-reset-tinas" style="background:#1d4ed8;color:#fff;border:0;border-radius:9px;padding:12px;font-weight:700;cursor:pointer;font-size:13px;text-align:left">🛁 Reset a las 8 tinas (warehouse)<div style="font-size:10.5px;opacity:.9;font-weight:500;margin-top:3px">Respalda todo, borra lo demás y deja EXACTAMENTE las 8 tinas listas en "Arriving to Warehouse". Estado limpio canónico — un clic, siempre igual.</div></button>
             <button id="apm-close" style="background:#f1f5f9;color:#475569;border:0;border-radius:9px;padding:10px;font-weight:700;cursor:pointer;font-size:12.5px;margin-top:3px">Cerrar</button>
           </div>
         </div>`;
@@ -22453,6 +22490,7 @@ document.addEventListener('keydown', e=>{
       document.getElementById('apm-stats').onclick = () => { if(!requireAdmin())return; menu.remove(); showStats(); };
       document.getElementById('apm-nuclear').onclick = () => { if(!requireAdmin())return; menu.remove(); nuclearCloudClean(); };
       { const _re = document.getElementById('apm-reset-empty'); if(_re) _re.onclick = () => { if(!requireAdmin())return; menu.remove(); factoryResetEmpty(); }; }
+      { const _rt = document.getElementById('apm-reset-tinas'); if(_rt) _rt.onclick = () => { if(!requireAdmin())return; menu.remove(); resetA8TinasWarehouse(); }; }
       document.getElementById('apm-close').onclick = () => menu.remove();
       menu.onclick = (e) => { if(e.target === menu) menu.remove(); };
     };
@@ -22589,6 +22627,84 @@ document.addEventListener('keydown', e=>{
     }
   }
   window.empezarDeCero = factoryResetEmpty;
+
+  // ─── RESET A LAS 8 TINAS EN EL WAREHOUSE (v4.16) ─────────────────────
+  // Como "Empezar de cero", pero en vez de dejar vacío, deja EXACTAMENTE las 8
+  // tinas en la cola "Arriving to Warehouse" (listas para colocar/escanear).
+  // Respalda todo primero, borra los nodos de todos los dispositivos y escribe el
+  // estado limpio con epoch 4. Es el estado limpio canónico — un clic, siempre igual.
+  async function resetA8TinasWarehouse(){
+    if(!requireAdmin()) return;
+    if(!_fbDb || !_fbAuthorized){ alert('Firebase no conectado'); return; }
+    if(!confirm('🛁 RESET A LAS 8 TINAS EN EL WAREHOUSE\n\nEsto va a:\n  • Respaldar TODO el estado actual (recuperable)\n  • Borrar la data de TODOS los dispositivos\n  • Dejar EXACTAMENTE las 8 tinas en la cola "Arriving to Warehouse", listas para colocar\n  • Escribir el estado limpio con epoch 4\n\n⚠ Se borra todo lo demás. ¿Continuar?')) return;
+    if(!confirm('Confirmación final: ¿dejar SOLO las 8 tinas en el warehouse y borrar lo demás?\n\nEl respaldo queda en state/_archive_total/.')) return;
+    const now = Date.now(), iso = new Date(now).toISOString(), today = iso.slice(0,10);
+    try {
+      if(typeof toast === 'function') toast('🛁 Cargando las 8 tinas…', 'ok');
+      // 1) Archivar todo el árbol (recuperable)
+      let fullTree = {};
+      try {
+        const snap = await _fbDb.ref('state').once('value');
+        fullTree = snap.val() || {};
+        await _fbDb.ref(`state/_archive_total/${now}`).set({ at: iso, by: 'reset-8-tinas', tree: JSON.stringify(fullTree) });
+      } catch(e){ console.warn('[reset-8] archive falló:', e); }
+      try { if(typeof window.saveLabeledSnapshot === 'function') await window.saveLabeledSnapshot('BACKUP_antes_reset_8tinas_' + now); } catch(e){}
+
+      // 2) Vaciar TODAS las colecciones de inventario
+      for(const coll of ['factory','units','incoming','dispatched','marriages','dispatchRequests','materials']){
+        const a = getCollection(coll); if(Array.isArray(a)) a.length = 0;
+      }
+      if(typeof coverInventory !== 'undefined' && Array.isArray(coverInventory)) coverInventory.length = 0;
+      if(typeof queue !== 'undefined' && Array.isArray(queue)) queue.length = 0;
+      if(typeof events !== 'undefined' && Array.isArray(events)) events.length = 0;
+      if(typeof activity !== 'undefined' && Array.isArray(activity)) activity.length = 0;
+
+      // 3) Cargar las 8 tinas en incoming con status 'arrived' → aparecen en la cola
+      //    "Arriving to Warehouse" listas para colocar (renderQueue las refleja solo).
+      const inc = getCollection('incoming');
+      for(const t of BASELINE_TINAS){
+        const colors = [t.acrylicColor && `Acrylic: ${t.acrylicColor}`, t.cabinetColor && `Cabinet: ${t.cabinetColor}`].filter(Boolean).join(' · ');
+        inc.push({
+          id: ++nid, sn: t.sn, dealer: t.dealer, type:'hot', model: t.model,
+          acrylicColor: t.acrylicColor, cabinetColor: t.cabinetColor, colors,
+          plasticWrap: t.plasticWrap, cover: t.cover ? {...t.cover, addedAt: today} : null,
+          looseAccessories: t.looseAccessories || [], trackingId: t.trackingId,
+          status: 'arrived', needsPlacement: true, arrivedAt: today,
+          notes: 'Tina base (QR original del label físico)',
+          trackingState: 'received-at-warehouse',
+          trackingHistory: [{state:'created-at-factory', at: today+'T08:00:00Z', by:'Admin'},{state:'received-at-warehouse', at: iso, by:'Admin'}]
+        });
+      }
+      try { localStorage.setItem(FRESH_START_FLAG, JSON.stringify({done:true, disabled:true, at:iso, via:'reset-8-tinas'})); } catch(e){}
+      if(typeof flushSave === 'function') flushSave();
+
+      // 4) Push del estado limpio (lleva epoch 4 desde el builder de fbCloudSync)
+      _bypassNextSafePush = true;
+      if(typeof fbCloudSync === 'function') await fbCloudSync(false);
+
+      // 5) Borrar el nodo de TODOS los demás dispositivos
+      const devKeys = Object.keys(fullTree).filter(k => k !== 'shared' && k !== '_archive_total' && k !== _fbDeviceId);
+      let deleted = 0;
+      for(const k of devKeys){ try { await _fbDb.ref(`state/${k}`).remove(); deleted++; } catch(e){ console.warn('[reset-8] no se pudo borrar', k, e); } }
+      try { await _fbDb.ref(`state/${_fbDeviceId}/snapshots`).remove(); } catch(e){}
+
+      // 6) Re-render
+      try { renderQueue && renderQueue(); } catch(e){}
+      try { renderIncoming && renderIncoming(); } catch(e){}
+      try { drawMap && drawMap(); } catch(e){}
+      try { renderFactory && renderFactory(); } catch(e){}
+      try { renderRequests && renderRequests(); } catch(e){}
+      try { renderCoverInventory && renderCoverInventory(); } catch(e){}
+      try { updBadges && updBadges(); } catch(e){}
+
+      alert(`✅ LISTO — 8 TINAS EN EL WAREHOUSE\n\n  • Respaldo: state/_archive_total/${now}\n  • Nodos de dispositivos borrados: ${deleted}\n  • Las 8 tinas están en "Arriving to Warehouse", listas para colocar/escanear\n  • epoch 4\n\nLas demás compus adoptan este estado al abrir. La basura ya no vuelve.`);
+      console.log('%c🛁 [reset-8-tinas] ✓ 8 tinas en warehouse, ' + deleted + ' nodos borrados, epoch 4', 'color:#16a34a;font-weight:bold');
+    } catch(e){
+      console.error('[reset-8-tinas] falló:', e);
+      alert('Error en el reset: ' + e.message + '\n\nTu respaldo (si se hizo) está en state/_archive_total/.');
+    }
+  }
+  window.resetA8TinasWarehouse = resetA8TinasWarehouse;
 
   async function showStats(){
     if(!_fbDb || !_fbAuthorized){ alert('Firebase no conectado'); return; }
