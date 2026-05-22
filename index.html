@@ -17435,11 +17435,14 @@ async function printQRLabel(itemId, source){
       .logo-bar { flex: 0 0 auto; text-align: center; padding: 0 0 4px 0; }
       .logo-bar img { display: block; margin: 0 auto; height: 0.75in; width: auto; max-width: 55%; }
       /* MIDDLE — fields + QR side-by-side. No overflow:hidden so descenders aren't clipped. */
-      .mid { flex: 1 1 auto; display: grid; grid-template-columns: 1fr 1.7in; gap: 16px; padding-top: 2px; align-items: stretch; min-height: 0; }
-      .fields { display: flex; flex-direction: column; gap: 2px; justify-content: space-between; min-height: 0; }
-      .field { font-family: Georgia, 'Times New Roman', serif; }
+      .mid { flex: 1 1 auto; display: grid; grid-template-columns: minmax(0, 1fr) 1.7in; gap: 16px; padding-top: 2px; align-items: stretch; min-height: 0; }
+      /* min-width:0 lets the fields column shrink so a long value never pushes the
+         fixed-width QR column off the page. fitText() (below) then auto-sizes each value
+         to fit; values wrap to a second line only as an extreme last resort — never "…". */
+      .fields { display: flex; flex-direction: column; gap: 2px; justify-content: space-between; min-height: 0; min-width: 0; }
+      .field { font-family: Georgia, 'Times New Roman', serif; min-width: 0; }
       .field-label { font-size: 38px; font-weight: 400; color: #6b4226; letter-spacing: 0.4px; line-height: 1; margin-bottom: 0; }
-      .field-value { font-family: Georgia, serif; font-size: 49px; font-weight: 700; color: #1a1a1a; padding: 2px 6px 6px 6px; border-bottom: 2.5px solid #1a1a1a; min-height: 56px; line-height: 1.05; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: center; }
+      .field-value { font-family: Georgia, serif; font-size: 49px; font-weight: 700; color: #1a1a1a; padding: 2px 6px 6px 6px; border-bottom: 2.5px solid #1a1a1a; min-height: 56px; line-height: 1.05; white-space: normal; overflow: hidden; word-break: break-word; text-align: center; }
       .field-value.empty { color: #cbd5e1; font-weight: 400; font-style: italic; }
       /* QR column — vertically centered */
       .qr-col { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; }
@@ -17465,7 +17468,7 @@ async function printQRLabel(itemId, source){
       .label.compact { min-height: 6.7in; }
       .label.compact .logo-bar img { height: 0.5in; }
       .label.compact .logo-bar { padding: 0 0 1px 0; }
-      .label.compact .mid { grid-template-columns: 1fr 1.2in; gap: 12px; padding-top: 0; }
+      .label.compact .mid { grid-template-columns: minmax(0, 1fr) 1.2in; gap: 12px; padding-top: 0; }
       .label.compact .fields { gap: 2px; justify-content: flex-start; }
       .label.compact .field-label { font-size: 24px; }
       .label.compact .field-value { font-size: 31px; min-height: 38px; line-height: 1.05; padding: 2px 4px 4px 4px; border-bottom: 1.5px solid #1a1a1a; text-align: center; }
@@ -17484,7 +17487,7 @@ async function printQRLabel(itemId, source){
          moderate font sizes and allows text wrapping instead of truncating with "..." */
       .label.accessory .logo-bar img { height: 0.6in; }
       .label.accessory .logo-bar { padding: 0 0 4px 0; }
-      .label.accessory .mid { grid-template-columns: 1fr 1.5in; gap: 14px; padding-top: 4px; }
+      .label.accessory .mid { grid-template-columns: minmax(0, 1fr) 1.5in; gap: 14px; padding-top: 4px; }
       .label.accessory .fields { gap: 6px; justify-content: flex-start; }
       .label.accessory .field-label { font-size: 28px; }
       .label.accessory .field-value { font-size: 34px; line-height: 1.15; min-height: 32px; padding: 0 6px 2px 6px; border-bottom: 2px solid #1a1a1a; white-space: normal; word-break: break-word; overflow: hidden; text-align: center; }
@@ -17493,7 +17496,7 @@ async function printQRLabel(itemId, source){
 
       /* Landscape variant of accessory mode — larger fonts since we have more room */
       .label.landscape.accessory .logo-bar img { height: 0.7in; }
-      .label.landscape.accessory .mid { grid-template-columns: 1fr 2.2in; gap: 22px; }
+      .label.landscape.accessory .mid { grid-template-columns: minmax(0, 1fr) 2.2in; gap: 22px; }
       .label.landscape.accessory .fields { gap: 10px; justify-content: center; }
       .label.landscape.accessory .field-label { font-size: 44px; }
       .label.landscape.accessory .field-value { font-size: 56px; line-height: 1.15; min-height: 50px; padding: 0 8px 2px 8px; border-bottom: 3px solid #1a1a1a; }
@@ -17516,7 +17519,7 @@ async function printQRLabel(itemId, source){
       }
       .label.landscape .logo-bar { padding: 0 0 3px 0; }
       .label.landscape .logo-bar img { height: 0.7in; max-width: 30%; }
-      .label.landscape .mid { grid-template-columns: 1fr 2in; gap: 22px; padding-top: 0; }
+      .label.landscape .mid { grid-template-columns: minmax(0, 1fr) 2in; gap: 22px; padding-top: 0; }
       /* justify-content: center → fields cluster vertically in the middle of mid (Alberto: "más centradas") */
       .label.landscape .fields { gap: 2px; justify-content: center; align-items: stretch; }
       .label.landscape .field-label { font-size: 60px; margin-bottom: 0; line-height: 1; }
@@ -17539,11 +17542,11 @@ async function printQRLabel(itemId, source){
       .label.landscape.compact { min-height: 7.7in; max-height: 7.7in; overflow: hidden; }
       .label.landscape.compact .logo-bar img { height: 0.45in; }
       .label.landscape.compact .logo-bar { padding: 0 0 2px 0; }
-      .label.landscape.compact .mid { grid-template-columns: 1fr 1.5in; gap: 18px; }
+      .label.landscape.compact .mid { grid-template-columns: minmax(0, 1fr) 1.5in; gap: 18px; }
       /* 2-column grid for the fields. align-content:start so rows stack from top. */
       .label.landscape.compact .fields {
         display: grid;
-        grid-template-columns: 1fr 1fr;
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
         column-gap: 22px;
         row-gap: 4px;
         align-content: start;
@@ -17576,8 +17579,56 @@ async function printQRLabel(itemId, source){
       <button class="secondary" onclick="window.close()">Close</button>
     </div>
     <script>
+      // ── AUTO-FIT FIELD VALUES ───────────────────────────────────────────────
+      // Goal (Alberto): show the FULL value (e.g. "Moonstone Grey", "Black Pinnacle (W)")
+      // — NEVER truncate with "…". Strategy:
+      //   1) Measure each value as a single line and shrink the font just enough that it
+      //      fits its cell WITH a safety buffer (so no sliver of overflow remains).
+      //   2) Then allow normal wrapping: values that fit stay on one line; an extreme
+      //      value that won't fit even at the minimum size wraps to a second line —
+      //      still fully visible. There is no ellipsis anywhere, so "…" can never appear.
+      // Runs on load, after a short delay, and again right before printing (beforeprint),
+      // because the print layout can change widths vs the on-screen layout.
+      function fitText(){
+        var vals = document.querySelectorAll('#aspen-label .field-value');
+        for(var i=0; i<vals.length; i++){
+          var el = vals[i];
+          // Reset so re-running starts clean. Measure as a single line (nowrap).
+          el.style.fontSize = '';
+          el.style.whiteSpace = 'nowrap';
+          el.style.wordBreak = 'normal';
+          var cs   = getComputedStyle(el);
+          var base = parseFloat(cs.fontSize) || 32;
+          var padL = parseFloat(cs.paddingLeft)  || 0;
+          var padR = parseFloat(cs.paddingRight) || 0;
+          // Text space available inside the cell (clientWidth includes padding).
+          var avail = el.clientWidth - padL - padR;
+          // Measure the REAL text width with an off-screen span. (A block element's own
+          // scrollWidth never drops below its clientWidth, so it can't tell us how wide
+          // the text actually is — the span can.)
+          var span = document.createElement('span');
+          span.style.cssText = 'position:absolute;left:-99999px;top:0;white-space:nowrap;visibility:hidden;'
+            + 'font-family:' + cs.fontFamily + ';font-weight:' + cs.fontWeight + ';letter-spacing:' + cs.letterSpacing + ';';
+          span.textContent = el.textContent;
+          document.body.appendChild(span);
+          var min = Math.max(15, base * 0.38); // floor keeps it legible
+          var BUF = 6;                          // px of breathing room so nothing clips
+          var size = base, guard = 0;
+          span.style.fontSize = size + 'px';
+          while(span.offsetWidth > (avail - BUF) && size > min && guard < 600){
+            size -= 0.5;
+            span.style.fontSize = size + 'px';
+            guard++;
+          }
+          document.body.removeChild(span);
+          el.style.fontSize = size + 'px';
+          // Restore wrapping. Values that fit stay on one line; an extreme value that
+          // won't fit even at the minimum size wraps to 2 lines — fully readable, never "…".
+          el.style.whiteSpace = 'normal';
+          el.style.wordBreak = 'break-word';
+        }
+      }
       // Print mode switcher — toggles between landscape (default) and portrait.
-      // The label already has 'landscape' class at render, so we just remove/add it here.
       function setMode(mode){
         var pr = document.getElementById('page-rules');
         var lb = document.getElementById('aspen-label');
@@ -17588,10 +17639,14 @@ async function printQRLabel(itemId, source){
           pr.textContent = '@page { size: letter portrait; margin: 0.4in; }';
           lb.classList.remove('landscape');
         }
-        setTimeout(function(){ window.print(); }, 120);
+        // Re-fit after the class change alters available width & font sizes, then print.
+        setTimeout(function(){ fitText(); setTimeout(function(){ window.print(); }, 90); }, 140);
       }
-      // Auto-open print dialog in landscape (which is also the default render orientation)
-      setTimeout(function(){ window.print(); }, 350);
+      // Re-fit right before the print dialog renders (print layout may differ from screen).
+      window.addEventListener('beforeprint', fitText);
+      // Fit on load and again after a short settle delay, then auto-open the print dialog.
+      window.addEventListener('load', function(){ fitText(); requestAnimationFrame(fitText); });
+      setTimeout(function(){ fitText(); setTimeout(function(){ window.print(); }, 90); }, 380);
     <\/script>
     </body></html>`;
   w.document.write(labelHtml);
@@ -19411,14 +19466,14 @@ async function printMarriageLabel(mid){
       }
       .mid {
         display: grid;
-        grid-template-columns: 1fr 1.8in;
+        grid-template-columns: minmax(0, 1fr) 1.8in;
         gap: 22px;
         flex: 1;
         align-items: stretch;
         min-height: 0;
       }
-      .fields { display: flex; flex-direction: column; gap: 6px; }
-      .field { font-family: Georgia, serif; }
+      .fields { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+      .field { font-family: Georgia, serif; min-width: 0; }
       .field-label {
         font-size: 14px;
         color: #6b4226;
