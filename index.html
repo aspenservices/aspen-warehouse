@@ -4447,7 +4447,7 @@ let _fbInitAttempts = 0;
 //   /app_version/current  (in Firebase console, manually, OR call
 //   pushVersionToFirebase() from the Admin console at deploy time)
 // ══════════════════════════════════════════════════════════════════
-const APP_VERSION = 'v4.17';
+const APP_VERSION = 'v4.20';
 window.APP_VERSION = APP_VERSION;
 
 // ── DATA EPOCH (generation guard) ────────────────────────────────────
@@ -6814,7 +6814,11 @@ function renderBottomNav(){
   const fctReady = Array.isArray(factory) ? factory.filter(f => f.trackingState === 'ready-to-ship').length : 0;
   const inTransit = Array.isArray(factory) ? factory.filter(f => f.trackingState === 'in-transit').length : 0;
   const reqOpen = Array.isArray(dispatchRequests) ? dispatchRequests.filter(r => r.status === 'open' || r.status === 'pending').length : 0;
-  const incomingCt = Array.isArray(incoming) ? incoming.length : 0;
+  // Incoming badge = arrived spas still awaiting a floor position (matches the view,
+  // which no longer lists in-transit / queued / married-accessory items).
+  const incomingCt = Array.isArray(incoming)
+    ? incoming.filter(i => i.status === 'arrived' && (i.type === 'hot' || i.type === 'swim' || i.type === 'extra')).length
+    : 0;
   // Badge map per nav target
   const badges = {
     marriages: marPending,
@@ -8255,7 +8259,10 @@ function autoOrganizeUnits(){
         notes: it.notes || ''
       };
       units.push(newU);
+      // Placed → drop from incoming AND the arriving queue mirror so it doesn't
+      // reappear asking for a position.
       incoming = incoming.filter(x => x.id !== it.id);
+      if(typeof queue !== 'undefined' && Array.isArray(queue)) queue = queue.filter(q => q.id !== it.id);
       addAct(`📦 Auto-organize: placed ${newU.sn||newU.dealer} at ${dest.pos}`, 'var(--teal)');
       placed++;
     });
@@ -8266,6 +8273,8 @@ function autoOrganizeUnits(){
     try { saveState?.(); } catch(e){}
     try { drawMap?.(); } catch(e){}
     try { renderIncoming?.(); } catch(e){}
+    try { renderQueue?.(); } catch(e){}
+    try { renderBanner?.(); } catch(e){}
     try { updBadges?.(); } catch(e){}
   }
   return { relocated, placed, skipped };
@@ -8431,10 +8440,13 @@ function updBadges(){
   const p=incoming.filter(i=>i.status==='pending').length;
   const qLen=queue.length;
   const total=p+qLen;
-  document.getElementById('nb-inc').textContent=total||'';
+  // Incoming badge counts arrived spas still awaiting a floor position — the same
+  // set the Incoming view shows. (p / qLen remain available for the notif area.)
+  const needPos=incoming.filter(i=>i.status==='arrived' && (i.type==='hot'||i.type==='swim'||i.type==='extra')).length;
+  document.getElementById('nb-inc').textContent=needPos||'';
   document.getElementById('nb-disp').textContent=dispatched.length||'';
   document.getElementById('nb-mat').textContent=materials.length||'';
-  document.getElementById('nb-inc').className='nb'+(total>0?' amber':'');
+  document.getElementById('nb-inc').className='nb'+(needPos>0?' amber':'');
   // In-Transit badge: count factory items with trackingState 'in-transit'
   const transitCount = factory.filter(f => f.trackingState === 'in-transit').length;
   const nbTra = document.getElementById('nb-tra');
@@ -9211,10 +9223,11 @@ function setupDropExtended(el,pos){
         }
       }
 
-      // Remove from queue, mark linked incoming as stored
+      // Placed on the floor → remove from BOTH the incoming list and the arriving
+      // queue so it stops asking for a position. (Alberto: a drag-drop placement
+      // must clear the item out of Incoming — it now lives on the floor as a unit.)
       if(qi._fromIncoming){
-        const inc = incoming.find(i => i.id === qi.id);
-        if(inc) inc.status = 'stored';
+        incoming = incoming.filter(i => i.id !== qi.id);
       }
       queue=queue.filter(i=>i.id!==qi.id);
       renderQueue();drawMap();updBadges();renderMaterials();renderIncoming();renderBanner();
@@ -11572,12 +11585,18 @@ function addUnit(inIdx){
   if(slot){ newU.stack=slot.stack; newU.level=slot.level; }
   if(alreadyInWh) newU.alreadyInWh = true;
   units.push(newU);
-  if(inIdx>=0)incoming[inIdx].status='stored';
+  // If this unit came from an incoming entry, it's now placed → remove it from
+  // incoming AND the arriving queue so it no longer shows as awaiting a position.
+  if(inIdx>=0 && incoming[inIdx]){
+    const placedId = incoming[inIdx].id;
+    incoming.splice(inIdx, 1);
+    queue = queue.filter(q => q.id !== placedId);
+  }
   const tag = alreadyInWh ? ' (already in WH)' : '';
   addAct(`Unit ${sn||dealer} stored at ${pos}${slot?` (S${slot.stack}-${LEVEL_SHORT(slot.level)})`:''}${tag}`,'var(--accent)');
   toast(`Unit stored at ${pos}${tag}`,'ok');
   document.getElementById('float-panel').innerHTML='';
-  drawMap();updBadges();
+  drawMap();updBadges();renderIncoming();renderQueue();renderBanner();
 }
 
 function openEditUnit(id){
@@ -11808,55 +11827,40 @@ function renderIncoming(){
   const wrap = document.getElementById('inc-cards');
   const summary = document.getElementById('inc-summary');
   if(!wrap) return;
-  // Build virtual incoming entries from factory items currently in-transit TO warehouse.
-  // These spas have left the factory and are physically on the truck; the warehouse should
-  // see them on the Incoming list even though the real `incoming[]` entry is only created
-  // once the spa is scanned at arrival. Marked with status='transit-virtual'.
-  const transitItems = getInTransitToWarehouse();
-  const virtualIncoming = transitItems.map(f => {
-    const transitEvent = (f.trackingHistory||[]).filter(h => h.state === 'in-transit').slice(-1)[0];
-    return {
-      id: 'transit-' + f.id,        // string ID so it doesn't collide with numeric incoming IDs
-      _factoryId: f.id,             // reference back to factory[] for actions
-      _isTransitVirtual: true,
-      sn: f.sn,
-      dealer: f.dealer,
-      type: f.type,
-      // Surface marriage pairing info for married accessory items so they
-      // display with helpful context rather than just "accessory".
-      _marriedSn: f.marriedSn || null,
-      _accessoryName: (f.type === 'accessory' || f.type === 'misc') ? f.dealer : null,
-      date: transitEvent?.at ? transitEvent.at.split('T')[0] : '',
-      status: 'transit-virtual',
-      trackingId: f.trackingId,
-      trackingHistory: f.trackingHistory || [],
-      transitLoadedAt: transitEvent?.at,
-      transitLoadedBy: transitEvent?.by
-    };
-  });
-  // ── NEW: virtual entries for delivered marriages now at MINV ──
-  // Per Alberto's spec: Incoming should surface everything that has arrived
-  // at the warehouse, including married accessories that are waiting at the
-  // marriage shelf (MINV) to be paired with their spa for dispatch.
-  const arrivedMarriages = (Array.isArray(marriages) ? marriages : [])
-    .filter(m => m.status === 'delivered' && m.location === 'MINV')
-    .map(m => ({
-      id: 'mar-' + m.id,
-      _marriageId: m.id,
-      _isMarriageArrived: true,
-      sn: '',
-      dealer: m.accessoryName || 'Accessory',
-      type: 'marriage',
-      _marriedSn: m.spaSn,
-      _accessoryName: m.accessoryName,
-      _accessoryQty: m.accessoryQty || 1,
-      date: (m.deliveredDate || '').split('T')[0] || '',
-      status: 'arrived-marriage',
-      trackingHistory: []
-    }));
-  // Combined list: real incoming entries first, then in-transit virtuals
-  // (spas + accessories + materials), then arrived marriages at MINV.
-  const combined = [...incoming, ...virtualIncoming, ...arrivedMarriages];
+  // ═══════════════════════════════════════════════════════════════════
+  // INCOMING = items PHYSICALLY RECEIVED at the warehouse that still need a
+  // floor position. Per Alberto's flow:
+  //   • Items not yet arrived (still at factory, or in transit on the truck)
+  //     do NOT belong here — they live in the Factory / "In Transit" views.
+  //   • Married accessories are auto-routed to the Marriage Shelf (MINV) on
+  //     receipt, so they never sit in this list waiting for a position.
+  // We therefore show ONLY arrived SPAS (hot/swim/extra). Anything else is
+  // intentionally excluded from this position-assignment queue.
+  // ═══════════════════════════════════════════════════════════════════
+  const SPA_TYPES = new Set(['hot', 'swim', 'extra']);
+  // In-transit truck items are managed in the dedicated "In Transit" view.
+  const virtualIncoming = [];
+  // Delivered marriages live on the Marriage Shelf (MINV) + Marriages view.
+  const arrivedMarriages = [];
+  // Only arrived spas that genuinely need a warehouse cell.
+  const arrivedSpas = incoming.filter(it => it.status === 'arrived' && SPA_TYPES.has(it.type));
+  // Orphan accessories: an arrived accessory/misc still in Incoming that has NO
+  // matching marriage. Normally Check 10 reconciles married accessories to MINV;
+  // anything left here genuinely needs attention (it doesn't know its spa). We
+  // surface it with a clear warning + a one-tap "Send to Marriage Shelf" action
+  // instead of silently hiding it.
+  const _norm = s => String(s == null ? '' : s).trim().toLowerCase();
+  const _hasMarriage = it => {
+    if(it.accessoryId != null && marriages.some(x => x.accessoryId === it.accessoryId)) return true;
+    if(it.marriedSn && marriages.some(x => String(x.spaSn) === String(it.marriedSn))) return true;
+    if(it.dealer && marriages.some(x => _norm(x.accessoryName) === _norm(it.dealer))) return true;
+    return false;
+  };
+  const orphanAccs = incoming
+    .filter(it => it.status === 'arrived' && (it.type === 'accessory' || it.type === 'misc') && !_hasMarriage(it))
+    .map(it => ({ ...it, _isOrphanAcc: true }));
+  // Spas first (need a cell), then orphan accessories (need a marriage).
+  const combined = [...arrivedSpas, ...orphanAccs];
   if(!combined.length){
     wrap.innerHTML = `<div style="padding:34px 14px;text-align:center;color:var(--text3);font-size:13px">No incoming items. <button class="btn btn-sm btn-p" onclick="document.getElementById('inc-add-toggle').click()" style="margin-left:8px">+ Add Manually</button></div>`;
     if(summary) summary.textContent = 'All items arriving to warehouse';
@@ -11874,16 +11878,13 @@ function renderIncoming(){
     if(oa !== ob) return oa - ob;
     return (a.date||'').localeCompare(b.date||'');
   });
-  const arrivedCnt = incoming.filter(x => x.status === 'arrived').length;
-  const queueCnt = incoming.filter(x => x.status !== 'arrived' && x.status !== 'stored').length;
-  const transitCnt = virtualIncoming.length;
-  const marArrCnt = arrivedMarriages.length;
+  // Summary reflects ONLY what is shown: spas physically here awaiting a cell,
+  // plus any orphan accessory that still needs a marriage. Not-yet-arrived items
+  // (factory / in transit) and delivered marriages (MINV) live in their own views.
   if(summary){
     const parts = [];
-    if(arrivedCnt) parts.push(`<span style="color:var(--teal);font-weight:600">${arrivedCnt} arrived · need position</span>`);
-    if(marArrCnt) parts.push(`<span style="color:#831843;font-weight:600">💍 ${marArrCnt} marriage${marArrCnt>1?'s':''} at MINV</span>`);
-    if(transitCnt) parts.push(`<span style="color:#d97706;font-weight:600">🚛 ${transitCnt} in transit</span>`);
-    if(queueCnt) parts.push(`<span style="color:var(--amber)">${queueCnt} expected</span>`);
+    if(arrivedSpas.length) parts.push(`<span style="color:var(--teal);font-weight:600">${arrivedSpas.length} arrived · need position</span>`);
+    if(orphanAccs.length) parts.push(`<span style="color:#b45309;font-weight:600">⚠ ${orphanAccs.length} accessory${orphanAccs.length>1?'ies':''} · no marriage</span>`);
     summary.innerHTML = parts.length ? parts.join(' · ') : 'All items arriving to warehouse';
   }
   wrap.innerHTML = sorted.map(it => {
@@ -11900,19 +11901,24 @@ function renderIncoming(){
       material: 'Material', cover: 'Cover',
       marriage: 'Marriage'
     }[it.type] || (it.type ? it.type.charAt(0).toUpperCase()+it.type.slice(1) : 'Item');
-    const arrived = it.status === 'arrived';
+    const isOrphanAcc = it._isOrphanAcc;
+    const arrived = it.status === 'arrived' && !isOrphanAcc;
     const isTransit = it._isTransitVirtual;
     const isMarArr = it._isMarriageArrived;
     // Card styling: green for arrived spas, pink for arrived marriages, amber for in-transit, white for queue
     const cardStyle = arrived
       ? 'background:#ecfdf5;border-color:#6ee7b7'
-      : isMarArr
-        ? 'background:#fdf2f8;border-color:#f9a8d4'
-        : isTransit
-          ? 'background:#fef3c7;border-color:#fcd34d'
-          : 'background:#fff;border-color:var(--line)';
+      : isOrphanAcc
+        ? 'background:#fffbeb;border-color:#fcd34d'
+        : isMarArr
+          ? 'background:#fdf2f8;border-color:#f9a8d4'
+          : isTransit
+            ? 'background:#fef3c7;border-color:#fcd34d'
+            : 'background:#fff;border-color:var(--line)';
     const statusBadge = arrived
       ? `<span style="background:#10b981;color:#fff;padding:4px 11px;border-radius:11px;font-size:10px;font-weight:700;letter-spacing:.06em;white-space:nowrap">✓ ARRIVED · NEEDS POSITION</span>`
+      : isOrphanAcc
+      ? `<span style="background:#d97706;color:#fff;padding:4px 11px;border-radius:11px;font-size:10px;font-weight:700;letter-spacing:.06em;white-space:nowrap">⚠ ACCESSORY · NEEDS MARRIAGE</span>`
       : isMarArr
         ? `<span style="background:#db2777;color:#fff;padding:4px 11px;border-radius:11px;font-size:10px;font-weight:700;letter-spacing:.06em;white-space:nowrap">💍 AT MINV · READY TO SHIP</span>`
         : isTransit
@@ -11920,7 +11926,13 @@ function renderIncoming(){
           : `<span style="background:#fef3c7;color:#78350f;padding:4px 11px;border-radius:11px;font-size:10px;font-weight:700;letter-spacing:.06em;white-space:nowrap">⏳ IN QUEUE</span>`;
     // Actions vary by status
     let actions;
-    if(arrived){
+    if(isOrphanAcc){
+      // Accessory with no marriage — it doesn't belong on the floor. Let the
+      // manager pair it to a spa and send it to the Marriage Shelf, or remove it.
+      actions = `<button class="btn btn-p" style="padding:13px 20px;font-size:14px;font-weight:700;flex:1 1 200px;min-height:48px;background:#d97706;border-color:#d97706" onclick="sendOrphanAccessoryToMINV(${it.id})">💍 Send to Marriage Shelf</button>
+         <button class="btn tracking-btn" style="padding:13px 14px;min-height:48px" onclick="openTrackingHistory('incoming',${it.id})" title="View tracking history (admin only)">📜</button>
+         <button class="btn btn-r" style="padding:13px 16px;min-height:48px" onclick="rmFromIncoming(${it.id})" title="Remove">✕</button>`;
+    } else if(arrived){
       actions = `<button class="btn btn-p" style="padding:13px 20px;font-size:14px;font-weight:700;flex:1 1 200px;min-height:48px" onclick="openPositionPicker(${it.id})">📍 Assign Position</button>
          <button class="btn" style="padding:13px 14px;min-height:48px;background:#fef2f2;border-color:#fecaca;color:#991b1b" onclick="rejectIncoming(${it.id})" title="Reject — return to factory">✗ Reject</button>
          <button class="btn tracking-btn" style="padding:13px 14px;min-height:48px" onclick="openTrackingHistory('incoming',${it.id})" title="View tracking history (admin only)">📜</button>
@@ -11946,7 +11958,9 @@ function renderIncoming(){
     // Build the descriptor line. Surface marriage pairing for accessory items
     // and marriage entries so the unified list reads clearly at a glance.
     let meta;
-    if(isMarArr){
+    if(isOrphanAcc){
+      meta = `<strong>${it.dealer || 'Accessory'}</strong>${it.qty>1?` × ${it.qty}`:''} · <span style="color:#b45309;font-weight:600">⚠ no spa pairing yet</span> · arrived ${(it.arrivedAt||'').split('T')[0] || it.date || '—'}`;
+    } else if(isMarArr){
       meta = `<strong>${it._accessoryName || 'Accessory'}</strong>${it._accessoryQty>1?` × ${it._accessoryQty}`:''} · <span style="color:#831843;font-weight:600">💍 Paired with S/N ${it._marriedSn || '?'}</span> · delivered ${it.date||'—'}`;
     } else if(isTransit && it._marriedSn){
       meta = `<strong>${it._accessoryName || it.dealer || 'Accessory'}</strong> · ${typeLabel} · <span style="color:#831843;font-weight:600">💍 for S/N ${it._marriedSn}</span> · <span style="color:#92400e;font-weight:600">loaded ${it.transitLoadedAt ? fmtTrackingTime(it.transitLoadedAt) : 'recently'}</span>`;
@@ -12135,6 +12149,37 @@ function openRejectModal({title, subtitle, onConfirm}){
 }
 
 // Remove an incoming entry — also removes its queue twin
+// Resolve an orphan accessory sitting in Incoming (arrived, but with no marriage):
+// pair it to a spa S/N and stage it on the Marriage Shelf (MINV), then drop the
+// stray Incoming entry. Keeps accessories off the floor-position queue.
+function sendOrphanAccessoryToMINV(id){
+  if(!canEdit()){ toast('View-only mode','err'); return; }
+  const it = incoming.find(i => i.id === id);
+  if(!it){ toast('Item not found','err'); return; }
+  const sn = (prompt(`Which spa S/N is "${it.dealer||'this accessory'}" married to?\n\nLeave blank to cancel.`, it.marriedSn || '') || '').trim();
+  if(!sn) return;
+  snapshot('orphan accessory → MINV');
+  const info = (typeof findSpaBySn === 'function') ? findSpaBySn(sn) : null;
+  const loc = (typeof suggestMarriageLocation === 'function') ? suggestMarriageLocation() : 'MINV';
+  marriages.push({
+    id: ++nid,
+    spaSn: sn,
+    spaDealer: info ? info.dealer : (it.dealer || ''),
+    accessoryName: it.dealer || 'Accessory',
+    accessoryQty: it.qty || 1,
+    status: 'delivered',
+    deliveredDate: (it.arrivedAt || '').split('T')[0] || toISO(),
+    created: toISO(),
+    location: loc || 'MINV',
+    notes: 'Reconciled from a stray Incoming accessory'
+  });
+  incoming = incoming.filter(x => x.id !== id);
+  queue = queue.filter(q => q.id !== id);
+  addAct(`💍 Orphan accessory paired: ${it.dealer||'accessory'} → S/N ${sn} · staged at ${loc||'MINV'}`,'var(--teal)');
+  toast(`Paired with S/N ${sn} — at Marriage Shelf`,'ok');
+  renderIncoming(); renderQueue?.(); renderBanner?.(); renderMarriages?.(); if(typeof drawMap==='function') drawMap(); updBadges();
+}
+
 function rmFromIncoming(id){
   if(!canEdit()){ toast('View-only mode','err'); return; }
   if(!confirm('Remove this incoming entry?')) return;
@@ -12974,6 +13019,12 @@ function renderInTransit(){
       <button class="btn tracking-btn" style="padding:9px 14px;font-size:12px" onclick="openTrackingHistory('factory',${item.id})" title="View tracking history">📜</button>
     `;
     const readOnlyBadge = `<span style="display:inline-flex;align-items:center;gap:4px;background:var(--bg3);color:var(--text2);padding:7px 12px;border-radius:7px;font-size:10.5px;font-weight:600;border:1px solid var(--line)">🔒 Read-only · Only Admin can modify</span>`;
+    // Warehouse managers can receive an INBOUND (to-warehouse) item without a scan.
+    // receiveTransitItem() already routes spas → position picker and married
+    // accessories → Marriage Shelf (MINV). Hidden for items returning to factory.
+    const whReceiveBtn = (currentRole === 'warehouse' && !isReturning)
+      ? `<button class="btn btn-p" style="padding:9px 14px;font-size:12px;font-weight:700;background:#16a34a;border-color:#16a34a" onclick="receiveTransitItem(${item.id})" title="Receive at warehouse — spas go to position assignment, married accessories go to the Marriage Shelf (MINV)">📬 Mark Received</button>`
+      : '';
 
     return `<div style="${cardStyle};border:1.5px solid;border-radius:11px;padding:14px 16px;margin:11px 14px;display:flex;flex-direction:column;gap:11px">
       <div style="display:flex;align-items:start;justify-content:space-between;gap:12px;flex-wrap:wrap">
@@ -12995,7 +13046,8 @@ function renderInTransit(){
         </div>
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap" class="intransit-actions">
-        <span class="intransit-readonly">${readOnlyBadge}</span>
+        ${whReceiveBtn}
+        <span class="intransit-readonly">${currentRole === 'warehouse' ? '' : readOnlyBadge}</span>
         <span class="intransit-admin-only" style="display:flex;gap:8px;flex-wrap:wrap">${adminButtons}</span>
       </div>
     </div>`;
@@ -13068,9 +13120,34 @@ function adminForceReceive(factoryId){
   if(currentRole !== 'admin'){ toast('Only Admin can modify items in transit','err'); return; }
   const item = factory.find(f => f.id === factoryId);
   if(!item){ toast('Item not found','err'); return; }
-  if(!confirm(`Force-receive ${item.sn||'this item'} at warehouse?\n\nThis will move it from factory to incoming list as "arrived". A Warehouse Manager will then need to assign a position.`)) return;
+  const isAcc = item.type === 'accessory' || item.type === 'misc';
+  const confirmMsg = (isAcc && item.marriedSn)
+    ? `Force-receive ${item.dealer||'this accessory'} at warehouse?\n\nIt will be placed on the Marriage Shelf (MINV), paired with S/N ${item.marriedSn} — no floor position needed.`
+    : `Force-receive ${item.sn||'this item'} at warehouse?\n\nThis will move it from factory to the Incoming list as "arrived". A Warehouse Manager will then assign a position.`;
+  if(!confirm(confirmMsg)) return;
   snapshot('admin force-receive');
-  // Move from factory[] to incoming[] with status=arrived
+  // ── MARRIED ACCESSORY: route straight to the Marriage Shelf (MINV) ──
+  // Accessories never need a floor cell, so they bypass the Incoming queue.
+  if(isAcc && item.marriedSn){
+    const at = toISO();
+    const m = marriages.find(x =>
+      (x.accessoryId === item.id || String(x.spaSn) === String(item.marriedSn)) &&
+      x.status !== 'delivered' && x.status !== 'completed' && x.status !== 'fulfilled');
+    if(m){
+      m.status = 'delivered';
+      m.deliveredDate = at;
+      if(!m.location) m.location = 'MINV';
+      addAct(`📬 Admin force-received married accessory: ${item.dealer} for S/N ${item.marriedSn} · placed at MINV`,'var(--teal)');
+      toast(`Marriage delivered for S/N ${item.marriedSn} — at MINV`,'ok');
+    } else {
+      addAct(`📬 Admin force-received accessory: ${item.dealer}`,'var(--teal)');
+      toast('Accessory received','ok');
+    }
+    factory.splice(factory.indexOf(item), 1);
+    renderMarriages?.(); renderInTransit(); renderFactory(); renderIncoming(); if(typeof drawMap==='function') drawMap(); updBadges();
+    return;
+  }
+  // Move from factory[] to incoming[] with status=arrived (spa needs a position)
   factory.splice(factory.indexOf(item), 1);
   const incomingId = ++nid;
   incoming.push({
@@ -21630,6 +21707,71 @@ function runIntegrityChecks(){
     const dropped = before - marriages.length;
     if(dropped > 0) findings.push(`Dropped ${dropped} marriage record(s) with no spa S/N (truly orphaned)`);
   } catch(e){ console.warn('[check 9]', e); }
+
+  // ─── Check 10: Stranded married accessories sitting in the Incoming queue ───
+  // Married accessories must NEVER linger in Incoming waiting for a floor position —
+  // on receipt they belong on the Marriage Shelf (MINV). If a loose accessory/misc
+  // entry is found in incoming[], reconcile it with its marriage (mark delivered + at
+  // MINV) and drop the stray entry so it stops showing up as a spa awaiting a cell.
+  // This also de-duplicates the case where the same physical item was tracked BOTH as
+  // an incoming accessory AND as a marriage.
+  try {
+    let reconciled = 0, orphaned = 0;
+    const norm = s => String(s == null ? '' : s).trim().toLowerCase();
+    // Iterate a copy because we mutate incoming[] / queue[] as we reconcile.
+    incoming.slice().forEach(it => {
+      if(it.type !== 'accessory' && it.type !== 'misc') return;   // spas keep their position flow
+      // Find the marriage this accessory belongs to (id → married S/N + name → name).
+      let m = null;
+      if(it.accessoryId != null) m = marriages.find(x => x.accessoryId === it.accessoryId);
+      if(!m && it.marriedSn){
+        m = marriages.find(x => String(x.spaSn) === String(it.marriedSn) && (
+              !it.dealer ||
+              norm(x.accessoryName) === norm(it.dealer) ||
+              norm(x.accessoryName).includes(norm(it.dealer)) ||
+              norm(it.dealer).includes(norm(x.accessoryName))));
+      }
+      if(!m && it.dealer) m = marriages.find(x => norm(x.accessoryName) === norm(it.dealer));
+      if(m){
+        if(m.status !== 'delivered' && m.status !== 'completed' && m.status !== 'fulfilled'){
+          m.status = 'delivered';
+          m.deliveredDate = m.deliveredDate || ((it.arrivedAt || '').split('T')[0] || toISO());
+        }
+        if(!m.location) m.location = 'MINV';
+        incoming = incoming.filter(x => x.id !== it.id);
+        if(typeof queue !== 'undefined' && Array.isArray(queue)) queue = queue.filter(q => q.id !== it.id);
+        reconciled++;
+      } else {
+        orphaned++;
+      }
+    });
+    if(reconciled > 0) findings.push(`Moved ${reconciled} married accessory item(s) out of Incoming → Marriage Shelf (MINV)`);
+    if(orphaned > 0) findings.push(`⚠ ${orphaned} loose accessory entry(ies) in Incoming have no matching marriage (left in place for review)`);
+  } catch(e){ console.warn('[check 10]', e); }
+
+  // ─── Check 11: Incoming entries for spas already placed on the floor ───
+  // When a spa is placed on the floor (drag-drop, Add Unit, or position picker),
+  // its incoming entry should be removed. Older builds left it behind with
+  // status='stored', so the same S/N showed BOTH on the floor map AND in Incoming
+  // still asking for a position. Drop any incoming entry whose S/N already exists
+  // as a placed unit, and clear its arriving-queue mirror too.
+  try {
+    const placedSns = new Set(units.map(u => String(u.sn || '')).filter(s => s));
+    if(placedSns.size){
+      const before = incoming.length;
+      const removedIds = [];
+      incoming = incoming.filter(it => {
+        if(it.sn && placedSns.has(String(it.sn))){ removedIds.push(it.id); return false; }
+        return true;
+      });
+      if(removedIds.length && typeof queue !== 'undefined' && Array.isArray(queue)){
+        const rm = new Set(removedIds);
+        queue = queue.filter(q => !rm.has(q.id));
+      }
+      const dropped = before - incoming.length;
+      if(dropped > 0) findings.push(`Removed ${dropped} Incoming entry(ies) for spa(s) already placed on the floor (de-duplicated)`);
+    }
+  } catch(e){ console.warn('[check 11]', e); }
 
   return findings;
 }
