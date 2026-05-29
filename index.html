@@ -4015,6 +4015,7 @@ body.dark-mode .mar-card-track {
       <span class="qf-chip active" data-filter="all" onclick="setDispFilter(this,'all')">All <span class="qf-chip-count" id="disp-count-all">0</span></span>
       <span class="qf-chip" data-filter="picked-up" onclick="setDispFilter(this,'picked-up')">🚚 Picked Up <span class="qf-chip-count" id="disp-count-pickedup">0</span></span>
       <span class="qf-chip" data-filter="delivered" onclick="setDispFilter(this,'delivered')">✓ Delivered <span class="qf-chip-count" id="disp-count-delivered">0</span></span>
+      <span class="qf-chip" data-filter="returned" onclick="setDispFilter(this,'returned')">↩ Returned <span class="qf-chip-count" id="disp-count-returned">0</span></span>
       <span class="qf-chip" data-filter="week" onclick="setDispFilter(this,'week')">📅 This Week <span class="qf-chip-count" id="disp-count-week">0</span></span>
       <span class="qf-chip" data-filter="month" onclick="setDispFilter(this,'month')">📅 This Month <span class="qf-chip-count" id="disp-count-month">0</span></span>
     </div>
@@ -4358,6 +4359,13 @@ let _fbLastSyncedAt = 0;
 // ── REALTIME SYNC additions ───────────────────────────────────────────────
 let _fbSharedRef = null;            // .ref('state/shared/latest') listener
 let _fbConnectedRef = null;         // .ref('.info/connected') listener
+let _fbOffsetRef = null;            // .ref('.info/serverTimeOffset') listener
+let _fbServerTimeOffset = 0;        // ms offset (Firebase server clock − this device's clock)
+// Server-consistent "now": every device compares sync timestamps against the SAME
+// clock (the Firebase server's estimate), so local clock skew can't make one device
+// systematically ignore another's updates. Falls back to local time until the offset
+// resolves from .info/serverTimeOffset.
+function fbServerNow(){ return Date.now() + (_fbServerTimeOffset || 0); }
 let _fbWasConnected = false;        // last known WebSocket connection state
 let _fbLastLocalWriteAt = 0;        // ms timestamp of our last successful push (echo guard)
 let _fbAutoPushTimer = null;        // debounce for fbAutoPush
@@ -4447,7 +4455,7 @@ let _fbInitAttempts = 0;
 //   /app_version/current  (in Firebase console, manually, OR call
 //   pushVersionToFirebase() from the Admin console at deploy time)
 // ══════════════════════════════════════════════════════════════════
-const APP_VERSION = 'v4.20';
+const APP_VERSION = 'v4.26';
 window.APP_VERSION = APP_VERSION;
 
 // ── DATA EPOCH (generation guard) ────────────────────────────────────
@@ -4691,8 +4699,8 @@ async function showSyncDiagnostic(){
 
   // ── SECTION 3: Sync timestamps ──
   html += '<div style="font-weight:800;color:#0891b2;margin:14px 0 6px;font-size:13px">⏱ Sync Timing</div>';
-  const localAge = _fbLastLocalWriteAt ? Math.round((Date.now()-_fbLastLocalWriteAt)/1000) : null;
-  const syncAge = _fbLastSyncedAt ? Math.round((Date.now()-_fbLastSyncedAt)/1000) : null;
+  const localAge = _fbLastLocalWriteAt ? Math.round((fbServerNow()-_fbLastLocalWriteAt)/1000) : null;
+  const syncAge = _fbLastSyncedAt ? Math.round((fbServerNow()-_fbLastSyncedAt)/1000) : null;
   html += row('Last local write', _fbLastLocalWriteAt ? new Date(_fbLastLocalWriteAt).toLocaleString() + ' (' + localAge + 's ago)' : 'never');
   html += row('Last cloud push', _fbLastSyncedAt ? new Date(_fbLastSyncedAt).toLocaleString() + ' (' + syncAge + 's ago)' : 'never');
   html += row('Local edit counter', _fbLocalEditCounter);
@@ -5007,7 +5015,7 @@ async function fbCloudSync(showToast){
   }
   try {
     const state = {nid, units, dispatched, incoming, materials, events, activity, queue, cfg, factory, marriages, dispatchRequests, coverInventory, colorLibrary, coverModelMapping, _epoch: (window.ASPEN_DATA_EPOCH || 1)};
-    const ts = Date.now();
+    const ts = fbServerNow();   // server-consistent clock (immune to local skew)
     // For anonymous users, _fbUser.email is null. Use the current user pill
     // name (from in-app Welcome screen) + deviceId for traceable diagnostics.
     // Fall back to a stable "anon-{deviceId}" identifier if no Welcome user picked.
@@ -5229,6 +5237,18 @@ function fbStartRealtimeSync(){
   //   2. Detect when we reconnect after being offline → force-pull missed updates
   // Without this monitor, the badge can show "✓ Synced" forever even if the
   // socket died 10 minutes ago and nothing has actually synced.
+  // ── SERVER TIME OFFSET ── track (serverClock − localClock) so fbServerNow()
+  // yields a clock all devices agree on, immune to local clock skew.
+  if(!_fbOffsetRef){
+    _fbOffsetRef = _fbDb.ref('.info/serverTimeOffset');
+    _fbOffsetRef.on('value', snap => {
+      const off = snap.val();
+      if(typeof off === 'number' && isFinite(off)){
+        _fbServerTimeOffset = off;
+        console.log('[firebase] server time offset ≈', Math.round(off), 'ms');
+      }
+    });
+  }
   if(!_fbConnectedRef){
     _fbConnectedRef = _fbDb.ref('.info/connected');
     _fbConnectedRef.on('value', snap => {
@@ -5269,6 +5289,10 @@ function fbStopRealtimeSync(){
     try { _fbConnectedRef.off('value'); } catch(e){}
     _fbConnectedRef = null;
   }
+  if(_fbOffsetRef){
+    try { _fbOffsetRef.off('value'); } catch(e){}
+    _fbOffsetRef = null;
+  }
   _stopSyncWatchdog();
 }
 
@@ -5308,7 +5332,7 @@ function _syncWatchdog(){
   // If we have local edits that haven't been pushed and the last write was >3s ago,
   // the debounce probably got killed. Force-push now.
   if(_fbLocalEditCounter > _fbPushedEditCounter && _fbLastLocalWriteAt){
-    const age = Date.now() - _fbLastLocalWriteAt;
+    const age = fbServerNow() - _fbLastLocalWriteAt;   // both server-time
     if(age > 3000){
       console.log('[watchdog] stale pending push ('+(_fbLocalEditCounter-_fbPushedEditCounter)+' edits, '+Math.round(age/1000)+'s old) → force-pushing');
       try { fbForcePush(); } catch(e){ console.warn('[watchdog push]', e); }
@@ -5458,27 +5482,12 @@ function fbApplyRemoteState(restored, sourceTimestamp){
     if(restored.colorLibrary && typeof restored.colorLibrary === 'object') colorLibrary = restored.colorLibrary;
     if(restored.coverModelMapping && typeof restored.coverModelMapping === 'object') coverModelMapping = restored.coverModelMapping;
     if(restored.cfg && typeof restored.cfg === 'object') cfg = mergeCfgPreservingPins(cfg, restored.cfg);
-    // ── PERSIST DIRECTLY (no saveState, no autopush) ──
-    // CRITICAL: We MUST NOT route through saveState() here. saveState's debounced
-    // setTimeout would fire AFTER _fbApplyingRemote was reset, triggering fbAutoPush
-    // and creating a permanent ping-pong loop between devices wasting Firebase
-    // quota and preventing the sync badge from ever showing "✓ Synced".
-    try {
-      const ts = sourceTimestamp || Date.now();
-      const state = {nid, units, dispatched, incoming, materials, events, activity, queue, cfg, factory, marriages, dispatchRequests, coverInventory, colorLibrary, coverModelMapping, _saved: ts};
-      localStorage.setItem(LS_KEY, JSON.stringify(state));
-      _lastSavedHash = stateHash();  // integrity watchdog baseline
-      _lastSavedSig = _stateSig();    // sig baseline — prevents saveState from echo-pushing this state back to cloud
-      _fbLastLocalWriteAt = ts;       // newness guard baseline (survives reload via loadState)
-    } catch(e){
-      console.warn('[remote apply] direct localStorage write failed:', e.message);
-    }
-    // ── RUN INTEGRITY CHECKS AFTER CLOUD MERGE ──
+    // ── RUN INTEGRITY CHECKS BEFORE PERSISTING (fix: repairs must hit disk) ──
     // If the cloud state had inconsistencies (e.g. a marriage stuck on pending
-    // while its accessory was already in-transit), boot-time fixes wouldn't
-    // help — they ran before this snapshot arrived. Re-run them every time we
-    // accept a remote update so cloud-borne inconsistencies get repaired too.
-    // The function is idempotent — running it on already-clean data is a no-op.
+    // while its accessory was already in-transit), repair them now — BEFORE the
+    // localStorage write — so the repaired state is what gets persisted. (Running
+    // checks after the write meant repairs lived only in memory until the next
+    // boot re-ran them.) The function is idempotent, so re-running is safe.
     try {
       if(typeof runIntegrityChecks === 'function'){
         const findings = runIntegrityChecks();
@@ -5487,6 +5496,19 @@ function fbApplyRemoteState(restored, sourceTimestamp){
         }
       }
     } catch(e){ console.warn('[remote apply] integrity check failed:', e); }
+    // ── PERSIST DIRECTLY (no saveState, no autopush) ──
+    // CRITICAL: must NOT route through saveState() — its debounced setTimeout would
+    // fire after _fbApplyingRemote resets, triggering fbAutoPush and a ping-pong loop.
+    try {
+      const ts = sourceTimestamp || fbServerNow();
+      const state = {nid, units, dispatched, incoming, materials, events, activity, queue, cfg, factory, marriages, dispatchRequests, coverInventory, colorLibrary, coverModelMapping, _saved: ts};
+      localStorage.setItem(LS_KEY, JSON.stringify(state));
+      _lastSavedHash = stateHash();  // integrity watchdog baseline (reflects repaired state)
+      _lastSavedSig = _stateSig();    // sig baseline — prevents saveState from echo-pushing this state back to cloud
+      _fbLastLocalWriteAt = ts;       // newness guard baseline (survives reload via loadState)
+    } catch(e){
+      console.warn('[remote apply] direct localStorage write failed:', e.message);
+    }
     // ── RERENDER WITHIN the flag-protected block ──
     // Render functions (updBadges, drawMap, renderFactory, etc.) call saveState
     // as a safety net. With _fbApplyingRemote=true, saveState early-returns —
@@ -5712,7 +5734,7 @@ function updateAuthBadge(){
   // Pre-connection (before _fbConnectedRef listener fires for the first time)
   // _fbWasConnected is false; in that case fall back to "connecting" too.
   const lastSync = _fbLastSyncedAt ? new Date(_fbLastSyncedAt).toLocaleTimeString() : 'pending';
-  const lastSyncAgo = _fbLastSyncedAt ? Math.round((Date.now() - _fbLastSyncedAt) / 1000) : null;
+  const lastSyncAgo = _fbLastSyncedAt ? Math.round((fbServerNow() - _fbLastSyncedAt) / 1000) : null;
   const ageStr = lastSyncAgo == null ? 'pending' : (lastSyncAgo < 60 ? lastSyncAgo+'s ago' : Math.round(lastSyncAgo/60)+'m ago');
   // Detect problems the watchdog is working on
   const pending = _fbLocalEditCounter - _fbPushedEditCounter;
@@ -7608,10 +7630,11 @@ function findSpaBySn(sn){
   const inFac = factory.find(f => f.sn === s && f.type !== 'accessory');
   if(inFac) return {dealer:inFac.dealer, location:'At Factory', type:inFac.type, source:'factory'};
   // 3) Incoming (in transit)
-  const inInc = incoming.find(i => i.sn === s && i.status === 'pending');
-  if(inInc) return {dealer:inInc.dealer, location:'Incoming (in transit)', type:inInc.type, source:'incoming'};
-  // 4) Already dispatched (so we know who it went to)
-  const inDsp = dispatched.find(d => d.sn === s);
+  const inInc = incoming.find(i => i.sn === s && (i.status === 'pending' || i.status === 'arrived'));
+  if(inInc) return {dealer:inInc.dealer, location: inInc.status === 'arrived' ? 'At warehouse · needs position' : 'Incoming (in transit)', type:inInc.type, source:'incoming'};
+  // 4) Already dispatched (so we know who it went to). Skip returned records — the
+  //    unit came back and now lives in units/factory/incoming, found above.
+  const inDsp = dispatched.find(d => d.sn === s && d.deliveryStatus !== 'returned');
   if(inDsp) return {dealer:inDsp.dealer, location:'Already dispatched', type:inDsp.type, source:'dispatched'};
   return null;
 }
@@ -7775,8 +7798,9 @@ function findMissingDispatches(){
     // Try to find the S/N — title typically "Dispatch: 30700" or has rec.sn embedded
     const sn = e.sn || (e.title||'').match(/\b\d{5,6}\b/)?.[0];
     if(!sn) return;
-    // Skip if already dispatched — spa already left, not "missing"
-    if(dispatched.some(d => d.sn === sn)) return;
+    // Skip if already dispatched — spa already left, not "missing".
+    // A returned unit is back in inventory, so it does NOT count as dispatched here.
+    if(dispatched.some(d => d.sn === sn && d.deliveryStatus !== 'returned')) return;
     const inWh = units.some(u => u.sn === sn);
     if(!inWh){
       const daysOut = Math.max(0, Math.floor((ed - today)/86400000));
@@ -8570,6 +8594,7 @@ function renderActionItems(){
   // 6) Dispatches awaiting delivery confirmation (>3 days old, not yet confirmed)
   const unconfirmedDelivery = dispatched.filter(d => {
     if(d.deliveryStatus === 'delivered-to-dealer') return false;
+    if(d.deliveryStatus === 'returned') return false;   // came back — not awaiting confirmation
     return days(d.dispatchDate) > 3;
   });
   if(unconfirmedDelivery.length){
@@ -9368,7 +9393,7 @@ function drawMap(){
       // Render as a marriage shelf cell at this position.
       const cell = el('div','');
       const items = (typeof marriages !== 'undefined' && Array.isArray(marriages))
-        ? marriages.filter(m => m.location === pos && m.status !== 'fulfilled' && m.status !== 'cancelled' && m.status !== 'completed')
+        ? marriages.filter(m => m.location === pos && m.status === 'delivered')
         : [];
       cell.style.cssText = 'background:linear-gradient(135deg,#fdf2f8,#fce7f3);border:1.5px solid #db2777;border-radius:6px;min-height:84px;cursor:pointer;display:flex;flex-direction:column;padding:5px 6px;position:relative;overflow:hidden';
       cell.dataset.pos = pos;
@@ -9784,7 +9809,7 @@ function drawMap(){
     if(rk === '13'){
       const pos = 'MINV';
       const items = (typeof marriages !== 'undefined' && Array.isArray(marriages))
-        ? marriages.filter(m => m.location === pos && m.status !== 'fulfilled' && m.status !== 'cancelled' && m.status !== 'completed')
+        ? marriages.filter(m => m.location === pos && m.status === 'delivered')
         : [];
       const cell = el('div','');
       cell.style.cssText = 'grid-column:span 2;background:linear-gradient(135deg,#fdf2f8,#fce7f3);border:1.5px solid #db2777;border-radius:8px;min-height:74px;cursor:pointer;display:flex;flex-direction:column;padding:8px 12px;position:relative;overflow:hidden';
@@ -9905,10 +9930,10 @@ function openMarriageInventoryPanel(pos){
   // etc.) can re-render in place after mutating a marriage.
   panel.dataset.minvPos = pos;
   const stored = marriages.filter(m =>
-    m.location === pos && m.status !== 'fulfilled' && m.status !== 'cancelled' && m.status !== 'completed'
+    m.location === pos && m.status === 'delivered'
   );
   const unstored = marriages.filter(m =>
-    !m.location && (m.status === 'pending' || m.status === 'in_progress')
+    !m.location && (m.status === 'pending' || m.status === 'in_progress') && m.mountType !== 'inside'
   );
   panel.innerHTML = `
     <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:14px;gap:12px;flex-wrap:wrap">
@@ -10055,6 +10080,77 @@ function suggestMarriageLocation(){
   return counts[0].pos;
 }
 window.suggestMarriageLocation = suggestMarriageLocation;
+
+// ═══════════════════════════════════════════════════════════════════
+// MARRIAGE PLACEMENT HELPERS (v4.21)
+// ───────────────────────────────────────────────────────────────────
+// A marriage accessory can be placed two ways:
+//   • mountType 'shelf'  — ships SEPARATELY to the warehouse, stages on the
+//                          MINV shelf, marries a tina in WH / transit / factory.
+//   • mountType 'inside' — packed INSIDE the tina; travels inside the spa and
+//                          NEVER occupies the MINV shelf (it lives in the tina).
+// ═══════════════════════════════════════════════════════════════════
+
+// Find the actual mutable spa record for a S/N across factory / incoming / units.
+// (findSpaBySn only returns dealer/location info — this returns the object so we
+// can mutate its looseAccessories.) Returns { record, where } or null.
+function findSpaRecordBySn(sn){
+  if(!sn) return null;
+  const s = String(sn).trim();
+  if(!s) return null;
+  let r = factory.find(f => String(f.sn) === s && f.type !== 'accessory' && f.type !== 'misc');
+  if(r) return { record: r, where: 'factory' };
+  r = incoming.find(i => String(i.sn) === s);
+  if(r) return { record: r, where: 'incoming' };
+  r = units.find(u => String(u.sn) === s);
+  if(r) return { record: r, where: 'units' };
+  return null;
+}
+window.findSpaRecordBySn = findSpaRecordBySn;
+
+// Push an accessory into a spa record's looseAccessories (deduped, qty-aware).
+function attachInsideAccessory(record, accessoryName, qty){
+  if(!record || !accessoryName) return false;
+  if(!Array.isArray(record.looseAccessories)) record.looseAccessories = [];
+  const label = (qty && qty > 1) ? `${accessoryName} × ${qty}` : accessoryName;
+  const norm = s => String(s == null ? '' : s).trim().toLowerCase();
+  if(record.looseAccessories.some(a => norm(a) === norm(label) || norm(a) === norm(accessoryName))) return false;
+  record.looseAccessories.push(label);
+  return true;
+}
+window.attachInsideAccessory = attachInsideAccessory;
+
+// When a spa S/N first appears (factory creates the tina), reconcile any marriages
+// that were waiting for that tina to exist — each by its own rule:
+//   • inside-type → pack the accessory inside the new tina (looseAccessories) and
+//                   mark it delivered (it now travels inside the spa).
+//   • shelf-type  → just resolve the dealer + log; it still ships separately.
+function autoMarryOnSpaCreate(sn, spaRecord){
+  if(!sn) return 0;
+  const s = String(sn).trim();
+  if(!s) return 0;
+  let n = 0;
+  marriages.forEach(m => {
+    if(String(m.spaSn) !== s) return;
+    if(m.status === 'completed' || m.status === 'fulfilled' || m.status === 'cancelled') return;
+    if(spaRecord && !m.spaDealer && spaRecord.dealer) m.spaDealer = spaRecord.dealer;
+    if(m.mountType === 'inside'){
+      if(spaRecord && attachInsideAccessory(spaRecord, m.accessoryName, m.accessoryQty)){
+        m.location = null;            // never on the MINV shelf — it's inside the tina
+        m.status = 'delivered';       // handled: it travels inside the spa from here
+        m.deliveredDate = m.deliveredDate || toISO();
+        addAct(`🛁 Auto-married (inside): ${m.accessoryName} packed inside new tina ${s}`, 'var(--teal)');
+        n++;
+      }
+    } else {
+      // Shelf-type: the link is now resolvable; accessory still ships separately.
+      addAct(`🔗 Auto-linked marriage: ${m.accessoryName} → new tina ${s} (ships separately to shelf)`, 'var(--teal)');
+      n++;
+    }
+  });
+  return n;
+}
+window.autoMarryOnSpaCreate = autoMarryOnSpaCreate;
 
 // ═══════════════════════════════════════════════════════════════════
 // ROW MANAGER — edit existing rows + add new rows + lock rows
@@ -11460,6 +11556,7 @@ function confirmDispatch(id){
     }
   });
   closePanel();drawMap();updBadges();
+  try { flushSave(); } catch(e){}   // critical op — persist immediately, don't wait for debounce
   toast(`Unit ${u.sn||u.dealer} dispatched`,'ok');
   renderDispatched();
   // Sequence the side-effects so browsers don't block the second popup
@@ -11915,8 +12012,11 @@ function renderIncoming(){
           : isTransit
             ? 'background:#fef3c7;border-color:#fcd34d'
             : 'background:#fff;border-color:var(--line)';
+    const returnPill = it.isReturn
+      ? `<span style="background:#ea580c;color:#fff;padding:4px 9px;border-radius:11px;font-size:10px;font-weight:700;letter-spacing:.06em;white-space:nowrap;margin-right:5px" title="${escapeHTML(it.returnReason||'Returned unit')}">↩ RETURN</span>`
+      : '';
     const statusBadge = arrived
-      ? `<span style="background:#10b981;color:#fff;padding:4px 11px;border-radius:11px;font-size:10px;font-weight:700;letter-spacing:.06em;white-space:nowrap">✓ ARRIVED · NEEDS POSITION</span>`
+      ? `${returnPill}<span style="background:#10b981;color:#fff;padding:4px 11px;border-radius:11px;font-size:10px;font-weight:700;letter-spacing:.06em;white-space:nowrap">✓ ARRIVED · NEEDS POSITION</span>`
       : isOrphanAcc
       ? `<span style="background:#d97706;color:#fff;padding:4px 11px;border-radius:11px;font-size:10px;font-weight:700;letter-spacing:.06em;white-space:nowrap">⚠ ACCESSORY · NEEDS MARRIAGE</span>`
       : isMarArr
@@ -12644,6 +12744,8 @@ const TRACKING_STATES = {
   'received-at-warehouse':    { label:'Received at Warehouse',     icon:'📬', color:'#10b981' },
   'placed-in-warehouse':      { label:'Placed in Warehouse',       icon:'📍', color:'#059669' },
   'received-back-at-factory': { label:'Returned to Factory',       icon:'↩', color:'#7c2d12' },
+  'returned-to-warehouse':    { label:'Returned to Warehouse',     icon:'↩', color:'#ea580c' },
+  'dispatched-from-factory':  { label:'Dealer Pickup at Factory',  icon:'🤝', color:'#7c3aed' },
   'dispatched-out':           { label:'Dispatched Out',            icon:'🚛', color:'#7c3aed' },
 };
 
@@ -13823,6 +13925,142 @@ function setDispFilter(chipEl, filter){
   renderDispatched();
 }
 
+// ═══════════════════════════════════════════════════════════════════
+// RETURNS (v4.22) — a dispatched spa can come back. It's received either at the
+// WAREHOUSE (→ Incoming as arrived, assign a position) or at the FACTORY (→ factory
+// inventory, awaiting re-ship or re-dispatch). Always carries a reason note, and the
+// original dispatch record is kept (marked 'returned') for the audit trail.
+// ═══════════════════════════════════════════════════════════════════
+const RETURN_REASONS = [
+  {code:'damaged-transit',  label:'🩹 Damaged in transit / on arrival'},
+  {code:'wrong-unit',       label:'❌ Wrong unit / wrong dealer'},
+  {code:'dealer-refused',   label:'🙅 Dealer refused / order cancelled'},
+  {code:'warranty-repair',  label:'🔧 Warranty / repair return'},
+  {code:'quality-issue',    label:'⚠ Quality issue found'},
+  {code:'other',            label:'📝 Other (explain in notes)'},
+];
+
+function openReturnUnit(recId, sn){
+  if(!canEdit()){ toast('View-only mode','err'); return; }
+  const rec = dispatched.find(d => d.id === recId) || dispatched.find(d => d.sn === sn);
+  if(!rec){ toast('Dispatch record not found','err'); return; }
+  let overlay = document.getElementById('return-unit-overlay');
+  if(overlay) overlay.remove();
+  overlay = document.createElement('div');
+  overlay.id = 'return-unit-overlay';
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(15,23,42,.65);z-index:9999;display:flex;align-items:center;justify-content:center;padding:18px;backdrop-filter:blur(3px);overflow-y:auto';
+  overlay.addEventListener('click', e => { if(e.target === overlay) overlay.remove(); });
+  const panel = document.createElement('div');
+  panel.style.cssText = 'background:#fff;border-radius:14px;width:100%;max-width:500px;max-height:92vh;overflow-y:auto;box-shadow:0 24px 48px -12px rgba(0,0,0,.4)';
+  panel.innerHTML = `
+    <div style="padding:18px 22px;border-bottom:1px solid var(--line);background:linear-gradient(135deg,#ea580c,#9a3412);color:#fff;border-radius:14px 14px 0 0">
+      <div style="font-size:10.5px;font-weight:700;letter-spacing:.1em;opacity:.85;text-transform:uppercase">Return Unit</div>
+      <div style="font-size:18px;font-weight:800;margin-top:4px">S/N ${rec.sn||'—'} ↩ from ${rec.dealer||'—'}</div>
+      <div style="font-size:11.5px;opacity:.9;margin-top:5px">The unit is coming back. Pick where it's received and why.</div>
+    </div>
+    <div style="padding:18px 22px">
+      <div style="font-size:11px;font-weight:700;color:var(--text2);letter-spacing:.05em;text-transform:uppercase;margin-bottom:8px">Receive it at</div>
+      <div style="display:flex;gap:8px;margin-bottom:14px">
+        <label style="flex:1;display:flex;align-items:center;gap:8px;padding:11px 13px;border:1.5px solid var(--line);border-radius:9px;cursor:pointer;font-size:13px;font-weight:600">
+          <input type="radio" name="ru-dest" value="warehouse" checked style="width:16px;height:16px;cursor:pointer"> 🏭 Warehouse
+        </label>
+        <label style="flex:1;display:flex;align-items:center;gap:8px;padding:11px 13px;border:1.5px solid var(--line);border-radius:9px;cursor:pointer;font-size:13px;font-weight:600">
+          <input type="radio" name="ru-dest" value="factory" style="width:16px;height:16px;cursor:pointer"> 🚚 Factory
+        </label>
+      </div>
+      <div style="font-size:10.5px;color:var(--text3);margin:-8px 0 14px;line-height:1.4">
+        <strong>Warehouse:</strong> goes to Incoming as arrived — you then assign it a floor position.<br>
+        <strong>Factory:</strong> goes back to factory inventory, awaiting re-ship to warehouse or re-dispatch.
+      </div>
+      <div style="font-size:11px;font-weight:700;color:var(--text2);letter-spacing:.05em;text-transform:uppercase;margin-bottom:8px">Reason (required)</div>
+      <div style="display:flex;flex-direction:column;gap:5px;margin-bottom:13px">
+        ${RETURN_REASONS.map(r => `
+          <label style="display:flex;align-items:center;gap:9px;padding:9px 12px;border:1.5px solid var(--line);border-radius:8px;cursor:pointer;font-size:12.5px">
+            <input type="radio" name="ru-reason" value="${r.code}" data-label="${escapeHTML(r.label)}" style="width:15px;height:15px;cursor:pointer">
+            <span>${r.label}</span>
+          </label>`).join('')}
+      </div>
+      <div style="font-size:11px;font-weight:700;color:var(--text2);letter-spacing:.05em;text-transform:uppercase;margin-bottom:6px">Notes (optional)</div>
+      <textarea id="ru-notes" placeholder="What happened, condition, who reported it..." style="width:100%;min-height:56px;padding:9px 11px;border:1.5px solid var(--line);border-radius:7px;font-size:13px;font-family:inherit;resize:vertical;margin-bottom:14px"></textarea>
+      <div style="display:flex;gap:8px">
+        <button class="btn" style="padding:11px 18px;font-size:13px;font-weight:700;flex:1;background:#ea580c;border-color:#ea580c;color:#fff" onclick="confirmReturnUnit(${rec.id||0}, '${(rec.sn||'').replace(/'/g,'')}')">↩ Confirm Return</button>
+        <button class="btn" onclick="document.getElementById('return-unit-overlay').remove()" style="padding:11px 18px">Cancel</button>
+      </div>
+    </div>`;
+  overlay.appendChild(panel);
+  document.body.appendChild(overlay);
+}
+window.openReturnUnit = openReturnUnit;
+
+function confirmReturnUnit(recId, sn){
+  const rec = dispatched.find(d => d.id === recId) || dispatched.find(d => d.sn === sn);
+  if(!rec){ toast('Dispatch record not found','err'); return; }
+  const overlay = document.getElementById('return-unit-overlay');
+  const dest = overlay?.querySelector('input[name="ru-dest"]:checked')?.value || 'warehouse';
+  const reasonEl = overlay?.querySelector('input[name="ru-reason"]:checked');
+  if(!reasonEl){ toast('Pick a reason for the return','err'); return; }
+  const reasonLabel = reasonEl.dataset.label || reasonEl.value;
+  const notes = (overlay?.querySelector('#ru-notes')?.value || '').trim();
+  const reasonText = `${reasonLabel}${notes ? ' — ' + notes : ''}`;
+  snapshot('return dispatched unit');
+  const at = toISO();
+  const by = ROLES[currentRole].label;
+  // Keep the dispatch record as audit history, flagged returned.
+  rec.deliveryStatus = 'returned';
+  rec.returnedAt = at;
+  rec.returnedTo = dest;
+  rec.returnReason = reasonText;
+  rec.returnedBy = by;
+  // Carry the spa identity back into its new home.
+  const spaFields = {
+    sn: rec.sn, dealer: rec.dealer, type: rec.type || 'hot',
+    model: rec.model, acrylicColor: rec.acrylicColor, cabinetColor: rec.cabinetColor,
+    plasticWrap: rec.plasticWrap, cover: rec.cover, looseAccessories: rec.looseAccessories,
+    trackingId: rec.trackingId
+  };
+  if(dest === 'factory'){
+    const fId = ++nid;
+    factory.push({
+      id: fId, ...spaFields,
+      added: at,
+      isReturn: true, returnReason: reasonText, returnedFromDealer: rec.dealer, returnedAt: at,
+      // Reuse the canonical returned-spa state so the factory card shows the
+      // "Returned to Factory" styling + "🔧 Re-ship to WH" button (not a fresh spa).
+      trackingState: 'received-back-at-factory',
+      trackingHistory: [...(rec.trackingHistory||[]), {state:'received-back-at-factory', at, by, note: reasonText}],
+      notes: `↩ RETURNED from ${rec.dealer||'dealer'}: ${reasonText}`
+    });
+    addAct(`↩ Returned to FACTORY: S/N ${rec.sn||'—'} from ${rec.dealer||'—'} — ${reasonText}`, 'var(--orange)');
+    toast(`${rec.sn||'Unit'} returned to factory — awaiting re-ship or re-dispatch`, 'ok');
+    overlay?.remove();
+    renderDispatched(); renderFactory?.(); if(typeof drawMap==='function') drawMap(); updBadges();
+    try { flushSave(); } catch(e){}
+  } else {
+    // WAREHOUSE — back into Incoming as arrived, needs a floor position.
+    const incId = ++nid;
+    incoming.push({
+      id: incId, ...spaFields,
+      date: at, status: 'arrived', arrivedAt: at,
+      isReturn: true, returnReason: reasonText, returnedFromDealer: rec.dealer,
+      trackingState: 'returned-to-warehouse',
+      trackingHistory: [...(rec.trackingHistory||[]), {state:'returned-to-warehouse', at, by, note: reasonText}],
+      notes: `↩ RETURNED from ${rec.dealer||'dealer'}: ${reasonText}`
+    });
+    // Mirror into the floor-map "Arriving to Warehouse" queue for drag/click-place.
+    if(typeof queue !== 'undefined' && Array.isArray(queue)){
+      queue.push({ id: incId, sn: rec.sn||'', dealer: rec.dealer||'', type: rec.type||'hot', qty:1, entry: at, _fromIncoming:true });
+    }
+    addAct(`↩ Returned to WAREHOUSE: S/N ${rec.sn||'—'} from ${rec.dealer||'—'} — ${reasonText}`, 'var(--orange)');
+    toast(`${rec.sn||'Unit'} returned — assign it a position`, 'ok');
+    overlay?.remove();
+    renderDispatched(); renderIncoming?.(); renderQueue?.(); renderBanner?.(); updBadges();
+    try { flushSave(); } catch(e){}
+    // Jump straight into placing it.
+    setTimeout(() => { if(typeof openPositionPicker === 'function') openPositionPicker(incId); }, 250);
+  }
+}
+window.confirmReturnUnit = confirmReturnUnit;
+
 function renderDispatched(){
   // ── Upcoming dispatches (next 14 days) — show to warehouse mgr/admin/organizer
   const upcomingCard = document.getElementById('upcoming-dispatches-card');
@@ -13896,12 +14134,13 @@ function renderDispatched(){
   const monthAgo = new Date(today.getTime() - 30*24*60*60*1000).toISOString().slice(0,10);
   const c = {
     all: dispatched.length,
-    pickedup: dispatched.filter(d => d.deliveryStatus !== 'delivered-to-dealer').length,
+    pickedup: dispatched.filter(d => d.deliveryStatus !== 'delivered-to-dealer' && d.deliveryStatus !== 'returned').length,
     delivered: dispatched.filter(d => d.deliveryStatus === 'delivered-to-dealer').length,
+    returned: dispatched.filter(d => d.deliveryStatus === 'returned').length,
     week: dispatched.filter(d => (d.dispatchDate||'') >= weekAgo).length,
     month: dispatched.filter(d => (d.dispatchDate||'') >= monthAgo).length,
   };
-  ['all','pickedup','delivered','week','month'].forEach(k => {
+  ['all','pickedup','delivered','returned','week','month'].forEach(k => {
     const el = document.getElementById('disp-count-'+k);
     if(el) el.textContent = c[k];
   });
@@ -13921,8 +14160,9 @@ function renderDispatched(){
   // Apply the active filter (controlled by quick filter chips)
   const filter = window._dispFilter || 'all';
   let filtered = dispatched;
-  if(filter === 'picked-up') filtered = dispatched.filter(d => d.deliveryStatus !== 'delivered-to-dealer');
+  if(filter === 'picked-up') filtered = dispatched.filter(d => d.deliveryStatus !== 'delivered-to-dealer' && d.deliveryStatus !== 'returned');
   else if(filter === 'delivered') filtered = dispatched.filter(d => d.deliveryStatus === 'delivered-to-dealer');
+  else if(filter === 'returned') filtered = dispatched.filter(d => d.deliveryStatus === 'returned');
   else if(filter === 'week') filtered = dispatched.filter(d => (d.dispatchDate||'') >= weekAgo);
   else if(filter === 'month') filtered = dispatched.filter(d => (d.dispatchDate||'') >= monthAgo);
   const rows=filtered.map(d=>{
@@ -13932,13 +14172,21 @@ function renderDispatched(){
     const tBadge = (typeof t === 'string' && t.length) ? `<span class="tbadge tb${t[0]}">${tl(t)}</span>` : '—';
     // Status: 'dispatched' = picked up by truck, 'delivered-to-dealer' = dealer confirmed receipt
     const isDelivered = d.deliveryStatus === 'delivered-to-dealer';
-    const statusBadge = isDelivered
+    const isReturned = d.deliveryStatus === 'returned';
+    const statusBadge = isReturned
+      ? `<span style="display:inline-flex;align-items:center;gap:4px;background:#fff7ed;color:#9a3412;border:1px solid #fed7aa;font-size:10px;font-weight:700;padding:2px 8px;border-radius:9px">↩ Returned</span>`
+      : isDelivered
       ? `<span style="display:inline-flex;align-items:center;gap:4px;background:#dcfce7;color:#15803d;border:1px solid #86efac;font-size:10px;font-weight:700;padding:2px 8px;border-radius:9px">✓ Delivered</span>`
       : `<span style="display:inline-flex;align-items:center;gap:4px;background:#fef3c7;color:#92400e;border:1px solid #fde68a;font-size:10px;font-weight:700;padding:2px 8px;border-radius:9px">🚚 Picked Up</span>`;
-    // Action: confirm delivery if not yet, or show delivered info
-    const deliveryAction = isDelivered
-      ? `<span style="font-size:10px;color:var(--text3)" title="${d.deliveryConfirmedAt||''}">${fmtD((d.deliveryConfirmedAt||'').split('T')[0])} · ${escapeHTML(d.deliveryConfirmedBy||'—')}</span>`
-      : `<button class="btn btn-sm btn-g" style="font-size:10px;padding:3px 8px" onclick="openConfirmDelivery(${d.id||0}, '${(d.sn||'').replace(/'/g,'')}')">✓ Confirm Delivery</button>`;
+    // ↩ Return button — available until the unit has already been returned.
+    const returnBtn = isReturned ? '' :
+      `<button class="btn btn-sm" style="font-size:10px;padding:3px 8px;background:#fff7ed;border-color:#fed7aa;color:#9a3412" onclick="openReturnUnit(${d.id||0}, '${(d.sn||'').replace(/'/g,'')}')" title="Unit came back — receive it at the warehouse or factory">↩ Return</button>`;
+    // Action cell: returned → show where/why; otherwise confirm/delivered info + Return.
+    const deliveryAction = isReturned
+      ? `<span style="font-size:10px;color:#9a3412;font-weight:600" title="${escapeHTML(d.returnReason||'')}">↩ to ${d.returnedTo==='factory'?'Factory':'Warehouse'} · ${d.returnedAt?fmtD(d.returnedAt):''}</span>`
+      : isDelivered
+      ? `<span style="display:inline-flex;align-items:center;gap:6px"><span style="font-size:10px;color:var(--text3)" title="${d.deliveryConfirmedAt||''}">${fmtD((d.deliveryConfirmedAt||'').split('T')[0])} · ${escapeHTML(d.deliveryConfirmedBy||'—')}</span>${returnBtn}</span>`
+      : `<span style="display:inline-flex;align-items:center;gap:6px"><button class="btn btn-sm btn-g" style="font-size:10px;padding:3px 8px" onclick="openConfirmDelivery(${d.id||0}, '${(d.sn||'').replace(/'/g,'')}')">✓ Confirm Delivery</button>${returnBtn}</span>`;
     // Checklist confirmation indicator
     const checklist = Array.isArray(d.checklistConfirmed) && d.checklistConfirmed.length
       ? `<span style="font-size:9px;color:var(--teal);font-weight:600" title="${d.checklistConfirmed.map(c => escapeHTML(c)).join(' · ')}">✓ ${d.checklistConfirmed.length} items confirmed</span>`
@@ -13964,7 +14212,7 @@ function renderDispatched(){
 // Optional photo (e.g. of the truck loaded, signature on paperwork).
 // Marks dispatched.deliveryStatus = 'delivered-to-dealer'.
 function openConfirmDelivery(recId, sn){
-  const rec = dispatched.find(d => d.id === recId || d.sn === sn);
+  const rec = dispatched.find(d => d.id === recId) || dispatched.find(d => d.sn === sn);
   if(!rec){ toast('Dispatch record not found','err'); return; }
   let overlay = document.getElementById('delivery-confirm-overlay');
   if(overlay) overlay.remove();
@@ -14025,6 +14273,8 @@ function openConfirmDelivery(recId, sn){
     if(photoDataUrl) rec.deliveryPhoto = photoDataUrl;
     addAct(`✓ Delivery confirmed: S/N ${rec.sn} to ${rec.dealer} by ${by}`,'var(--teal)');
     toast(`Delivery confirmed for S/N ${rec.sn}`,'ok');
+    if(typeof updBadges === 'function') updBadges();   // triggers debounced saveState
+    try { flushSave(); } catch(e){}                    // force-flush: terminal state must persist
     overlay.remove();
     renderDispatched();
     // ── Micro-celebration: confetti for closing the loop ──
@@ -16084,7 +16334,7 @@ function build3DMarriageShelf(scene){
   // Accessory boxes representing live marriages
   const accMat = new THREE.MeshStandardMaterial({color:0xf9a8d4, roughness:0.5});
   const liveCount = (typeof marriages !== 'undefined' && Array.isArray(marriages))
-    ? marriages.filter(m => m.location === 'MINV' && m.status !== 'fulfilled' && m.status !== 'cancelled' && m.status !== 'completed').length
+    ? marriages.filter(m => m.location === 'MINV' && m.status === 'delivered').length
     : 0;
   const showBoxes = Math.min(liveCount, 6);
   for(let i = 0; i < showBoxes; i++){
@@ -16667,14 +16917,14 @@ function renderFactory(){
     // Visual states: ready-to-ship (waiting for truck), ready-for-pickup (dealer
     // collects at factory), or received-back (returned post-rejection)
     const readyTag = isReady
-      ? `<div style="display:inline-flex;align-items:center;gap:5px;background:#dbeafe;color:#1e40af;font-size:10px;font-weight:700;letter-spacing:.05em;padding:3px 10px;border-radius:11px;margin:6px 0;text-transform:uppercase">📦 Ready · waiting for Truck pickup</div>`
+      ? `<div style="display:inline-flex;align-items:center;gap:5px;background:#dcfce7;color:#15803d;font-size:10px;font-weight:700;letter-spacing:.05em;padding:3px 10px;border-radius:11px;margin:6px 0;text-transform:uppercase">📦 Ready · waiting for Truck pickup</div>`
       : isPickup
       ? `<div style="display:inline-flex;align-items:center;gap:5px;background:#ede9fe;color:#5b21b6;font-size:10px;font-weight:700;letter-spacing:.05em;padding:3px 10px;border-radius:11px;margin:6px 0;text-transform:uppercase">🤝 Ready · dealer pickup at factory</div>`
       : '';
     const returnedTag = isReturned
       ? `<div style="display:inline-flex;align-items:center;gap:5px;background:#7c2d12;color:#fff;font-size:10px;font-weight:700;letter-spacing:.05em;padding:3px 10px;border-radius:11px;margin:6px 0;text-transform:uppercase">↩ Returned to factory</div>`
       : '';
-    const cardStyle = isReady ? 'style="background:#eff6ff;border-left-color:#3b82f6"' : isPickup ? 'style="background:#f5f3ff;border-left-color:#8b5cf6"' : isReturned ? 'style="background:#fef2f2;border-left-color:#7c2d12"' : '';
+    const cardStyle = isReady ? 'style="background:#f0fdf4;border-left-color:#16a34a"' : isPickup ? 'style="background:#f5f3ff;border-left-color:#8b5cf6"' : isReturned ? 'style="background:#fef2f2;border-left-color:#7c2d12"' : '';
     // Action buttons: when 'ready-to-ship' the spa is locked (waiting for truck pickup); only Admin can cancel
     const isHeld = !!f.onHold;
     const holdBadge = isHeld
@@ -16980,12 +17230,19 @@ function addFactorySpa(){
     trackingState: 'created-at-factory',
     trackingHistory: [{state:'created-at-factory', at: toISO(), by: ROLES[currentRole].label}]
   });
-  const accNote = looseAccessories.length ? ` · ${looseAccessories.length} loose accessor${looseAccessories.length===1?'y':'ies'} inside` : '';
+  // ── AUTO-MARRY (R3): reconcile any marriages that were waiting for this tina ──
+  // inside-type → packed into the tina's looseAccessories; shelf-type → link resolved.
+  try {
+    const createdRec = factory.find(f => f.id === newId);
+    const autoN = autoMarryOnSpaCreate(sn, createdRec);
+    if(autoN){ toast(`💍 ${autoN} pending marriage${autoN>1?'s':''} auto-married to ${sn}`, 'ok'); }
+  } catch(e){ console.warn('[auto-marry on spa create]', e); }
+  const accNote = (factory.find(f=>f.id===newId)?.looseAccessories||[]).length ? ` · ${(factory.find(f=>f.id===newId).looseAccessories).length} loose accessor${(factory.find(f=>f.id===newId).looseAccessories).length===1?'y':'ies'} inside` : '';
   const coverNoteAct = cover ? ` · 🛌 ${cover.color}${cover.model?' '+cover.model:''} (${cover.source==='factory'?'Factory':'Warehouse'})` : '';
   addAct(`Added ${sn} (${dealer}) to factory · TID ${trackingId}${accNote}${coverNoteAct}`,'var(--accent)');
   toast(`${sn} added · ready to print QR label`,'ok');
   document.getElementById('factory-float-panel').innerHTML='';
-  renderFactory(); updBadges();
+  renderFactory(); renderMarriages?.(); if(typeof drawMap==='function') drawMap(); updBadges();
   // CRITICAL: force-flush save NOW so the new factory item is on disk before any
   // page reload, navigation, or remote update can clobber it. Without this, a 100ms
   // window exists where the new item lives only in memory and can be lost.
@@ -18101,7 +18358,7 @@ function handleQRPayload(raw, mode){
       if(units.some(u => String(u.sn) === String(parsedSpaSn))) spaLocation = 'at warehouse (placed on floor)';
       else if(incoming.some(i => String(i.sn) === String(parsedSpaSn))) spaLocation = 'at warehouse (incoming, not placed)';
       else if(factory.some(f => String(f.sn) === String(parsedSpaSn))) spaLocation = 'still at factory';
-      else if(dispatched.some(d => String(d.sn) === String(parsedSpaSn))) spaLocation = 'already dispatched';
+      else if(dispatched.some(d => String(d.sn) === String(parsedSpaSn) && d.deliveryStatus !== 'returned')) spaLocation = 'already dispatched';
     }
     console.log('[marriage scan] Spa', parsedSpaSn, 'is', spaLocation);
 
@@ -18521,10 +18778,11 @@ function addFactoryAccessory(){
       accessoryId: accId,
       accessoryName: name,
       accessoryQty: qty,
+      mountType: 'shelf',        // separate factory accessory → ships to the MINV shelf
       status: 'pending',
       notes,
       created: toISO(),
-      location: suggestedLoc,    // auto-place in marriage inventory (13A or 14A)
+      location: suggestedLoc,    // auto-place in marriage inventory (MINV)
       locationSuggested: !!suggestedLoc
     });
     addAct(`Marriage created: ${name} → S/N ${marsn}${spa?` (${spa.dealer})`:''}${suggestedLoc?` · auto-staged at ${suggestedLoc}`:''}`,'var(--red)');
@@ -18745,6 +19003,14 @@ function dispatchPickupFromFactory(id, viaScan){
   if(typeof dispatched !== 'undefined' && Array.isArray(dispatched)){
     dispatched.unshift({
       id:++nid, sn:f.sn, dealer:f.dealer, type:f.type, date:toDateStr(at), dispatchedAt:at,
+      // Fill the same log fields a warehouse dispatch uses so the Dispatch Log row,
+      // date column and week/month filters all work for factory pickups too.
+      dispatchDate: toDateStr(at),
+      dispatchTime: new Date(at + 'T12:00:00').toTimeString().slice(0,5),
+      originalPos: '(factory)',
+      entryDate: f.added || '—',
+      authorizedBy: 'Dealer pickup @ factory',
+      notes: 'Dealer pickup at the factory',
       trackingId:f.trackingId, trackingState:'dispatched-from-factory', via:'dealer-pickup-at-factory',
       model:f.model, acrylicColor:f.acrylicColor, cabinetColor:f.cabinetColor,
       plasticWrap:f.plasticWrap, cover:f.cover, looseAccessories:f.looseAccessories,
@@ -18757,6 +19023,7 @@ function dispatchPickupFromFactory(id, viaScan){
   addAct(`🤝🚚 Dealer picked up at factory: ${f.sn||f.dealer}`,'var(--accent)');
   toast(`${f.sn||f.dealer} dispatched — dealer pickup at factory`,'ok');
   renderFactory(); if(typeof renderMarriages==='function') renderMarriages(); if(typeof renderTruck==='function') renderTruck(); if(typeof renderDispatched==='function') renderDispatched(); updBadges(); if(typeof drawMap==='function') drawMap();
+  try { flushSave(); } catch(e){}   // critical op — persist immediately
 }
 
 function rmFromFactory(id){
@@ -19138,7 +19405,7 @@ function renderMarriages(){
         <td>${badge}${extraInfo}</td>
         <td class="td-m">${m.spaSn}${inWH?' <span style="font-size:9px;color:var(--teal)" title="Spa is at receiving warehouse">●</span>':' <span style="font-size:9px;color:var(--text3)" title="Spa not yet at warehouse">○</span>'}</td>
         <td>${m.spaDealer||'—'}</td>
-        <td style="font-weight:500">${m.accessoryName}</td>
+        <td style="font-weight:500">${m.accessoryName}${m.mountType==='inside'?' <span style="font-size:8px;background:#dbeafe;color:#1e40af;padding:1px 6px;border-radius:4px;font-weight:700;letter-spacing:.03em;white-space:nowrap" title="Packed inside the tina — never on the MINV shelf">🛁 INSIDE TINA</span>':''}</td>
         <td class="td-s" data-hide-mobile>${m.accessoryQty||1}</td>
         <td class="td-s" data-hide-mobile>${m.notes||'—'}</td>
         <td class="td-s" data-hide-mobile>${fmtD(m.created)}</td>
@@ -19204,6 +19471,17 @@ function openMarriageAdd(prefilledSn, prefilledDealer){
     <div class="fgrid">
       <div class="fg"><label class="fl">Accessory Name</label><input class="fi" id="ma-name" placeholder="e.g. Extra Cabinet Door — Mahogany"></div>
       <div class="fg"><label class="fl">Quantity</label><input class="fi" type="number" id="ma-qty" value="1" min="1"></div>
+    </div>
+    <div class="fg" style="margin-bottom:11px">
+      <label class="fl">Placement</label>
+      <select class="fsel" id="ma-mount">
+        <option value="shelf">📦 Ships separately → Warehouse shelf (MINV)</option>
+        <option value="inside">🛁 Packed inside the tina (travels inside the spa)</option>
+      </select>
+      <div style="font-size:10px;color:var(--text3);margin-top:4px;line-height:1.4">
+        <strong>Shelf:</strong> arrives on its own, sits on the MINV shelf, marries a tina in WH / transit / factory.<br>
+        <strong>Inside:</strong> packed inside the tina at the factory — never hits the MINV shelf, it ships inside the spa.
+      </div>
     </div>
     <div class="fg" style="margin-bottom:11px"><label class="fl">Notes</label><input class="fi" id="ma-notes" placeholder="PO number, special instructions..."></div>
     <div class="faction">
@@ -19284,32 +19562,58 @@ function addMarriage(){
     if(!confirm(`⚠ S/N ${sn} already has a "${name}" marriage in active state (${dupSameSn.status}).\n\nThis is unusual — usually a spa only needs ONE of each accessory type.\n\nCreate another anyway?`)) return;
   }
   snapshot('add marriage');
-  let accId = null;
-  if(existingId){
-    accId = parseInt(existingId);
-    const acc = factory.find(x => x.id === accId);
-    if(acc){ acc.marriedSn = sn; }
-  } else {
-    // Create a new factory accessory record automatically
-    accId = ++nid;
-    factory.push({id:accId, sn:'', dealer:name, type:'accessory', qty, added:toISO(), notes, marriedSn:sn});
-  }
+  // Placement type: 'shelf' (ships separately, MINV shelf) or 'inside' (packed in the tina).
+  const mountType = (document.getElementById('ma-mount')?.value === 'inside') ? 'inside' : 'shelf';
   // If dealer empty, try to fill from any source (units, factory, incoming, dispatched)
   let resolvedDealer = dealer;
   if(!resolvedDealer){
     const info = findSpaBySn(sn);
     if(info) resolvedDealer = info.dealer;
   }
-  marriages.push({
+  let accId = null;
+  let location = null;
+  let status = 'pending';
+  let stagedMsg = '';
+  if(mountType === 'inside'){
+    // INSIDE THE TINA — no separate factory accessory, no MINV shelf slot. It lives
+    // inside the spa. Attach now if the tina already exists; otherwise it waits and
+    // autoMarryOnSpaCreate() packs it in when factory builds the tina.
+    location = null;
+    const found = findSpaRecordBySn(sn);
+    if(found){
+      attachInsideAccessory(found.record, name, qty);
+      status = 'delivered';   // packed inside the tina — handled, never on the shelf
+      stagedMsg = ` · 🛁 packed inside tina ${sn} (${found.where})`;
+    } else {
+      status = 'pending';     // tina not created yet — auto-attaches when factory creates it
+      stagedMsg = ` · ⏳ waiting for tina ${sn} to be created`;
+    }
+  } else {
+    // SHELF — accessory ships separately to the warehouse and stages on MINV.
+    if(existingId){
+      accId = parseInt(existingId);
+      const acc = factory.find(x => x.id === accId);
+      if(acc){ acc.marriedSn = sn; }
+    } else {
+      accId = ++nid;
+      factory.push({id:accId, sn:'', dealer:name, type:'accessory', qty, added:toISO(), notes, marriedSn:sn});
+    }
+    location = (typeof suggestMarriageLocation === 'function') ? suggestMarriageLocation() : 'MINV';
+    stagedMsg = location ? ` · staged for shelf ${location}` : '';
+  }
+  const newMarriage = {
     id:++nid, spaSn:sn, spaDealer:resolvedDealer,
     accessoryId:accId, accessoryName:name, accessoryQty:qty,
-    status:'pending', notes, created:toISO(),
-    location: (typeof suggestMarriageLocation === 'function') ? suggestMarriageLocation() : null,
-    locationSuggested: true
-  });
-  const lastM = marriages[marriages.length - 1];
-  addAct(`Marriage created: ${name} → S/N ${sn}${resolvedDealer?` (${resolvedDealer})`:''}${lastM.location?` · auto-staged at ${lastM.location}`:''}`,'var(--red)');
-  toast('Marriage created','ok');
+    mountType,
+    status, notes, created:toISO(),
+    location,
+    locationSuggested: mountType === 'shelf'
+  };
+  if(status === 'delivered') newMarriage.deliveredDate = toISO();
+  marriages.push(newMarriage);
+  addAct(`Marriage created (${mountType === 'inside' ? 'inside tina' : 'shelf'}): ${name} → S/N ${sn}${resolvedDealer?` (${resolvedDealer})`:''}${stagedMsg}`,'var(--red)');
+  toast(mountType === 'inside' ? 'Marriage created — inside the tina' : 'Marriage created','ok');
+  try { flushSave(); } catch(e){}
   // Close both the inline panel AND the overlay if open
   const inlinePanel = document.getElementById('marriage-float-panel');
   if(inlinePanel) inlinePanel.innerHTML = '';
@@ -19836,10 +20140,13 @@ function dispatchMarriagePickup(mid){
     acc.trackingHistory.push({state:'dispatched-from-factory', at, by:ROLES[currentRole].label, note:'Dealer pickup at factory'});
     factory = factory.filter(f => f.id !== acc.id);
   }
-  m.status = 'delivered';
-  m.deliveredDate = at;
+  // Dealer collected the accessory AT THE FACTORY — it left with them. It never
+  // touched the warehouse MINV shelf, so this is a terminal 'completed' state with
+  // no shelf location (mirrors how confirmDispatch closes out married accessories).
+  m.status = 'completed';
+  m.dispatchedDate = at;
   m.via = 'dealer-pickup-at-factory';
-  if(!m.location) m.location = 'MINV';
+  m.location = null;
   addAct(`🤝🚚 Marriage dealer pickup at factory: ${m.accessoryName} → S/N ${m.spaSn}`,'var(--accent)');
   toast(`${m.accessoryName} dispatched — dealer pickup at factory`,'ok');
   renderMarriages(); if(typeof renderFactory === 'function') renderFactory(); if(typeof renderTruck === 'function') renderTruck(); if(typeof renderInTransit === 'function') renderInTransit(); updBadges();
@@ -20908,14 +21215,19 @@ function _stateSig(){
       x.alreadyInWh?'1':'',
       (x.photos||[]).length, x.notes||'', x.spaSn||''
     ].join(':')).join(',');
-    const d = dispatched.map(x => `${x.id}:${x.status||''}:${x.deliveredAt||''}:${(x.photos||[]).length}:${x.dealer||''}`).join(',');
+    const d = dispatched.map(x => `${x.id}:${x.status||''}:${x.deliveryStatus||''}:${x.deliveredAt||''}:${x.deliveryConfirmedAt||''}:${x.returnedAt||''}:${(x.photos||[]).length}:${x.dealer||''}`).join(',');
     const i = incoming.map(x => `${x.id}:${x.status||''}:${(x.items||[]).length}:${(x.photos||[]).length}:${x.dealer||''}`).join(',');
     const f = factory.map(x => `${x.id}:${x.trackingState||''}${x.onHold?'H':''}:${(x.trackingHistory||[]).length}:${(x.photos||[]).length}:${x.sn||''}:${x.dealer||''}`).join(',');
     const mr = marriages.map(x => `${x.id}:${x.status||''}:${x.spaSn||''}:${x.deliveredAt||''}:${x.location||''}`).join(',');
     const dr = dispatchRequests.map(x => `${x.id}:${x.status||''}`).join(',');
     const m = materials.map(x => `${x.id}:${x.qty||0}:${x.pos||''}:${(x.photos||[]).length}:${x.linkedUnitId||''}`).join(',');
     const c = coverInventory.map(x => `${x.id}:${x.qty||0}:${(x.pending||[]).length}`).join(',');
-    return [nid, u, d, i, f, mr, dr, m, c, events.length, activity.length, queue.length, JSON.stringify(cfg||{})].join('|');
+    // colorLibrary + coverModelMapping ARE synced/saved but were missing from the
+    // signature — a standalone edit to either would be dropped by the change-detection
+    // short-circuit. Cheap key/length sigs close that gap.
+    const cl = (colorLibrary && typeof colorLibrary === 'object') ? Object.keys(colorLibrary).map(k => `${k}:${(colorLibrary[k]||[]).length}`).join(',') : '';
+    const cm = (coverModelMapping && typeof coverModelMapping === 'object') ? Object.keys(coverModelMapping).length : 0;
+    return [nid, u, d, i, f, mr, dr, m, c, cl, cm, events.length, activity.length, queue.length, JSON.stringify(cfg||{})].join('|');
   } catch(e){
     // If signature fails, fall back to a random-ish value so save proceeds
     return 'sig-err-' + Date.now();
@@ -20955,7 +21267,7 @@ function saveState(){
   if(_saveTimer) clearTimeout(_saveTimer);
   _saveTimer = setTimeout(()=>{
     try{
-      const now = Date.now();
+      const now = fbServerNow();   // server-consistent clock
       const state = {nid, units, dispatched, incoming, materials, events, activity, queue, cfg, factory, marriages, dispatchRequests, coverInventory, colorLibrary, coverModelMapping, _saved: now};
       localStorage.setItem(LS_KEY, JSON.stringify(state));
       _lastSavedHash = stateHash();  // mark integrity watchdog "clean" — drift detection from here
@@ -20990,7 +21302,7 @@ function flushSave(){
   if(_fbApplyingRemote) return;
   if(_saveTimer){ clearTimeout(_saveTimer); _saveTimer = null; }
   try{
-    const now = Date.now();
+    const now = fbServerNow();   // server-consistent clock
     const state = {nid, units, dispatched, incoming, materials, events, activity, queue, cfg, factory, marriages, dispatchRequests, coverInventory, colorLibrary, coverModelMapping, _saved: now};
     localStorage.setItem(LS_KEY, JSON.stringify(state));
     _lastSavedHash = stateHash();  // mark integrity watchdog "clean"
@@ -21630,11 +21942,11 @@ function runIntegrityChecks(){
     let fixed = 0;
     factory.forEach(f => {
       if(!f.trackingState){
-        f.trackingState = 'created';
+        f.trackingState = 'created-at-factory';
         fixed++;
       }
     });
-    if(fixed > 0) findings.push(`Set default trackingState='created' on ${fixed} factory item(s) that were missing it`);
+    if(fixed > 0) findings.push(`Set default trackingState='created-at-factory' on ${fixed} factory item(s) that were missing it`);
   } catch(e){ console.warn('[check 4]', e); }
 
   // ─── Check 5: Duplicate IDs across critical arrays + advance nid ───
@@ -21653,10 +21965,11 @@ function runIntegrityChecks(){
     check(incoming, 'incoming');
     check(materials, 'materials');
     check(marriages, 'marriages');
+    check(dispatchRequests, 'dispatchRequests');
     if(dupes.length) findings.push(`⚠ Duplicate IDs detected (manual review needed): ${dupes.slice(0, 5).join(', ')}${dupes.length > 5 ? ' …':''}`);
     // Advance nid past the highest seen id so new items get fresh IDs
     let maxId = 0;
-    [factory, units, dispatched, incoming, materials, marriages].forEach(arr => arr.forEach(x => { if(x && typeof x.id === 'number' && x.id > maxId) maxId = x.id; }));
+    [factory, units, dispatched, incoming, materials, marriages, dispatchRequests].forEach(arr => arr.forEach(x => { if(x && typeof x.id === 'number' && x.id > maxId) maxId = x.id; }));
     if(maxId >= nid){
       nid = maxId + 1;
       findings.push(`Advanced nid counter to ${nid} (past highest seen id ${maxId})`);
@@ -21772,6 +22085,31 @@ function runIntegrityChecks(){
       if(dropped > 0) findings.push(`Removed ${dropped} Incoming entry(ies) for spa(s) already placed on the floor (de-duplicated)`);
     }
   } catch(e){ console.warn('[check 11]', e); }
+
+  // ─── Check 12: inside-the-tina marriages whose tina now exists but isn't packed ───
+  // An 'inside' marriage created before its tina existed waits as pending. Once the
+  // tina shows up (created by factory, imported, etc.) we pack the accessory inside it
+  // (looseAccessories) and mark the marriage delivered. Self-heals regardless of how
+  // the tina was created.
+  try {
+    let packed = 0;
+    if(typeof findSpaRecordBySn === 'function' && typeof attachInsideAccessory === 'function'){
+      marriages.forEach(m => {
+        if(m.mountType !== 'inside') return;
+        if(m.status === 'completed' || m.status === 'fulfilled' || m.status === 'cancelled') return;
+        const found = findSpaRecordBySn(m.spaSn);
+        if(!found) return;   // tina still doesn't exist — keep waiting
+        const added = attachInsideAccessory(found.record, m.accessoryName, m.accessoryQty);
+        m.location = null;   // inside-type never sits on the MINV shelf
+        if(m.status !== 'delivered'){
+          m.status = 'delivered';
+          m.deliveredDate = m.deliveredDate || toISO();
+        }
+        if(added) packed++;
+      });
+    }
+    if(packed > 0) findings.push(`Packed ${packed} inside-the-tina accessory(ies) into their now-existing tina(s)`);
+  } catch(e){ console.warn('[check 12]', e); }
 
   return findings;
 }
