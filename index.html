@@ -4475,7 +4475,7 @@ let _fbInitAttempts = 0;
 //   /app_version/current  (in Firebase console, manually, OR call
 //   pushVersionToFirebase() from the Admin console at deploy time)
 // ══════════════════════════════════════════════════════════════════
-const APP_VERSION = 'v4.29';
+const APP_VERSION = 'v4.30';
 window.APP_VERSION = APP_VERSION;
 
 // ── DATA EPOCH (generation guard) ────────────────────────────────────
@@ -8508,7 +8508,7 @@ function updBadges(){
   const nbRec = document.getElementById('nb-rec');
   if(nbRec){ nbRec.textContent = recPending || ''; nbRec.className = 'nb' + (recPending>0?' red':''); }
   // Factory & marriage badges
-  const fctCount = factory.length;
+  const fctCount = factoryVisibleCount();
   // Ready-to-ship / ready-for-pickup marriages have moved to the Loading Bay,
   // so they're no longer "waiting on factory" — exclude them from this count
   // (keeps the sidebar badge + banner consistent with the Marriages list).
@@ -8707,7 +8707,7 @@ function renderDash(){
   const pend=incoming.filter(i=>i.status==='pending').length;
   const pct=n=>units.length?Math.round(n/units.length*100):0;
   const marPending = marriages.filter(isMarriageActive).length;
-  const fctCount = factory.length;
+  const fctCount = factoryVisibleCount();
   // Stack capacity — count cells full, near-full
   const cellsWithSpas = [...new Set(units.filter(u=>isStackedType(u.type)).map(u=>u.pos))];
   const fullCells = cellsWithSpas.filter(p => cellSpaCount(p) >= MAX_PER_CELL).length;
@@ -8728,7 +8728,7 @@ function renderDash(){
     <div class="sc ct" style="animation-delay:.12s"><div class="sc-corner"></div><div class="sc-label">Swim Spas</div><div class="sc-val" data-stat="swim">${swim}</div><div class="sc-trend">${pct(swim)}% of inventory</div></div>
     <div class="sc cp" style="animation-delay:.16s"><div class="sc-corner"></div><div class="sc-label">Extra / Stock</div><div class="sc-val" data-stat="extra">${extra}</div><div class="sc-trend">${pct(extra)}% of inventory</div></div>
     <div class="sc${marPending>0?' marriage-warning-card':''}" style="animation-delay:.2s${marPending>0?';cursor:pointer':''}"${marPending>0?' onclick="goV(\'marriages\')"':''}><div class="sc-corner" style="background:var(--red)"></div><div class="sc-label">${marPending>0?'⚠ ':''}Pending Marriages</div><div class="sc-val" data-stat="marPending" style="color:${marPending>0?'var(--red)':'var(--text2)'}">${marPending}</div><div class="sc-trend">${marPending>0?'Accessory still at factory':'No pending marriages'}</div></div>
-    <div class="sc" style="animation-delay:.24s;cursor:pointer" onclick="goV('factory')"><div class="sc-corner" style="background:var(--accent)"></div><div class="sc-label">At Factory</div><div class="sc-val" data-stat="fctCount" style="color:var(--accent)">${fctCount}</div><div class="sc-trend">Ready to ship</div></div>
+    <div class="sc" style="animation-delay:.24s;cursor:pointer" onclick="goV('factory')"><div class="sc-corner" style="background:var(--accent)"></div><div class="sc-label">At Factory</div><div class="sc-val" data-stat="fctCount" style="color:var(--accent)">${fctCount}</div><div class="sc-trend">In Factory Warehouse</div></div>
     <div class="sc${fullCells>0?' ca':''}" style="animation-delay:.28s${fullCells>0?';cursor:pointer':''}"${fullCells>0?' onclick="setFilt(\'hot\',document.querySelector(\'.fc\'));goV(\'map\')"':''}><div class="sc-corner"></div><div class="sc-label">${fullCells>0?'⚠ ':''}Full Cells</div><div class="sc-val" data-stat="fullCells">${fullCells}</div><div class="sc-trend">${nearFull?nearFull+' near full · ':''}Max ${MAX_PER_CELL} per cell</div></div>
     <div class="sc${missing.length>0?' marriage-warning-card':''}" style="animation-delay:.32s${missing.length>0?';cursor:pointer':''}"${missing.length>0?' onclick="goV(\'schedule\')"':''}><div class="sc-corner" style="background:var(--amber)"></div><div class="sc-label">${missing.length>0?'⚠ ':''}Missing Spa</div><div class="sc-val" data-stat="missing" style="color:${missing.length>0?'var(--amber)':'var(--text2)'}">${missing.length}</div><div class="sc-trend">${missing.length>0?'Scheduled, not in warehouse':'All scheduled spas in stock'}</div></div>
     <div class="sc" style="animation-delay:.36s"><div class="sc-label">Empty Slots</div><div class="sc-val" data-stat="empty" style="color:var(--text2)">${total-occ}</div><div class="sc-trend">Of ${total} positions</div></div>
@@ -17028,6 +17028,16 @@ function buildFactoryCard(f){
     </div>`;
   }
 
+// Count of items actually shown INSIDE the Factory Warehouse view (matches the
+// sum of its two tab counts): spas still being prepped + loose/non-married
+// accessories. Ready spas live in Loading Bay and married accessories live in
+// Marriages — those have their own badges, so they're not counted here.
+function factoryVisibleCount(){
+  const at = factory.filter(f => f.trackingState !== 'in-transit');
+  const spas = at.filter(f => (f.type==='hot' || f.type==='swim' || f.type==='extra') && f.trackingState!=='ready-to-ship' && f.trackingState!=='ready-for-pickup').length;
+  const accLoose = at.filter(f => (f.type==='accessory' || f.type==='misc') && !f.marriedSn).length;
+  return spas + accLoose;
+}
 function renderFactory(){
   // PHYSICAL inventory at factory only — items with trackingState='in-transit' are
   // physically NOT at factory anymore (they're on the truck), so we exclude them from
