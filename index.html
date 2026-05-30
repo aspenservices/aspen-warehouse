@@ -2940,6 +2940,10 @@ body.dark-mode .pwmgr-help code { background: rgba(255, 255, 255, 0.1); }
 }
 body.role-transit .trk-scan-view { display: block !important; }
 body.role-transit .trk-bay-view { display: none !important; }
+/* Factory & Marriages crews: Loading Bay is a read-only card overview (so they
+   can see what's waiting to be dispatched), never the scan-to-load view. */
+body.role-factory .trk-scan-view, body.role-marriages .trk-scan-view { display: none !important; }
+body.role-factory .trk-bay-view, body.role-marriages .trk-bay-view { display: block !important; }
 
 .mar-cards-grid {
   display: grid;
@@ -4471,7 +4475,7 @@ let _fbInitAttempts = 0;
 //   /app_version/current  (in Firebase console, manually, OR call
 //   pushVersionToFirebase() from the Admin console at deploy time)
 // ══════════════════════════════════════════════════════════════════
-const APP_VERSION = 'v4.28';
+const APP_VERSION = 'v4.29';
 window.APP_VERSION = APP_VERSION;
 
 // ── DATA EPOCH (generation guard) ────────────────────────────────────
@@ -6217,14 +6221,14 @@ const ROLES = {
   warehouse: { label:'Warehouse Manager', subtitle:'Receive · acomodar · despachar', icon:'🏭',
                pages:['map','schedule','incoming','intransit','dispatched','materials','requests','covers','marriages'], canEdit:true, defaultPage:'map', password:'0000' },
   factory:   { label:'Factory', subtitle:'Ship spas · request items · receive', icon:'🚚',
-               pages:['factory','marriages','map','intransit','requests','receiving','covers'], canEdit:false, defaultPage:'factory', password:'0000' },
+               pages:['factory','marriages','map','intransit','requests','receiving','covers','truck'], canEdit:false, defaultPage:'factory', password:'0000' },
   // Marriages: its own department. Sees ONLY the marriages list (and
   // intransit so they can track what's coming from factory). Cannot see
   // factory's internal list or the floor map. When Marriages creates a
   // pending marriage, that IS the request to Factory — Factory sees the
   // same marriages list in their role and ships the accessory.
   marriages: { label:'Marriages', subtitle:'Spa + Accessory Pairings', icon:'🔗',
-               pages:['marriages','intransit'], canEdit:true, defaultPage:'marriages', password:'0000' },
+               pages:['marriages','intransit','truck'], canEdit:true, defaultPage:'marriages', password:'0000' },
   transit:   { label:'Truck / Transit', subtitle:'Scan QR when loading truck', icon:'🚛',
                pages:['truck','intransit'], canEdit:false, defaultPage:'truck', password:'0000' },
   organizer: { label:'Dispatch Organizer', subtitle:'Schedule pickups', icon:'📅',
@@ -6832,7 +6836,7 @@ const BOTTOM_NAV_CONFIG = {
   // Factory: their own list, then accessory pairings, what's in transit, & open requests
   factory:   ['factory', 'marriages', 'intransit', 'requests', 'more'],
   // Marriages: focused only on pairings + tracking what's in transit
-  marriages: ['marriages', 'intransit', 'more'],
+  marriages: ['marriages', 'intransit', 'truck', 'more'],
   // Truck: only really has 2 views. We add "more" so they can still get to settings/sign out.
   transit:   ['truck', 'intransit', 'more'],
   // Organizer: schedule pickups, map, marriages, dispatched
@@ -17036,6 +17040,10 @@ function renderFactory(){
   const spasInBay = spasAll.length - spas.length;
   const acc = atFactory.filter(f => f.type==='accessory' || f.type==='misc');
   const married = acc.filter(a => a.marriedSn);
+  // The Accessories tab is for OTHER (non-married) items only — loose parts, misc.
+  // Married accessories belong to the marriage flow (Marriages / Marriage Requests
+  // + Loading Bay when ready), so they are NOT shown here.
+  const accLoose = acc.filter(a => !a.marriedSn);
   // ── IN-TRANSIT COUNTS, SPLIT BY TYPE ──
   // The Spas Ready card was previously showing "X on truck" using the TOTAL of
   // factory items with trackingState='in-transit'. That total includes shipped
@@ -17049,13 +17057,13 @@ function renderFactory(){
   const accTransitNote = accInTransit > 0 ? ` · ${accInTransit} on truck` : '';
   document.getElementById('fct-stats').innerHTML = `
     <div class="sc cb"><div class="sc-corner"></div><div class="sc-label">Spas Ready</div><div class="sc-val">${spas.length}</div><div class="sc-trend">At factory${transitNote}${spasInBay?` · ${spasInBay} in Loading Bay`:''}</div></div>
-    <div class="sc" style="border-left:3px solid var(--orange)"><div class="sc-label">Accessories</div><div class="sc-val" style="color:var(--orange)">${acc.length}</div><div class="sc-trend">${married.length} married to spa${accTransitNote}</div></div>
+    <div class="sc" style="border-left:3px solid var(--orange)"><div class="sc-label">Accessories</div><div class="sc-val" style="color:var(--orange)">${accLoose.length}</div><div class="sc-trend">Loose &amp; misc items${accTransitNote}</div></div>
     <div class="sc${married.length>0?' marriage-warning-card':''}"><div class="sc-label">${married.length>0?'⚠ ':''}Holding Married</div><div class="sc-val" style="color:${married.length>0?'var(--red)':'var(--text2)'}">${married.length}</div><div class="sc-trend">Spa(s) waiting at warehouse</div></div>
   `;
   document.getElementById('fct-tab-spas').textContent = spas.length || '';
-  document.getElementById('fct-tab-acc').textContent = acc.length || '';
+  document.getElementById('fct-tab-acc').textContent = accLoose.length || '';
   // Tab content — use atFactory (already filtered to exclude in-transit)
-  const list = fctTab === 'spas' ? spas : acc;
+  const list = fctTab === 'spas' ? spas : accLoose;
   const cont = document.getElementById('fct-content');
   if(!list.length){
     const inTransitMsg = inTransitCount > 0 ? `<br><span style="font-size:11px;color:var(--text3)">${inTransitCount} item${inTransitCount>1?'s':''} on truck — see In Transit page</span>` : '';
