@@ -2929,6 +2929,18 @@ body.dark-mode .pwmgr-help code { background: rgba(255, 255, 255, 0.1); }
    is a self-contained card with clear status, big serial number, and
    a primary "Send to WH" action that stands out.
    ═══════════════════════════════════════════════════════════════════ */
+/* ── LOADING BAY responsive split ──────────────────────────────────
+   Phone = scan-to-load view (unchanged). Computer = Loading Bay card overview.
+   Transit/Truck role ALWAYS sees the scan view regardless of screen size,
+   so the truck-crew workflow is never altered. */
+.trk-bay-view { display: none; }
+@media (min-width: 769px){
+  .trk-scan-view { display: none; }
+  .trk-bay-view { display: block; }
+}
+body.role-transit .trk-scan-view { display: block !important; }
+body.role-transit .trk-bay-view { display: none !important; }
+
 .mar-cards-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(310px, 1fr));
@@ -3755,6 +3767,7 @@ body.dark-mode .mar-card-track {
 
 <!-- LOADING BAY — dedicated view for Truck / Transit role -->
 <div id="view-truck" class="view">
+  <div class="trk-scan-view"><!-- mobile/phone: scan-to-load view (UNCHANGED) -->
   <!-- Hero: prominent scan button + quick-load by S/N.
        Compact mobile-first design — title fits one line, description optional below. -->
   <div class="card" style="margin-bottom:14px;background:linear-gradient(135deg,#fef3c7 0%,#fde68a 100%);border:2px solid #d97706">
@@ -3807,6 +3820,9 @@ body.dark-mode .mar-card-track {
       <div id="trk-loaded-cards"></div>
     </div>
   </div>
+  </div><!-- /trk-scan-view -->
+  <!-- computer: Loading Bay card overview (populated by renderTruck) -->
+  <div class="trk-bay-view" id="trk-bay"></div>
 </div>
 
 <!-- IN TRANSIT — visible to all roles, only admin can modify -->
@@ -4455,7 +4471,7 @@ let _fbInitAttempts = 0;
 //   /app_version/current  (in Firebase console, manually, OR call
 //   pushVersionToFirebase() from the Admin console at deploy time)
 // ══════════════════════════════════════════════════════════════════
-const APP_VERSION = 'v4.26';
+const APP_VERSION = 'v4.28';
 window.APP_VERSION = APP_VERSION;
 
 // ── DATA EPOCH (generation guard) ────────────────────────────────────
@@ -8475,8 +8491,9 @@ function updBadges(){
   const transitCount = factory.filter(f => f.trackingState === 'in-transit').length;
   const nbTra = document.getElementById('nb-tra');
   if(nbTra){ nbTra.textContent = transitCount || ''; }
-  // Loading Bay badge: count factory items with trackingState 'ready-to-ship'
-  const readyCount = factory.filter(f => f.trackingState === 'ready-to-ship').length;
+  // Loading Bay badge: items waiting in the bay — ready-to-ship (truck pickup)
+  // plus ready-for-pickup (dealer collects at factory). Both now live in the bay.
+  const readyCount = factory.filter(f => f.trackingState === 'ready-to-ship' || f.trackingState === 'ready-for-pickup').length;
   const nbTrk = document.getElementById('nb-trk');
   if(nbTrk){ nbTrk.textContent = readyCount || ''; }
   // Factory request badges
@@ -8488,7 +8505,10 @@ function updBadges(){
   if(nbRec){ nbRec.textContent = recPending || ''; nbRec.className = 'nb' + (recPending>0?' red':''); }
   // Factory & marriage badges
   const fctCount = factory.length;
-  const marPending = marriages.filter(isMarriageActive).length;
+  // Ready-to-ship / ready-for-pickup marriages have moved to the Loading Bay,
+  // so they're no longer "waiting on factory" — exclude them from this count
+  // (keeps the sidebar badge + banner consistent with the Marriages list).
+  const marPending = marriages.filter(m => isMarriageActive(m) && m.status !== 'ready-to-ship' && m.status !== 'ready-for-pickup').length;
   document.getElementById('nb-fct').textContent = fctCount || '';
   document.getElementById('nb-mar').textContent = marPending || '';
   document.getElementById('nb-mar').className = 'nb'+(marPending>0?' red':'');
@@ -13376,6 +13396,55 @@ function renderTruck(){
       </div>`;
     }).join('');
   }
+
+  // ── DESKTOP "Loading Bay" CARD VIEW (computer only) ──────────────────
+  // Mobile keeps the scan view above; CSS shows ONLY ONE of the two by width,
+  // and the transit/Truck role always gets the scan view (workflow unchanged).
+  // Shows items marked ready (Ship to WH / Ready to Pick Up) as Factory-style
+  // cards WITH their actions, plus the married pairings still waiting.
+  const bay = document.getElementById('trk-bay');
+  if(bay){
+    const readyShip   = factory.filter(f => f.trackingState === 'ready-to-ship');
+    const readyPickup = factory.filter(f => f.trackingState === 'ready-for-pickup');
+    const bayItems    = [...readyShip, ...readyPickup];
+    const bayMarriages = marriages.filter(m => m.status === 'ready-to-ship' || m.status === 'ready-for-pickup');
+    let h = '';
+    h += `<div class="card" style="margin-bottom:14px">
+      <div class="card-hd"><div>
+        <div class="card-title">\u{1F69A} Loading Bay \u2014 Ready &amp; Waiting</div>
+        <div class="card-sub">${bayItems.length ? `${readyShip.length} waiting for truck pickup \u00B7 ${readyPickup.length} dealer pickup at factory` : 'Nothing ready yet \u2014 Factory marks items \u201CShip to WH\u201D or \u201CReady to Pick Up\u201D'}</div>
+      </div></div>
+      <div class="card-body">${bayItems.length
+        ? `<div class="fct-grid">${bayItems.map(buildFactoryCard).join('')}</div>`
+        : `<div style="padding:26px 14px;text-align:center;color:var(--text3);font-size:12.5px">\u{1F4ED} Nothing in the loading bay right now.</div>`}</div>
+    </div>`;
+    h += `<div class="card">
+      <div class="card-hd"><div>
+        <div class="card-title">\u{1F517} Married pairings waiting</div>
+        <div class="card-sub">${bayMarriages.length ? `${bayMarriages.length} pairing(s) that must ship together` : 'No active marriages'}</div>
+      </div></div>
+      <div class="card-body">${bayMarriages.length
+        ? `<div class="fct-grid">${bayMarriages.map(m => {
+            const inWH = units.some(u => u.sn === m.spaSn);
+            const st = m.status || 'pending';
+            const stMap = {'pending':['#fef2f2','#dc2626','\u23F3 At factory'],'ready-to-ship':['#eff6ff','#1e40af','\u{1F4E6} Ready \u00B7 truck'],'ready-for-pickup':['#f5f3ff','#5b21b6','\u{1F91D} Dealer pickup'],'in-transit':['#ecfdf5','#0d9e78','\u{1F69B} In transit'],'delivered':['#ecfdf5','#0d9e78','\u2713 Delivered']};
+            const sm = stMap[st] || stMap['pending'];
+            return `<div class="fct-card fct-card-spa">
+              <div class="fct-sn">${m.spaSn}</div>
+              <div class="fct-dealer">${m.spaDealer || '\u2014'}</div>
+              <div class="fct-meta"><span style="display:inline-block;background:${sm[0]};color:${sm[1]};border:1px solid ${sm[1]}33;font-size:9px;font-weight:700;padding:2px 8px;border-radius:8px;text-transform:uppercase;letter-spacing:.04em">${sm[2]}</span>
+                <span style="margin-left:6px">${inWH?'\u25CF spa at WH':'\u25CB spa not at WH'}</span></div>
+              <div style="font-size:11px;color:var(--text2);margin-top:5px">\u{1F527} <strong>${escapeHTML(m.accessoryName||'')}</strong>${(m.accessoryQty||1)>1?` \u00D7 ${m.accessoryQty}`:''}${m.mountType==='inside'?' <span style="font-size:8px;background:#dbeafe;color:#1e40af;padding:1px 6px;border-radius:4px;font-weight:700">\u{1F6C1} INSIDE</span>':''}</div>
+              ${m.notes?`<div style="font-size:10px;color:var(--text3);margin-top:3px;font-style:italic">${escapeHTML(m.notes)}</div>`:''}
+              <div class="fct-acts" style="margin-top:8px">
+                <button class="btn btn-sm" onclick="goV('marriages')" title="Open the Marriages page">\u{1F517} View in Marriages</button>
+              </div>
+            </div>`;
+          }).join('')}</div>`
+        : `<div style="padding:22px 14px;text-align:center;color:var(--text3);font-size:12px">No married pairings waiting.</div>`}</div>
+    </div>`;
+    bay.innerHTML = h;
+  }
 }
 
 // Trigger a single-item load directly from the Loading Bay card (bypasses scanner UI).
@@ -16873,41 +16942,10 @@ function setFctTab(tab,btn){
   renderFactory();
 }
 
-function renderFactory(){
-  // PHYSICAL inventory at factory only — items with trackingState='in-transit' are
-  // physically NOT at factory anymore (they're on the truck), so we exclude them from
-  // the visible list and from the stats counts. They appear in the In Transit page instead.
-  const atFactory = factory.filter(f => f.trackingState !== 'in-transit');
-  const spas = atFactory.filter(f => f.type==='hot' || f.type==='swim' || f.type==='extra');
-  const acc = atFactory.filter(f => f.type==='accessory' || f.type==='misc');
-  const married = acc.filter(a => a.marriedSn);
-  // ── IN-TRANSIT COUNTS, SPLIT BY TYPE ──
-  // The Spas Ready card was previously showing "X on truck" using the TOTAL of
-  // factory items with trackingState='in-transit'. That total includes shipped
-  // accessories too, which made it look like there was a "phantom" spa on the
-  // truck (Alberto reported: "desapareció uno de los despachados de factory").
-  // Splitting the counts so each stat card only reflects its own type.
-  const spasInTransit = factory.filter(f => f.trackingState === 'in-transit' && (f.type==='hot' || f.type==='swim' || f.type==='extra')).length;
-  const accInTransit = factory.filter(f => f.trackingState === 'in-transit' && (f.type==='accessory' || f.type==='misc')).length;
-  const inTransitCount = spasInTransit + accInTransit;  // kept for the empty-list fallback message below
-  const transitNote = spasInTransit > 0 ? ` · ${spasInTransit} on truck` : '';
-  const accTransitNote = accInTransit > 0 ? ` · ${accInTransit} on truck` : '';
-  document.getElementById('fct-stats').innerHTML = `
-    <div class="sc cb"><div class="sc-corner"></div><div class="sc-label">Spas Ready</div><div class="sc-val">${spas.length}</div><div class="sc-trend">At factory${transitNote}</div></div>
-    <div class="sc" style="border-left:3px solid var(--orange)"><div class="sc-label">Accessories</div><div class="sc-val" style="color:var(--orange)">${acc.length}</div><div class="sc-trend">${married.length} married to spa${accTransitNote}</div></div>
-    <div class="sc${married.length>0?' marriage-warning-card':''}"><div class="sc-label">${married.length>0?'⚠ ':''}Holding Married</div><div class="sc-val" style="color:${married.length>0?'var(--red)':'var(--text2)'}">${married.length}</div><div class="sc-trend">Spa(s) waiting at warehouse</div></div>
-  `;
-  document.getElementById('fct-tab-spas').textContent = spas.length || '';
-  document.getElementById('fct-tab-acc').textContent = acc.length || '';
-  // Tab content — use atFactory (already filtered to exclude in-transit)
-  const list = fctTab === 'spas' ? spas : acc;
-  const cont = document.getElementById('fct-content');
-  if(!list.length){
-    const inTransitMsg = inTransitCount > 0 ? `<br><span style="font-size:11px;color:var(--text3)">${inTransitCount} item${inTransitCount>1?'s':''} on truck — see In Transit page</span>` : '';
-    cont.innerHTML = `<div style="padding:30px 14px;text-align:center;color:var(--text3);font-size:12px">No items at factory in this category. <a href="#" onclick="event.preventDefault();openFactoryAdd()" style="color:var(--accent);font-weight:600">+ Add to factory</a>${inTransitMsg}</div>`;
-    return;
-  }
-  cont.innerHTML = `<div class="fct-grid">` + list.map(f => {
+// Builds ONE factory/loading-bay card. Shared by renderFactory (items still being
+// prepped) and renderTruck's desktop Loading Bay (items marked ready/waiting),
+// so both views are visually identical and carry the same action buttons.
+function buildFactoryCard(f){
     const cardClass = f.type==='accessory' ? 'fct-card-acc' : f.type==='swim' ? 'fct-card-swim' : f.type==='extra' ? 'fct-card-extra' : f.type==='misc' ? 'fct-card-misc' : 'fct-card-spa';
     const isAcc = f.type==='accessory' || f.type==='misc';
     const isReady = f.trackingState === 'ready-to-ship';
@@ -16984,7 +17022,47 @@ function renderFactory(){
       ${renderPhotoStrip(f, 'factory-spas')}
       ${actsHtml}
     </div>`;
-  }).join('') + `</div>`;
+  }
+
+function renderFactory(){
+  // PHYSICAL inventory at factory only — items with trackingState='in-transit' are
+  // physically NOT at factory anymore (they're on the truck), so we exclude them from
+  // the visible list and from the stats counts. They appear in the In Transit page instead.
+  const atFactory = factory.filter(f => f.trackingState !== 'in-transit');
+  const _readyInBay = f => f.trackingState==='ready-to-ship' || f.trackingState==='ready-for-pickup';
+  const spasAll = atFactory.filter(f => f.type==='hot' || f.type==='swim' || f.type==='extra');
+  // Ready spas (Ship to WH / Ready to Pick Up) now live in the Loading Bay, not here.
+  const spas = spasAll.filter(f => !_readyInBay(f));
+  const spasInBay = spasAll.length - spas.length;
+  const acc = atFactory.filter(f => f.type==='accessory' || f.type==='misc');
+  const married = acc.filter(a => a.marriedSn);
+  // ── IN-TRANSIT COUNTS, SPLIT BY TYPE ──
+  // The Spas Ready card was previously showing "X on truck" using the TOTAL of
+  // factory items with trackingState='in-transit'. That total includes shipped
+  // accessories too, which made it look like there was a "phantom" spa on the
+  // truck (Alberto reported: "desapareció uno de los despachados de factory").
+  // Splitting the counts so each stat card only reflects its own type.
+  const spasInTransit = factory.filter(f => f.trackingState === 'in-transit' && (f.type==='hot' || f.type==='swim' || f.type==='extra')).length;
+  const accInTransit = factory.filter(f => f.trackingState === 'in-transit' && (f.type==='accessory' || f.type==='misc')).length;
+  const inTransitCount = spasInTransit + accInTransit;  // kept for the empty-list fallback message below
+  const transitNote = spasInTransit > 0 ? ` · ${spasInTransit} on truck` : '';
+  const accTransitNote = accInTransit > 0 ? ` · ${accInTransit} on truck` : '';
+  document.getElementById('fct-stats').innerHTML = `
+    <div class="sc cb"><div class="sc-corner"></div><div class="sc-label">Spas Ready</div><div class="sc-val">${spas.length}</div><div class="sc-trend">At factory${transitNote}${spasInBay?` · ${spasInBay} in Loading Bay`:''}</div></div>
+    <div class="sc" style="border-left:3px solid var(--orange)"><div class="sc-label">Accessories</div><div class="sc-val" style="color:var(--orange)">${acc.length}</div><div class="sc-trend">${married.length} married to spa${accTransitNote}</div></div>
+    <div class="sc${married.length>0?' marriage-warning-card':''}"><div class="sc-label">${married.length>0?'⚠ ':''}Holding Married</div><div class="sc-val" style="color:${married.length>0?'var(--red)':'var(--text2)'}">${married.length}</div><div class="sc-trend">Spa(s) waiting at warehouse</div></div>
+  `;
+  document.getElementById('fct-tab-spas').textContent = spas.length || '';
+  document.getElementById('fct-tab-acc').textContent = acc.length || '';
+  // Tab content — use atFactory (already filtered to exclude in-transit)
+  const list = fctTab === 'spas' ? spas : acc;
+  const cont = document.getElementById('fct-content');
+  if(!list.length){
+    const inTransitMsg = inTransitCount > 0 ? `<br><span style="font-size:11px;color:var(--text3)">${inTransitCount} item${inTransitCount>1?'s':''} on truck — see In Transit page</span>` : '';
+    cont.innerHTML = `<div style="padding:30px 14px;text-align:center;color:var(--text3);font-size:12px">No items at factory in this category. <a href="#" onclick="event.preventDefault();openFactoryAdd()" style="color:var(--accent);font-weight:600">+ Add to factory</a>${inTransitMsg}</div>`;
+    return;
+  }
+  cont.innerHTML = `<div class="fct-grid">` + list.map(buildFactoryCard).join('') + `</div>`;
 }
 
 function openFactoryAdd(){
@@ -19221,12 +19299,12 @@ function setMarTab(tab,btn){
 }
 
 function renderMarriages(){
-  // "Pending" in the Marriages view means "still waiting for the accessory
-  // to arrive at the warehouse" — includes pending (at factory), ready-to-ship
-  // (waiting for Truck scan at Loading Bay), and in-transit (on the truck).
-  // All three appear in the same "Pending" tab so the Marriages crew sees
-  // every active pairing in one place. Delivered = accessory arrived. Completed = dispatched.
-  const pending = marriages.filter(m => isMarriageActive(m) && m.status !== 'split-pending');
+  // "Pending" here = marriages still being worked at the factory. Once the
+  // Marriages crew marks one "Send to WH" (ready-to-ship) or "Ready to Pick Up"
+  // (ready-for-pickup), it moves to the Loading Bay and DROPS OUT of this list,
+  // so it isn't shown here anymore. In-transit (on the truck) still shows as an
+  // active pairing. Delivered = accessory arrived. Completed = dispatched.
+  const pending = marriages.filter(m => isMarriageActive(m) && m.status !== 'split-pending' && m.status !== 'ready-to-ship' && m.status !== 'ready-for-pickup');
   const delivered = marriages.filter(m => m.status === 'delivered');
   const completed = marriages.filter(m => m.status === 'completed');
   const splitPending = marriages.filter(m => m.status === 'split-pending');
@@ -19297,7 +19375,7 @@ function renderMarriages(){
   // The Marriages crew sees their pairings as visual cards (similar to how
   // Factory sees their factory items). Easier to scan and act on. Other roles
   // (admin, factory, warehouse) still see the dense table view below.
-  if(currentRole === 'marriages'){
+  if(currentRole === 'marriages' || currentRole === 'admin'){
     cont.innerHTML = `<div class="mar-cards-grid">${list.map(m => {
       const inWH = units.some(u => u.sn === m.spaSn);
       const sc = stCfg[m.status] || stCfg['pending'];
@@ -19360,6 +19438,7 @@ function renderMarriages(){
         </div>
         ${trackInfo}
         <div class="mar-card-acts">
+          ${isMarriageActive(m) && m.status !== 'split-pending' ? `<button class="btn btn-sm btn-g" onclick="markMarriageDelivered(${m.id})" title="Override: mark as delivered without waiting for Truck/Receiving scan">✓ Mark delivered</button>` : ''}
           ${isPending ? `<button class="btn btn-sm mar-btn-primary" onclick="shipMarriageFromMarriages(${m.id})" title="Send the accessory to the warehouse — marks marriage as Delivered">📤 Send to WH</button>` : ''}
           ${isPending ? `<button class="btn btn-sm" style="background:#ede9fe;border-color:#8b5cf6;color:#5b21b6;font-weight:600" onclick="markMarriageReadyForPickup(${m.id})" title="Dealer collects at the factory — Truck won't take it">🤝 Ready to Pick Up</button>` : ''}
           ${isPickupMar ? `<button class="btn btn-sm btn-p" style="background:#7c3aed;border-color:#7c3aed" onclick="dispatchMarriagePickup(${m.id})" title="Dealer picked it up at the factory — dispatch it">🤝 Dealer Picked Up</button>` : ''}
