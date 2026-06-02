@@ -4565,7 +4565,7 @@ let _fbInitAttempts = 0;
 //   /app_version/current  (in Firebase console, manually, OR call
 //   pushVersionToFirebase() from the Admin console at deploy time)
 // ══════════════════════════════════════════════════════════════════
-const APP_VERSION = 'v4.42';
+const APP_VERSION = 'v4.45';
 window.APP_VERSION = APP_VERSION;
 
 // ── DATA EPOCH (generation guard) ────────────────────────────────────
@@ -4700,20 +4700,34 @@ async function _fetchDeployInfo(){
   return { ver, etag };
 }
 
-function _doAutoReload(reason){
+// Before ANY auto-reload, persist + push the user's latest edits to the cloud.
+// Without this, a reload + "cloud wins on open" would silently discard any edit
+// that hadn't been pushed yet (this is what wiped a freshly-created dispatch).
+async function _saveBeforeReload(){
+  try{ flushSave(); }catch(e){}   // always persist to localStorage first
+  try{
+    if(_fbDb && _fbAuthorized && (_fbLocalEditCounter > _fbPushedEditCounter)){
+      window.__aspenAllowFinalPush = true;   // one-shot: allow this final push even if stale
+      // Never hang the reload more than 2.5s; the safe-push guard still protects the cloud.
+      await Promise.race([ fbCloudSync(false), new Promise(res => setTimeout(res, 2500)) ]);
+    }
+  }catch(e){ console.warn('[pre-reload save]', e); }
+}
+window._saveBeforeReload = _saveBeforeReload;
+
+async function _doAutoReload(reason){
   // Avoid loops: don't reload twice within <25s
   try {
     const last = Number(sessionStorage.getItem('aspen_last_autoreload') || 0);
     if(Date.now() - last < 25000){ console.warn('[auto-update] reload suprimido (anti-loop)'); return; }
     sessionStorage.setItem('aspen_last_autoreload', String(Date.now()));
   } catch(e){}
-  console.log('%c[auto-update] reloading to the latest version (' + reason + ')', 'color:#1e40af;font-weight:bold');
-  try { if(typeof toast === 'function') toast('🔄 New version — updating…', 'ok'); } catch(e){}
-  setTimeout(() => {
-    const u = new URL(location.href);
-    u.searchParams.set('v', Date.now());   // new URL → the cache doesn't have it → fresh index
-    location.replace(u.toString());
-  }, 700);
+  console.log('%c[auto-update] saving + reloading to the latest version (' + reason + ')', 'color:#1e40af;font-weight:bold');
+  try { if(typeof toast === 'function') toast('🔄 Saving your changes, then updating…', 'ok'); } catch(e){}
+  await _saveBeforeReload();   // ← flush + push pending edits BEFORE reloading
+  const u = new URL(location.href);
+  u.searchParams.set('v', Date.now());   // new URL → the cache doesn't have it → fresh index
+  location.replace(u.toString());
 }
 
 async function _checkForNewDeploy(reason){
@@ -5101,7 +5115,7 @@ async function fbCloudSync(showToast){
   // Hard guarantee: a client on an old version cannot affect the shared state.
   // It can only observe. The exception is the reset/wipe push itself (which runs
   // before being detected as stale) — but if we're already stale, we push nothing.
-  if(window.__aspenStale){
+  if(window.__aspenStale && !window.__aspenAllowFinalPush){
     if(showToast && typeof toast === 'function') toast('🔒 Screen out of date — update to make changes', 'err');
     console.warn('[version-lock] push blocked — screen is read-only');
     return;
@@ -11910,7 +11924,7 @@ function confirmDispatch(id){
   // Build dispatch record — include marriage info
   const marDelivered = marriagesDeliveredForSn(u.sn);
   const allMar = [...marPending, ...marDelivered];
-  const rec={id:u.id,sn:u.sn,dealer:u.dealer,type:u.type,originalPos:u.pos,entryDate:u.entry||'—',dispatchDate:date,dispatchTime:time,authorizedBy:auth,notes,marriageItems: allMar.map(m=>({name:m.accessoryName,qty:m.accessoryQty,wasPending:m.status==='pending'})),checklistConfirmed: Array.isArray(window._dispatchChecklist) ? [...window._dispatchChecklist] : null,coverPaired: u.coverPaired || null};
+  const rec={id:u.id,sn:u.sn,dealer:u.dealer,type:u.type,originalPos:u.pos,entryDate:u.entry||'—',dispatchDate:date,dispatchTime:time,authorizedBy:auth,notes,marriageItems: allMar.map(m=>({name:m.accessoryName,qty:m.accessoryQty,wasPending:m.status==='pending'})),checklistConfirmed: Array.isArray(window._dispatchChecklist) ? [...window._dispatchChecklist] : null,coverPaired: u.coverPaired || null, bolPdf:(events.find(e=>e.type==='dispatch'&&String(e.sn)===String(u.sn)&&e.bolPdf)||{}).bolPdf||null};
   dispatched.unshift(rec);
   postMovement({type:'601', sn:u.sn, material:u.type||'', qty:1, from:LOC_WAREHOUSE(u.pos), to:LOC_DEALER(u.dealer), stockType:'unrestricted', ref:auth, note:'Dispatch to dealer'});
   units=units.filter(x=>x.id!==id);
@@ -14546,6 +14560,12 @@ function viewDeliveryEvidence(recId, which){
   toast('No file attached to this record','err');
 }
 window.viewDeliveryEvidence = viewDeliveryEvidence;
+function viewDispatchBol(recId){
+  const d = dispatched.find(x => (x.id||0) === recId);
+  if(d && d.bolPdf){ openDataUrlInNewTab(d.bolPdf, 'BOL-' + (d.dealer||'dispatch') + '.pdf'); return; }
+  toast('No BOL attached to this record','err');
+}
+window.viewDispatchBol = viewDispatchBol;
 
 // ── Edit the dates on a dispatch-log record (fix mistakes). Also re-syncs the
 // calendar event so a delivered unit stops appearing as an "upcoming dispatch". ──
@@ -14744,6 +14764,7 @@ function renderDispatched(){
     const _evParts = [];
     if(d.deliveryDoc) _evParts.push(`<button class="btn btn-sm" style="font-size:9px;padding:2px 7px;background:#eff6ff;border-color:#bfdbfe;color:#1e40af" onclick="viewDeliveryEvidence(${d.id||0},'doc')" title="${escapeHTML(d.deliveryDocName||'BOL.pdf')}">\u{1F4C4} BOL</button>`);
     if(d.deliveryPhoto) _evParts.push(`<button class="btn btn-sm" style="font-size:9px;padding:2px 7px;background:#f0fdf4;border-color:#bbf7d0;color:#15803d" onclick="viewDeliveryEvidence(${d.id||0},'photo')">\u{1F5BC} Photo</button>`);
+    if(d.bolPdf) _evParts.push(`<button class="btn btn-sm" style="font-size:9px;padding:2px 7px;background:#fef9c3;border-color:#fde68a;color:#92400e" onclick="viewDispatchBol(${d.id||0})">\u{1F4C4} BOL</button>`);
     const evidenceLinks = _evParts.join(' ');
     const editDatesBtn = `<button class="btn btn-sm" style="font-size:10px;padding:3px 8px" onclick="openEditDispatchDates(${d.id||0})" title="Fix the pickup / delivery dates">\u{1F4C5} Dates</button>`;
     return `<tr>
@@ -15052,10 +15073,7 @@ function selDayPanel(ds){
 function viewBolPdf(groupId){
   const ev = events.find(e => String(e.groupId) === String(groupId) && e.bolPdf);
   if(!ev || !ev.bolPdf){ toast('BOL not found','err'); return; }
-  const w = window.open('', '_blank');
-  w.document.write(`<html><head><title>BOL — ${ev.dealer}</title></head><body style="margin:0">
-    <embed src="${ev.bolPdf}" type="application/pdf" style="width:100vw;height:100vh">
-  </body></html>`);
+  openDataUrlInNewTab(ev.bolPdf, 'BOL-' + (ev.dealer || 'dispatch') + '.pdf');
 }
 
 // Print pre-load report — list of S/Ns + their warehouse positions for the forklift driver
@@ -15260,8 +15278,8 @@ function openCreateDispatch(){
     </div>
 
     <div class="fgrid" style="margin-bottom:10px;grid-template-columns:2fr 1fr">
-      <div class="fg"><label class="fl">Carrier (auto-fills from BOL)</label><input class="fi" id="dsp-carrier" placeholder="e.g. AVY'S TOWING LLC (MC#1590080)"></div>
-      <div class="fg"><label class="fl">PO # (auto-fills from BOL)</label><input class="fi" id="dsp-po" placeholder="e.g. 25422"></div>
+      <div class="fg"><label class="fl">Carrier</label><input class="fi" id="dsp-carrier" placeholder="e.g. AVY'S TOWING LLC (MC#1590080)"></div>
+      <div class="fg"><label class="fl">PO #</label><input class="fi" id="dsp-po" placeholder="e.g. 25422"></div>
     </div>
 
     <!-- BOL upload -->
@@ -15269,9 +15287,9 @@ function openCreateDispatch(){
       <input type="file" id="dsp-bol" accept="application/pdf" style="display:none" onchange="parseBolPdf(this)">
       <div style="font-weight:700;color:var(--accent);font-size:13px;display:flex;align-items:center;justify-content:center;gap:7px">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5"/></svg>
-        Upload BOL (PDF) — auto-extract S/Ns, dealer, carrier, PO
+        Upload BOL (PDF) — attach to this dispatch
       </div>
-      <div style="font-size:10.5px;color:var(--text3);margin-top:4px">The system reads the PDF and auto-fills everything it can find</div>
+      <div style="font-size:10.5px;color:var(--text3);margin-top:4px">Attaches the BOL to this dispatch. S/Ns and details are entered manually below.</div>
       <div id="dsp-bol-status" style="font-size:10.5px;margin-top:6px"></div>
     </div>
 
@@ -15332,7 +15350,7 @@ function renderDispRows(){
         ? `<span style="font-family:var(--mono);font-size:10px;color:#7c3aed;font-weight:700">Cover</span>`
         : isAccessory
         ? `<span style="font-family:var(--mono);font-size:10px;color:#9a3412;font-weight:700">${(r.accessoryType||'Acc').slice(0,1).toUpperCase()+(r.accessoryType||'cc').slice(1)}</span>`
-        : `<span style="font-family:var(--mono);font-size:10px;color:var(--text2);font-weight:600">${r.type ? tl(r.type) : '—'}</span>`;
+        : `<span id="dsp-ty-${idx}" style="font-family:var(--mono);font-size:10px;color:var(--text2);font-weight:600">${r.type ? tl(r.type) : '—'}</span>`;
       // Show MODEL for spa rows (e.g. "Quattro", "Colorado") — fall back to dealer if no model
       // For cover and accessory rows, show the description
       const modelOrDesc = (isCover || isAccessory) ? (r.dealer||'') : (r.model || r.dealer || '');
@@ -15340,14 +15358,39 @@ function renderDispRows(){
       const dispField = (isCover || isAccessory) ? "'dealer'" : "'model'";
       return `<div style="display:grid;grid-template-columns:120px 1fr 80px 1fr 30px;gap:6px;padding:7px 10px;border-bottom:1px solid var(--line);align-items:center;font-size:11px;${rowBg}">
         ${snDisplay}
-        <input class="fi" style="font-size:11px;padding:4px 7px" value="${modelOrDesc}" placeholder="${modelPlaceholder}" oninput="updateDispRow(${idx},${dispField},this.value)">
+        <input class="fi" id="dsp-model-${idx}" style="font-size:11px;padding:4px 7px" value="${modelOrDesc}" placeholder="${modelPlaceholder}" oninput="updateDispRow(${idx},${dispField},this.value)">
         ${typeDisplay}
-        <span style="font-size:10.5px;color:${stColor};font-weight:600;display:inline-flex;align-items:center;gap:4px">${stIcon} ${r.location || (r.sn ? 'Type S/N to check' : '—')}</span>
+        <span id="dsp-st-${idx}" style="font-size:10.5px;color:${stColor};font-weight:600;display:inline-flex;align-items:center;gap:4px">${stIcon} ${r.location || (r.sn ? 'Type S/N to check' : '—')}</span>
         <button class="btn btn-sm btn-r" style="padding:2px 6px;font-size:11px" onclick="rmDispRow(${idx})" title="Remove">×</button>
       </div>`;
     }).join('')}
   `;
   // Update summary
+  updateDispSummary();
+}
+
+// Update ONLY one row's status/type/model in place — never rebuild the whole
+// list while the user is typing an S/N (rebuilding was stealing input focus).
+function refreshDispRowStatus(idx){
+  const r = _dispRows[idx]; if(!r) return;
+  const stColor = r.status === 'in-warehouse' ? 'var(--teal)' :
+                  r.status === 'missing' ? 'var(--red)' :
+                  r.status === 'at-factory' ? 'var(--orange)' :
+                  r.status === 'incoming' ? 'var(--amber)' :
+                  r.status === 'cover-needed' ? '#7c3aed' :
+                  r.status === 'accessory-needed' ? 'var(--red)' : 'var(--text3)';
+  const stIcon  = r.status === 'in-warehouse' ? '✓' :
+                  r.status === 'missing' ? '✗' :
+                  r.status === 'at-factory' ? '🚚' :
+                  r.status === 'incoming' ? '⏳' :
+                  r.status === 'cover-needed' ? '🛡' :
+                  r.status === 'accessory-needed' ? '🔧' : '·';
+  const stEl = document.getElementById('dsp-st-'+idx);
+  if(stEl){ stEl.style.color = stColor; stEl.innerHTML = `${stIcon} ${r.location || (r.sn ? 'Type S/N to check' : '—')}`; }
+  const tyEl = document.getElementById('dsp-ty-'+idx);
+  if(tyEl) tyEl.textContent = r.type ? tl(r.type) : '—';
+  const mdEl = document.getElementById('dsp-model-'+idx);
+  if(mdEl && document.activeElement !== mdEl) mdEl.value = (r.model || r.dealer || '');
   updateDispSummary();
 }
 
@@ -15373,7 +15416,7 @@ function updateDispRow(idx, field, value){
       _dispRows[idx].location = '';
       _dispRows[idx].type = '';
     }
-    renderDispRows();
+    refreshDispRowStatus(idx);
   } else {
     updateDispSummary();
   }
@@ -15423,6 +15466,18 @@ async function parseBolPdf(input){
   const f = input.files[0];
   if(!f) return;
   const status = document.getElementById('dsp-bol-status');
+  // ── Attach-only mode (auto-extraction disabled by request): just store the BOL PDF. ──
+  {
+    const MAXB = 2 * 1024 * 1024;
+    if(f.size > MAXB){ status.innerHTML = `<span style="color:var(--red)">PDF is ${(f.size/1048576).toFixed(1)} MB — max 2 MB. Use a smaller file.</span>`; input.value=''; _dispBolPdf=null; return; }
+    status.innerHTML = '<span style="color:var(--text2)">Attaching PDF…</span>';
+    try{
+      _dispBolPdf = await new Promise((res,rej)=>{ const rd=new FileReader(); rd.onload=()=>res(rd.result); rd.onerror=()=>rej(rd.error); rd.readAsDataURL(f); });
+      const kb = Math.round(_dispBolPdf.length/1024);
+      status.innerHTML = `<span style="color:var(--teal);font-weight:700">✓ BOL attached: ${escapeHTML(f.name)} (~${kb} KB)</span><div style="color:var(--text3);font-size:10px;margin-top:2px">Enter S/Ns and details manually below.</div>`;
+    }catch(e){ _dispBolPdf=null; status.innerHTML = '<span style="color:var(--red)">Could not read the PDF</span>'; }
+    return;
+  }
   status.innerHTML = '<span style="color:var(--text2)">Reading PDF…</span>';
   try{
     if(typeof pdfjsLib === 'undefined'){
@@ -16126,6 +16181,12 @@ function saveCreateDispatch(){
   }
   document.getElementById('sched-float').innerHTML = '';
   _dispRows = []; _dispBolPdf = null;
+  // CRITICAL: persist this dispatch to disk AND push to the cloud right away.
+  // Without this, the dispatch only lived in memory behind a 100ms debounce — if
+  // the screen auto-reloaded to a new version (or another device synced) before
+  // the push landed, "cloud wins on open" would discard it and the dispatch vanished.
+  try{ flushSave(); }catch(e){}
+  try{ if(typeof fbCloudSync === 'function' && _fbDb && _fbAuthorized) fbCloudSync(false); }catch(e){}
   renderCal(); updBadges();
   selDay = date;
   selDayPanel(date);
