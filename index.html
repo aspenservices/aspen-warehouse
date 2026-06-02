@@ -4565,7 +4565,7 @@ let _fbInitAttempts = 0;
 //   /app_version/current  (in Firebase console, manually, OR call
 //   pushVersionToFirebase() from the Admin console at deploy time)
 // ══════════════════════════════════════════════════════════════════
-const APP_VERSION = 'v4.37';
+const APP_VERSION = 'v4.42';
 window.APP_VERSION = APP_VERSION;
 
 // ── DATA EPOCH (generation guard) ────────────────────────────────────
@@ -8550,6 +8550,10 @@ function addAct(m,c){ activity.unshift({m,c,t:new Date().toLocaleTimeString('en-
 // can never break a stock operation.
 // ═══════════════════════════════════════════════════════════════════════════
 const MOVEMENT_TYPES = {
+  '561': { label:'Initial Entry',           short:'IE',  dir:'in',  color:'#0891b2', bg:'#cffafe', icon:'\u{1F195}' },
+  '551': { label:'Scrapping \u00B7 Removed',    short:'SC',  dir:'out', color:'#b91c1c', bg:'#fee2e2', icon:'\u{1F5D1}' },
+  'RTS': { label:'Released \u00B7 Ship to WH',  short:'RTS', dir:'mov', color:'#0d9488', bg:'#ccfbf1', icon:'\u{1F4E6}' },
+  'MAR': { label:'Marriage \u00B7 Paired',      short:'MAR', dir:'mov', color:'#db2777', bg:'#fce7f3', icon:'\u{1F48D}' },
   '101': { label:'Goods Receipt',           short:'GR',  dir:'in',  color:'#16a34a', bg:'#dcfce7', icon:'\u{1F4E5}' },
   '102': { label:'GR Reversal',             short:'GR\u2013', dir:'out', color:'#15803d', bg:'#dcfce7', icon:'\u21A9' },
   '601': { label:'Goods Issue \u00B7 Delivery', short:'GI', dir:'out', color:'#dc2626', bg:'#fee2e2', icon:'\u{1F4E4}' },
@@ -9457,6 +9461,10 @@ function setupDropExtended(el,pos){
       // Placed on the floor → remove from BOTH the incoming list and the arriving
       // queue so it stops asking for a position. (Alberto: a drag-drop placement
       // must clear the item out of Incoming — it now lives on the floor as a unit.)
+      try{
+        const _arrived = qi.status === 'arrived';
+        postMovement({type:_arrived?'309':'101', sn:qi.sn||'', material:qi.type||'', qty:qi.qty||1, from:_arrived?LOC_WAREHOUSE(''):LOC_TRANSIT, to:LOC_WAREHOUSE(pos), stockType:'unrestricted', note:_arrived?('Put-away to '+pos):('Received + put-away at '+pos)});
+      }catch(e){}
       if(qi._fromIncoming){
         incoming = incoming.filter(i => i.id !== qi.id);
       }
@@ -10439,6 +10447,7 @@ function fulfillMarriage(id){
   snapshot('marriage-fulfill');
   m.status = 'fulfilled';
   m.fulfilledAt = new Date().toISOString().slice(0,10);
+  try{ postMovement({type:'MAR', sn:m.spaSn||'', material:'accessory', qty:m.accessoryQty||1, from:(m.location?LOC_WAREHOUSE(m.location):null), to:null, stockType:'unrestricted', note:'Married '+(m.accessoryName||'accessory')+' \u2192 '+(m.spaSn||'?')}); }catch(e){}
   if(typeof addAct === 'function') addAct(`💍 Marriage #${id} fulfilled — ${m.accessoryName} delivered with ${m.spaSn}`, 'var(--accent)');
   if(typeof saveState === 'function') saveState();
   if(typeof drawMap === 'function') drawMap();
@@ -11304,6 +11313,7 @@ function quickAddSpa(pos){
   if(slot){ newU.stack=slot.stack; newU.level=slot.level; }
   if(alreadyInWh) newU.alreadyInWh = true;
   units.push(newU);
+  try{ postMovement({type: alreadyInWh?'561':'101', sn, material:type||'', qty:1, from: alreadyInWh?null:LOC_TRANSIT, to:LOC_WAREHOUSE(pos), stockType:'unrestricted', note: alreadyInWh?'Initial stock entry (already in WH)':'Goods receipt (quick-add)'}); }catch(e){}
   _slotHint = null;
   const tag = alreadyInWh ? ' (pre-existing)' : '';
   addAct(`Spa ${sn||dealer} added at ${pos}${slot?` (S${slot.stack}-${LEVEL_SHORT(slot.level)})`:''}${tag}`,'var(--accent)');
@@ -12074,6 +12084,10 @@ function addUnit(inIdx){
   if(slot){ newU.stack=slot.stack; newU.level=slot.level; }
   if(alreadyInWh) newU.alreadyInWh = true;
   units.push(newU);
+  try{
+    if(inIdx>=0){ postMovement({type:'101', sn, material:type||'', qty:1, from:LOC_TRANSIT, to:LOC_WAREHOUSE(pos), stockType:'unrestricted', note:'Received + put-away (manual)'}); }
+    else { postMovement({type:'561', sn, material:type||'', qty:1, from:null, to:LOC_WAREHOUSE(pos), stockType:'unrestricted', note: alreadyInWh?'Initial stock entry (already in WH)':'Manual unit entry'}); }
+  }catch(e){}
   // If this unit came from an incoming entry, it's now placed → remove it from
   // incoming AND the arriving queue so it no longer shows as awaiting a position.
   if(inIdx>=0 && incoming[inIdx]){
@@ -12258,6 +12272,7 @@ function rmUnit(id){
   }
   if(!confirm(`Remove ${u.sn||u.dealer} from warehouse?`))return;
   snapshot(`remove ${u.sn||u.dealer}`);
+  try{ postMovement({type:'551', sn:u.sn||'', material:u.type||'', qty:1, from:LOC_WAREHOUSE(u.pos), to:null, stockType:'unrestricted', note:'Removed from warehouse'}); }catch(e){}
   // Cleanup: credit back paired cover + remove from pending queue
   const cleaned = cleanupPendingCoversForSn(u.sn);
   const credited = creditBackCoverIfPaired(u, 'unit removed from warehouse');
@@ -14505,6 +14520,97 @@ function confirmReturnUnit(recId, sn){
 }
 window.confirmReturnUnit = confirmReturnUnit;
 
+// ── Delivery evidence viewer: open a stored photo/PDF data URL in a new tab ──
+// Converts the data URL to a Blob first (browsers block top-level data: PDFs).
+function dataUrlToBlob(dataUrl){
+  const parts = String(dataUrl).split(',');
+  const mime = ((parts[0]||'').match(/data:([^;]+)/)||[])[1] || 'application/octet-stream';
+  const bin = atob(parts[1]||''); const len = bin.length; const arr = new Uint8Array(len);
+  for(let i=0;i<len;i++) arr[i] = bin.charCodeAt(i);
+  return new Blob([arr], {type:mime});
+}
+function openDataUrlInNewTab(dataUrl, name){
+  try{
+    const url = URL.createObjectURL(dataUrlToBlob(dataUrl));
+    const w = window.open(url, '_blank');
+    if(!w){ const a=document.createElement('a'); a.href=url; a.download=name||'evidence'; document.body.appendChild(a); a.click(); a.remove(); }
+    setTimeout(()=>{ try{ URL.revokeObjectURL(url); }catch(e){} }, 60000);
+  }catch(e){ try{ toast('Could not open file','err'); }catch(_){} }
+}
+window.openDataUrlInNewTab = openDataUrlInNewTab;
+function viewDeliveryEvidence(recId, which){
+  const d = dispatched.find(x => (x.id||0) === recId);
+  if(!d){ toast('Record not found','err'); return; }
+  if(which==='doc' && d.deliveryDoc){ openDataUrlInNewTab(d.deliveryDoc, d.deliveryDocName||'BOL.pdf'); return; }
+  if(which==='photo' && d.deliveryPhoto){ openDataUrlInNewTab(d.deliveryPhoto, 'delivery-photo.jpg'); return; }
+  toast('No file attached to this record','err');
+}
+window.viewDeliveryEvidence = viewDeliveryEvidence;
+
+// ── Edit the dates on a dispatch-log record (fix mistakes). Also re-syncs the
+// calendar event so a delivered unit stops appearing as an "upcoming dispatch". ──
+function openEditDispatchDates(recId){
+  const d = dispatched.find(x => (x.id||0) === recId);
+  if(!d){ toast('Record not found','err'); return; }
+  if(typeof canEdit === 'function' && !canEdit()){ toast('View-only mode','err'); return; }
+  const overlay = el('div',''); overlay.id = 'edit-dates-overlay';
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(15,23,42,.55);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px';
+  overlay.onclick = e => { if(e.target === overlay) overlay.remove(); };
+  const panel = el('div','');
+  panel.style.cssText = 'background:var(--bg2);border-radius:14px;max-width:420px;width:100%;box-shadow:0 20px 60px rgba(0,0,0,.3);overflow:hidden';
+  const isDelivered = d.deliveryStatus === 'delivered-to-dealer';
+  const dispDate = d.dispatchDate || (d.dispatchedAt||'').slice(0,10) || (d.date||'') || '';
+  const dispTime = d.dispatchTime || '';
+  const delivDate = (d.deliveryConfirmedAt||'').slice(0,10);
+  const entryDate = (d.entryDate && d.entryDate !== '\u2014') ? d.entryDate : '';
+  panel.innerHTML = `
+    <div style="background:linear-gradient(135deg,#1a56db,#1e40af);padding:16px 20px;color:#fff">
+      <div style="font-size:10px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;opacity:.85">Edit dates</div>
+      <div style="font-size:16px;font-weight:700;margin-top:2px">S/N ${escapeHTML(d.sn||'\u2014')} \u00B7 ${escapeHTML(d.dealer||'')}</div>
+    </div>
+    <div style="padding:18px 20px">
+      <label style="font-size:11px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.05em">Pickup / dispatch date</label>
+      <div style="display:flex;gap:8px;margin:5px 0 13px">
+        <input id="ed-disp-date" type="date" value="${dispDate}" style="flex:2;padding:9px 11px;font-size:13px;border:1.5px solid var(--line);border-radius:7px">
+        <input id="ed-disp-time" type="time" value="${dispTime}" style="flex:1;padding:9px 11px;font-size:13px;border:1.5px solid var(--line);border-radius:7px">
+      </div>
+      ${isDelivered ? `
+      <label style="font-size:11px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.05em">Delivery date</label>
+      <input id="ed-deliv-date" type="date" value="${delivDate}" style="width:100%;padding:9px 11px;font-size:13px;border:1.5px solid var(--line);border-radius:7px;margin:5px 0 13px">` : ''}
+      <label style="font-size:11px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.05em">Entry date</label>
+      <input id="ed-entry-date" type="date" value="${entryDate}" style="width:100%;padding:9px 11px;font-size:13px;border:1.5px solid var(--line);border-radius:7px;margin:5px 0 6px">
+      <div style="font-size:10.5px;color:var(--text3);margin-bottom:14px;line-height:1.4">Fixing the pickup date also moves the calendar entry, so a delivered unit stops showing as an upcoming dispatch.</div>
+      <div style="display:flex;gap:8px">
+        <button id="ed-save" class="btn btn-p" style="flex:1;padding:11px;font-weight:700">Save dates</button>
+        <button class="btn" onclick="document.getElementById('edit-dates-overlay').remove()" style="padding:11px 16px">Cancel</button>
+      </div>
+    </div>`;
+  overlay.appendChild(panel); document.body.appendChild(overlay);
+  panel.querySelector('#ed-save').addEventListener('click', () => {
+    const nd = panel.querySelector('#ed-disp-date').value;
+    const nt = panel.querySelector('#ed-disp-time').value;
+    const ndel = isDelivered ? (panel.querySelector('#ed-deliv-date')||{}).value : '';
+    const nentry = panel.querySelector('#ed-entry-date').value;
+    snapshot('edit dispatch dates');
+    if(nd){ d.dispatchDate = nd; if(d.dispatchedAt) d.dispatchedAt = nd + 'T' + (nt||'12:00') + ':00'; if(d.date) d.date = nd; }
+    if(nt) d.dispatchTime = nt;
+    if(isDelivered && ndel){ const t = (d.deliveryConfirmedAt||'').split('T')[1] || (new Date().toTimeString().slice(0,8)); d.deliveryConfirmedAt = ndel + 'T' + t; }
+    if(nentry) d.entryDate = nentry;
+    let moved = 0;
+    if(nd && typeof events !== 'undefined' && Array.isArray(events)){
+      events.forEach(ev => { if(ev.type === 'dispatch' && String(ev.sn) === String(d.sn)){ ev.date = nd; moved++; } });
+    }
+    addAct(`\u{1F4C5} Dates edited: S/N ${d.sn||d.dealer}${moved?` \u00B7 ${moved} calendar event(s) moved`:''}`,'var(--accent)');
+    toast('Dates updated','ok');
+    try{ flushSave(); }catch(e){}
+    if(typeof updBadges === 'function') updBadges();
+    overlay.remove();
+    renderDispatched();
+    if(typeof renderCal === 'function') renderCal();
+  });
+}
+window.openEditDispatchDates = openEditDispatchDates;
+
 function renderDispatched(){
   // ── Upcoming dispatches (next 14 days) — show to warehouse mgr/admin/organizer
   const upcomingCard = document.getElementById('upcoming-dispatches-card');
@@ -14635,6 +14741,11 @@ function renderDispatched(){
     const checklist = Array.isArray(d.checklistConfirmed) && d.checklistConfirmed.length
       ? `<span style="font-size:9px;color:var(--teal);font-weight:600" title="${d.checklistConfirmed.map(c => escapeHTML(c)).join(' · ')}">✓ ${d.checklistConfirmed.length} items confirmed</span>`
       : '';
+    const _evParts = [];
+    if(d.deliveryDoc) _evParts.push(`<button class="btn btn-sm" style="font-size:9px;padding:2px 7px;background:#eff6ff;border-color:#bfdbfe;color:#1e40af" onclick="viewDeliveryEvidence(${d.id||0},'doc')" title="${escapeHTML(d.deliveryDocName||'BOL.pdf')}">\u{1F4C4} BOL</button>`);
+    if(d.deliveryPhoto) _evParts.push(`<button class="btn btn-sm" style="font-size:9px;padding:2px 7px;background:#f0fdf4;border-color:#bbf7d0;color:#15803d" onclick="viewDeliveryEvidence(${d.id||0},'photo')">\u{1F5BC} Photo</button>`);
+    const evidenceLinks = _evParts.join(' ');
+    const editDatesBtn = `<button class="btn btn-sm" style="font-size:10px;padding:3px 8px" onclick="openEditDispatchDates(${d.id||0})" title="Fix the pickup / delivery dates">\u{1F4C5} Dates</button>`;
     return `<tr>
     <td class="td-m">${d.sn||'—'}</td>
     <td style="font-weight:600">${d.dealer||'—'}</td>
@@ -14643,9 +14754,13 @@ function renderDispatched(){
     <td class="td-s">${d.entryDate ? fmtD(d.entryDate) : '—'}</td>
     <td>${d.dispatchDate ? fmtD(d.dispatchDate) : '—'} <span class="td-s">${d.dispatchTime||''}</span></td>
     <td style="font-weight:600">${d.authorizedBy||'—'}</td>
-    <td class="td-s" style="max-width:110px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${d.notes||'—'}${checklist?`<br>${checklist}`:''}</td>
+    <td class="td-s" style="max-width:150px">
+      <div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${d.notes||'—'}</div>
+      ${checklist?`<div style="margin-top:2px">${checklist}</div>`:''}
+      ${evidenceLinks?`<div style="margin-top:4px;display:flex;gap:4px;flex-wrap:wrap">${evidenceLinks}</div>`:''}
+    </td>
     <td>${statusBadge}</td>
-    <td>${deliveryAction}</td>
+    <td><div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">${deliveryAction}${editDatesBtn}</div></td>
   </tr>`;
   }).join('');
   wrap.innerHTML=`<table><thead><tr><th>S/N</th><th>Dealer</th><th>Type</th><th>Position</th><th>Entry</th><th>Pickup</th><th>Auth By</th><th>Notes</th><th>Status</th><th>Delivery</th></tr></thead><tbody>${rows}</tbody></table>`;
@@ -14680,8 +14795,8 @@ function openConfirmDelivery(recId, sn){
       <div style="font-size:11px;font-weight:700;color:var(--text2);letter-spacing:.05em;text-transform:uppercase;margin-bottom:6px">Notes (optional)</div>
       <textarea id="dc-notes" placeholder="Anything noteworthy: damage at pickup, dealer comments, missing items resolved later..." style="width:100%;min-height:60px;padding:9px 11px;border:1.5px solid var(--line);border-radius:7px;font-size:13px;font-family:inherit;resize:vertical;margin-bottom:13px"></textarea>
       <div style="font-size:11px;font-weight:700;color:var(--text2);letter-spacing:.05em;text-transform:uppercase;margin-bottom:6px">Photo evidence (optional)</div>
-      <div style="font-size:10.5px;color:var(--text3);margin-bottom:6px;line-height:1.4">Recommended: dealer's signed paperwork, loaded truck, or warranty form.</div>
-      <input id="dc-photo" type="file" accept="image/*" capture="environment" style="display:block;margin-top:4px;font-size:11px;margin-bottom:6px">
+      <div style="font-size:10.5px;color:var(--text3);margin-bottom:6px;line-height:1.4">Recommended: dealer's signed BOL/paperwork, loaded truck, or warranty form \u2014 photo or PDF.</div>
+      <input id="dc-photo" type="file" accept="image/*,application/pdf" style="display:block;margin-top:4px;font-size:11px;margin-bottom:6px">
       <div id="dc-photo-preview" style="margin-bottom:13px"></div>
       <div style="display:flex;gap:8px">
         <button id="dc-submit" class="btn btn-g" style="padding:11px 18px;font-size:13px;font-weight:700;flex:1">✓ Confirm Delivered</button>
@@ -14691,18 +14806,45 @@ function openConfirmDelivery(recId, sn){
   `;
   overlay.appendChild(panel);
   document.body.appendChild(overlay);
-  // Compressed photo
-  let photoDataUrl = null;
+  // Evidence: a compressed photo OR a PDF (e.g. the dealer BOL). One file.
+  let photoDataUrl = null, docDataUrl = null, docName = null;
   panel.querySelector('#dc-photo').addEventListener('change', async e => {
     const f = e.target.files?.[0]; if(!f) return;
     const preview = panel.querySelector('#dc-photo-preview');
-    preview.innerHTML = '<div style="font-size:11px;color:var(--text3)">Compressing…</div>';
-    try {
-      photoDataUrl = await compressImageToDataUrl(f, 800, 0.7);
-      const sizeKB = Math.round(photoDataUrl.length / 1024);
-      preview.innerHTML = `<img src="${photoDataUrl}" style="max-width:100%;max-height:140px;border-radius:7px;border:1px solid var(--line)"><div style="font-size:10px;color:var(--text3);margin-top:3px">~${sizeKB} KB</div>`;
-    } catch(err){
-      preview.innerHTML = `<div style="font-size:11px;color:var(--red)">Could not process photo</div>`;
+    const isPdf = (f.type === 'application/pdf') || /\.pdf$/i.test(f.name||'');
+    if(isPdf){
+      // PDFs cannot be image-compressed; store as-is, but cap size to protect cloud sync.
+      photoDataUrl = null;
+      const MAXB = 3 * 1024 * 1024;   // 3 MB raw cap
+      if(f.size > MAXB){
+        docDataUrl = null; docName = null; e.target.value = '';
+        preview.innerHTML = `<div style="font-size:11px;color:var(--red)">PDF is ${(f.size/1048576).toFixed(1)} MB \u2014 max 3 MB. Please attach a smaller / compressed BOL.</div>`;
+        return;
+      }
+      preview.innerHTML = '<div style="font-size:11px;color:var(--text3)">Reading PDF\u2026</div>';
+      try{
+        docDataUrl = await new Promise((res,rej)=>{ const r=new FileReader(); r.onload=()=>res(r.result); r.onerror=()=>rej(r.error); r.readAsDataURL(f); });
+        docName = f.name || 'document.pdf';
+        const sizeKB = Math.round(docDataUrl.length/1024);
+        preview.innerHTML = `<div style="display:flex;align-items:center;gap:9px;background:var(--bg3);border:1px solid var(--line);border-radius:8px;padding:8px 10px">
+          <span style="font-size:22px">\u{1F4C4}</span>
+          <div style="flex:1;min-width:0"><div style="font-size:12px;font-weight:700;color:var(--text1);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHTML(docName)}</div><div style="font-size:10px;color:var(--text3)">PDF \u00B7 ~${sizeKB} KB</div></div>
+          <button type="button" id="dc-doc-open" class="btn btn-sm" style="font-size:11px;padding:4px 10px">Open</button>
+        </div>`;
+        const ob = preview.querySelector('#dc-doc-open'); if(ob) ob.onclick = () => openDataUrlInNewTab(docDataUrl, docName);
+      }catch(err){
+        preview.innerHTML = `<div style="font-size:11px;color:var(--red)">Could not read PDF</div>`;
+      }
+    } else {
+      docDataUrl = null; docName = null;
+      preview.innerHTML = '<div style="font-size:11px;color:var(--text3)">Compressing\u2026</div>';
+      try {
+        photoDataUrl = await compressImageToDataUrl(f, 800, 0.7);
+        const sizeKB = Math.round(photoDataUrl.length / 1024);
+        preview.innerHTML = `<img src="${photoDataUrl}" style="max-width:100%;max-height:140px;border-radius:7px;border:1px solid var(--line)"><div style="font-size:10px;color:var(--text3);margin-top:3px">~${sizeKB} KB</div>`;
+      } catch(err){
+        preview.innerHTML = `<div style="font-size:11px;color:var(--red)">Could not process photo</div>`;
+      }
     }
   });
   panel.querySelector('#dc-submit').addEventListener('click', () => {
@@ -14715,6 +14857,7 @@ function openConfirmDelivery(recId, sn){
     rec.deliveryConfirmedBy = by;
     if(notes) rec.deliveryNotes = notes;
     if(photoDataUrl) rec.deliveryPhoto = photoDataUrl;
+    if(docDataUrl){ rec.deliveryDoc = docDataUrl; rec.deliveryDocName = docName || 'document.pdf'; }
     addAct(`✓ Delivery confirmed: S/N ${rec.sn} to ${rec.dealer} by ${by}`,'var(--teal)');
     toast(`Delivery confirmed for S/N ${rec.sn}`,'ok');
     if(typeof updBadges === 'function') updBadges();   // triggers debounced saveState
@@ -17462,7 +17605,7 @@ function buildFactoryCard(f){
         </div>`
       : `<div class="fct-acts" style="margin-top:8px">
           ${isHeld ? '' : `<button class="btn btn-sm btn-p" onclick="shipFromFactory(${f.id})">${isReturned ? '🔧 Re-ship to WH' : '📦 Ship to WH'}</button>`}
-          ${isHeld || isAcc ? '' : `<button class="btn btn-sm" style="background:#ede9fe;border-color:#8b5cf6;color:#5b21b6;font-weight:600" onclick="markReadyForPickup(${f.id})" title="Dealer collects at the factory — Truck won't take it to the warehouse">🤝 Ready to Pick Up</button>`}
+          ${isHeld || (isAcc && /\binside\b/i.test(f.notes||'')) ? '' : `<button class="btn btn-sm" style="background:#ede9fe;border-color:#8b5cf6;color:#5b21b6;font-weight:600" onclick="markReadyForPickup(${f.id})" title="Dealer collects at the factory — Truck won't take it to the warehouse">🤝 Ready to Pick Up</button>`}
           ${holdToggleBtn}
           <button class="btn btn-sm" style="background:#fef9c3;border-color:#f59e0b;color:#78350f" onclick="printQRLabel(${f.id}, 'factory')" title="Print QR shipping label">🏷 Label</button>
           <button class="btn btn-sm" onclick="openFactoryEdit(${f.id})">Edit</button>
@@ -19645,6 +19788,7 @@ function shipFromFactory(id){
       if(!confirm(`Ship "${f.dealer}" from factory?\n\nThis is a loose accessory — it will be logged to Materials immediately.`)) return;
       snapshot('ship loose accessory from factory');
       materials.unshift({id:++nid, name:f.dealer, qty:f.qty||1, cat:'parts', date:toISO(), notes:f.notes||'From factory'});
+      try{ postMovement({type:'101', sn:f.sn||'', material:f.type||'accessory', qty:f.qty||1, from:LOC_FACTORY, to:LOC_WAREHOUSE(''), stockType:'unrestricted', note:'Loose accessory shipped to Materials'}); }catch(e){}
       factory = factory.filter(x => x.id !== id);
       toast('Accessory logged to Materials','ok');
       renderFactory(); renderMaterials(); updBadges(); drawMap();
@@ -19662,6 +19806,7 @@ function shipFromFactory(id){
     if(!confirm(`Mark "${f.dealer}" as READY for Truck pickup?\n\nThis accessory is married to S/N ${f.marriedSn}. It will:\n• Stay at the factory with a "ready" badge\n• Show up in Loading Bay for the Truck crew to scan\n• Move to In Transit only when Truck/Transit scans the QR\n• The marriage stays in "waiting" state until then`)) return;
     snapshot('mark married accessory ready-to-ship');
     f.trackingState = 'ready-to-ship';
+    try{ postMovement({type:'RTS', sn:f.sn||'', material:f.type||'accessory', qty:f.qty||1, from:LOC_FACTORY, to:LOC_WAREHOUSE(''), stockType:'unrestricted', note:'Released \u2014 married accessory ready (S/N '+(f.marriedSn||'?')+')'}); }catch(e){}
     f.trackingId = f.trackingId || makeTrackingId('ACC');
     f.trackingHistory = f.trackingHistory || [];
     f.trackingHistory.push({state:'ready-to-ship', at:toISO(), by:ROLES[currentRole].label, note:'Marked ready — waiting for Truck/Transit to scan'});
@@ -19697,6 +19842,7 @@ function shipFromFactory(id){
   if(!confirm(`Mark "${f.sn||f.dealer}" as READY for Truck pickup?\n\nThe spa stays at the factory and shows a "ready" badge. It only leaves factory inventory when Truck / Transit scans the QR to load it on the truck.`)) return;
   snapshot('mark ready-to-ship');
   f.trackingState = 'ready-to-ship';
+  try{ postMovement({type:'RTS', sn:f.sn||'', material:f.type||'', qty:f.qty||1, from:LOC_FACTORY, to:LOC_WAREHOUSE(''), stockType:'unrestricted', note:'Released \u2014 Ship to WH (awaiting truck)'}); }catch(e){}
   f.trackingHistory = f.trackingHistory || [];
   f.trackingHistory.push({state:'ready-to-ship', at:toISO(), by:ROLES[currentRole].label, note:'Marked ready for truck pickup'});
   addAct(`📦 Ready for pickup: ${f.sn||f.dealer}`,'var(--amber)');
