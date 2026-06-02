@@ -4620,7 +4620,7 @@ let _fbInitAttempts = 0;
 //   /app_version/current  (in Firebase console, manually, OR call
 //   pushVersionToFirebase() from the Admin console at deploy time)
 // ══════════════════════════════════════════════════════════════════
-const APP_VERSION = 'v4.53';
+const APP_VERSION = 'v4.54';
 window.APP_VERSION = APP_VERSION;
 
 // ── DATA EPOCH (generation guard) ────────────────────────────────────
@@ -5858,6 +5858,34 @@ async function fbUploadPhoto(file, type, itemId){
     return null;
   }
 }
+
+// Upload ANY file (PDF, image, or Blob) to Firebase Storage. Returns {url,path}
+// or null on failure. Used by BOL + delivery-evidence flows so we store a cloud
+// LINK instead of a multi-MB base64 string. Falls back to base64 at the call site.
+async function fbUploadFileToStorage(file, type, itemId){
+  if(!_fbStorage || !_fbUser || !_fbAuthorized){ return null; }
+  if(!file || !file.size){ return null; }
+  if(file.size > 12 * 1024 * 1024){ return null; }
+  try {
+    const ts = Date.now();
+    let ext = '';
+    if(file.name && file.name.indexOf('.') >= 0){ ext = file.name.split('.').pop(); }
+    else if(file.type && file.type.includes('pdf')){ ext = 'pdf'; }
+    else if(file.type && file.type.startsWith('image/')){ ext = file.type.split('/')[1] || 'jpg'; }
+    else { ext = 'bin'; }
+    ext = String(ext).toLowerCase().replace(/[^a-z0-9]/g, '') || 'bin';
+    const safeId = String(itemId||'item').replace(/[^a-zA-Z0-9_-]/g, '');
+    const path = `aspen-warehouse/${type}/${safeId}/${ts}.${ext}`;
+    const ref = _fbStorage.ref(path);
+    const snap = await ref.put(file, { contentType: file.type || 'application/octet-stream' });
+    const url = await snap.ref.getDownloadURL();
+    return { url, path, timestamp: ts };
+  } catch(err){
+    console.warn('[storage upload] failed:', err.message);
+    return null;
+  }
+}
+window.fbUploadFileToStorage = fbUploadFileToStorage;
 
 // Generic photo-add UI: opens file picker, uploads, pushes URL to item.photos[]
 // ── IMAGE COMPRESSION ──
@@ -14633,6 +14661,12 @@ function dataUrlToBlob(dataUrl){
 }
 function openDataUrlInNewTab(dataUrl, name){
   try{
+    // Firebase Storage links (or any normal URL) open directly \u2014 no blob step.
+    if(typeof dataUrl === 'string' && /^https?:\/\//i.test(dataUrl)){
+      const w0 = window.open(dataUrl, '_blank');
+      if(!w0){ const a0=document.createElement('a'); a0.href=dataUrl; a0.target='_blank'; a0.rel='noopener'; document.body.appendChild(a0); a0.click(); a0.remove(); }
+      return;
+    }
     const url = URL.createObjectURL(dataUrlToBlob(dataUrl));
     const w = window.open(url, '_blank');
     if(!w){ const a=document.createElement('a'); a.href=url; a.download=name||'evidence'; document.body.appendChild(a); a.click(); a.remove(); }
@@ -14924,20 +14958,26 @@ function openConfirmDelivery(recId, sn){
     if(isPdf){
       // PDFs cannot be image-compressed; store as-is, but cap size to protect cloud sync.
       photoDataUrl = null;
-      const MAXB = 3 * 1024 * 1024;   // 3 MB raw cap
+      const MAXB = 8 * 1024 * 1024;   // Storage handles big files; sanity cap
       if(f.size > MAXB){
         docDataUrl = null; docName = null; e.target.value = '';
         preview.innerHTML = `<div style="font-size:11px;color:var(--red)">PDF is ${(f.size/1048576).toFixed(1)} MB \u2014 max 3 MB. Please attach a smaller / compressed BOL.</div>`;
         return;
       }
-      preview.innerHTML = '<div style="font-size:11px;color:var(--text3)">Reading PDF\u2026</div>';
+      preview.innerHTML = '<div style="font-size:11px;color:var(--text3)">Uploading PDF\u2026</div>';
       try{
-        docDataUrl = await new Promise((res,rej)=>{ const r=new FileReader(); r.onload=()=>res(r.result); r.onerror=()=>rej(r.error); r.readAsDataURL(f); });
         docName = f.name || 'document.pdf';
-        const sizeKB = Math.round(docDataUrl.length/1024);
+        // Prefer Firebase Storage (cloud link). Fall back to base64 if unavailable.
+        const up = await fbUploadFileToStorage(f, 'delivery-doc', (rec&&(rec.id||rec.sn))||Date.now());
+        let metaLine;
+        if(up && up.url){ docDataUrl = up.url; metaLine = 'PDF \u00B7 cloud link'; }
+        else {
+          docDataUrl = await new Promise((res,rej)=>{ const r=new FileReader(); r.onload=()=>res(r.result); r.onerror=()=>rej(r.error); r.readAsDataURL(f); });
+          metaLine = 'PDF \u00B7 ~' + Math.round(docDataUrl.length/1024) + ' KB (local)';
+        }
         preview.innerHTML = `<div style="display:flex;align-items:center;gap:9px;background:var(--bg3);border:1px solid var(--line);border-radius:8px;padding:8px 10px">
           <span style="font-size:22px">\u{1F4C4}</span>
-          <div style="flex:1;min-width:0"><div style="font-size:12px;font-weight:700;color:var(--text1);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHTML(docName)}</div><div style="font-size:10px;color:var(--text3)">PDF \u00B7 ~${sizeKB} KB</div></div>
+          <div style="flex:1;min-width:0"><div style="font-size:12px;font-weight:700;color:var(--text1);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHTML(docName)}</div><div style="font-size:10px;color:var(--text3)">${metaLine}</div></div>
           <button type="button" id="dc-doc-open" class="btn btn-sm" style="font-size:11px;padding:4px 10px">Open</button>
         </div>`;
         const ob = preview.querySelector('#dc-doc-open'); if(ob) ob.onclick = () => openDataUrlInNewTab(docDataUrl, docName);
@@ -14948,9 +14988,14 @@ function openConfirmDelivery(recId, sn){
       docDataUrl = null; docName = null;
       preview.innerHTML = '<div style="font-size:11px;color:var(--text3)">Compressing\u2026</div>';
       try {
-        photoDataUrl = await compressImageToDataUrl(f, 800, 0.7);
-        const sizeKB = Math.round(photoDataUrl.length / 1024);
-        preview.innerHTML = `<img src="${photoDataUrl}" style="max-width:100%;max-height:140px;border-radius:7px;border:1px solid var(--line)"><div style="font-size:10px;color:var(--text3);margin-top:3px">~${sizeKB} KB</div>`;
+        const compressed = await compressImageToDataUrl(f, 800, 0.7);
+        preview.innerHTML = `<img src="${compressed}" style="max-width:100%;max-height:140px;border-radius:7px;border:1px solid var(--line)"><div style="font-size:10px;color:var(--text3);margin-top:3px">Uploading\u2026</div>`;
+        // Prefer Firebase Storage (cloud link). Fall back to compressed base64.
+        let metaLine;
+        const up = await fbUploadFileToStorage(dataUrlToBlob(compressed), 'delivery-photo', (rec&&(rec.id||rec.sn))||Date.now());
+        if(up && up.url){ photoDataUrl = up.url; metaLine = '\u2713 Uploaded to cloud'; }
+        else { photoDataUrl = compressed; metaLine = '~' + Math.round(compressed.length/1024) + ' KB (local)'; }
+        preview.innerHTML = `<img src="${compressed}" style="max-width:100%;max-height:140px;border-radius:7px;border:1px solid var(--line)"><div style="font-size:10px;color:var(--text3);margin-top:3px">${metaLine}</div>`;
       } catch(err){
         preview.innerHTML = `<div style="font-size:11px;color:var(--red)">Could not process photo</div>`;
       }
@@ -15800,13 +15845,20 @@ async function parseBolPdf(input){
   const status = document.getElementById('dsp-bol-status');
   // ── Attach-only mode (auto-extraction disabled by request): just store the BOL PDF. ──
   {
-    const MAXB = 2 * 1024 * 1024;
-    if(f.size > MAXB){ status.innerHTML = `<span style="color:var(--red)">PDF is ${(f.size/1048576).toFixed(1)} MB — max 2 MB. Use a smaller file.</span>`; input.value=''; _dispBolPdf=null; return; }
-    status.innerHTML = '<span style="color:var(--text2)">Attaching PDF…</span>';
+    const MAXB = 8 * 1024 * 1024;   // Storage handles big files; cap kept as a sanity limit
+    if(f.size > MAXB){ status.innerHTML = `<span style="color:var(--red)">PDF is ${(f.size/1048576).toFixed(1)} MB — max 8 MB. Use a smaller file.</span>`; input.value=''; _dispBolPdf=null; return; }
+    status.innerHTML = '<span style="color:var(--text2)">Uploading BOL\u2026</span>';
     try{
-      _dispBolPdf = await new Promise((res,rej)=>{ const rd=new FileReader(); rd.onload=()=>res(rd.result); rd.onerror=()=>rej(rd.error); rd.readAsDataURL(f); });
-      const kb = Math.round(_dispBolPdf.length/1024);
-      status.innerHTML = `<span style="color:var(--teal);font-weight:700">✓ BOL attached: ${escapeHTML(f.name)} (~${kb} KB)</span><div style="color:var(--text3);font-size:10px;margin-top:2px">Enter S/Ns and details manually below.</div>`;
+      // Prefer Firebase Storage: store a cloud LINK, not a multi-MB base64 string.
+      const up = await fbUploadFileToStorage(f, 'bol', 'dispatch-' + Date.now());
+      if(up && up.url){
+        _dispBolPdf = up.url;
+        status.innerHTML = `<span style="color:var(--teal);font-weight:700">\u2713 BOL uploaded: ${escapeHTML(f.name)}</span><div style="color:var(--text3);font-size:10px;margin-top:2px">Stored as a cloud link. Enter S/Ns and details below.</div>`;
+      } else {
+        _dispBolPdf = await new Promise((res,rej)=>{ const rd=new FileReader(); rd.onload=()=>res(rd.result); rd.onerror=()=>rej(rd.error); rd.readAsDataURL(f); });
+        const kb = Math.round(_dispBolPdf.length/1024);
+        status.innerHTML = `<span style="color:var(--teal);font-weight:700">\u2713 BOL attached: ${escapeHTML(f.name)} (~${kb} KB)</span><div style="color:var(--text3);font-size:10px;margin-top:2px">Saved locally (cloud storage unavailable). Enter S/Ns below.</div>`;
+      }
     }catch(e){ _dispBolPdf=null; status.innerHTML = '<span style="color:var(--red)">Could not read the PDF</span>'; }
     return;
   }
