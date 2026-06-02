@@ -1401,6 +1401,36 @@ tbody tr:hover td{background:var(--bg3)}
 .cday.other{color:var(--text4)}
 .cday.sel{background:var(--accent);color:#fff;font-weight:700;box-shadow:0 2px 7px rgba(26,86,219,.3)}
 .cday.sel::after{background:#fff}
+/* ── Calendar view switcher ── */
+.cal-switch{display:inline-flex;background:var(--bg4);border-radius:9px;padding:3px;gap:2px;margin-left:14px}
+.cal-switch button{border:0;background:transparent;color:var(--text2);font-size:11px;font-weight:700;padding:5px 12px;border-radius:7px;cursor:pointer;font-family:inherit;transition:all .14s}
+.cal-switch button.active{background:var(--bg2);color:var(--accent);box-shadow:0 1px 3px rgba(0,0,0,.12)}
+.pillx{display:inline-flex;align-items:center;gap:4px;font-size:10px;font-weight:700;padding:3px 8px;border-radius:20px;white-space:nowrap}
+/* ── Week view (Google-Calendar style) ── */
+.wkgrid{display:grid;grid-template-columns:repeat(7,1fr);gap:6px}
+.wkcol{background:var(--bg3);border:1px solid var(--line);border-radius:9px;min-height:130px;display:flex;flex-direction:column;overflow:hidden}
+.wkcol.is-today{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent)}
+.wkcol-hd{text-align:center;padding:7px 4px;border-bottom:1px solid var(--line);cursor:pointer;background:var(--bg2)}
+.wkcol-hd:hover{background:var(--bg4)}
+.wkcol-hd .dn{font-size:8.5px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.05em}
+.wkcol-hd .dd{font-size:16px;font-weight:800;color:var(--text1);line-height:1.1;margin-top:1px}
+.wkcol.is-today .wkcol-hd .dd{color:var(--accent)}
+.wkcol-body{padding:6px;display:flex;flex-direction:column;gap:6px;flex:1}
+.wktile{background:var(--bg2);border:1px solid var(--line2);border-left-width:4px;border-radius:8px;padding:7px 8px;cursor:pointer;transition:all .12s}
+.wktile:hover{box-shadow:0 3px 9px -3px rgba(0,0,0,.18);transform:translateY(-1px)}
+.wktile .wt-dl{font-size:11px;font-weight:800;line-height:1.15;color:var(--text1);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.wktile .wt-meta{font-size:9px;color:var(--text3);margin-top:2px;font-weight:600}
+.wktile .wt-ready{display:inline-block;font-size:9px;font-weight:800;padding:2px 7px;border-radius:20px;margin-top:5px}
+.wkcol-empty{flex:1;display:flex;align-items:center;justify-content:center;color:var(--text3);font-size:11px;opacity:.45}
+@media(max-width:760px){
+  .cal-hd{flex-wrap:wrap;gap:8px}
+  .cal-switch{margin-left:0}
+  .wkgrid{grid-template-columns:1fr}
+  .wkcol{min-height:0}
+  .wkcol-hd{display:flex;align-items:baseline;gap:9px;justify-content:flex-start;text-align:left;padding:8px 12px}
+  .wkcol-hd .dd{font-size:14px}
+  .wkcol-empty{display:none}
+}
 .ev-item{background:var(--bg2);border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:7px;padding:9px 12px;box-shadow:var(--sh);margin-bottom:5px}
 .ev-item.ev-d{border-left-color:var(--teal)}
 .ev-item.ev-m{border-left-color:var(--orange)}
@@ -3768,12 +3798,17 @@ body.dark-mode .mar-card-track {
         <div class="card-hd">
           <div class="cal-hd" style="width:100%;margin:0">
             <div class="cal-mn" id="cal-lbl">April 2026</div>
-            <div class="cal-nav"><div class="cal-nb" onclick="calNav(-1)">‹</div><div class="cal-nb" onclick="calNav(1)">›</div></div>
+            <div id="cal-switch" class="cal-switch">
+              <button data-view="month" class="active" onclick="setCalView('month')">Month</button>
+              <button data-view="week" onclick="setCalView('week')">Week</button>
+              <button data-view="day" onclick="setCalView('day')">Day</button>
+            </div>
+            <div class="cal-nav"><div class="cal-nb" onclick="calNav(-1)">‹</div><div class="cal-nb" onclick="goCalToday()" style="width:auto;padding:0 10px;font-size:10.5px;font-weight:700">Today</div><div class="cal-nb" onclick="calNav(1)">›</div></div>
           </div>
         </div>
-        <div class="card-body"><div class="cgrid" id="cal-grid"></div></div>
+        <div class="card-body"><div class="cgrid" id="cal-grid"></div><div id="cal-week" style="display:none"></div><div id="cal-day" style="display:none"></div></div>
       </div>
-      <div class="card">
+      <div class="card" id="day-evs-card">
         <div class="card-hd"><div><div class="card-title" id="sel-lbl">Day Events</div></div><div class="card-acts" style="gap:5px"><button class="btn btn-sm btn-p" onclick="openCreateDispatch()" title="Create a Dispatch with S/N list and BOL upload">+ Dispatch</button><button class="btn btn-sm" onclick="openAddEvent()">+ Other Event</button></div></div>
         <div id="day-evs" style="padding:13px 16px"><div style="text-align:center;color:var(--text3);font-size:11px">Select a day to see events. Click a day in the calendar to start.</div></div>
       </div>
@@ -4565,7 +4600,7 @@ let _fbInitAttempts = 0;
 //   /app_version/current  (in Firebase console, manually, OR call
 //   pushVersionToFirebase() from the Admin console at deploy time)
 // ══════════════════════════════════════════════════════════════════
-const APP_VERSION = 'v4.45';
+const APP_VERSION = 'v4.47';
 window.APP_VERSION = APP_VERSION;
 
 // ── DATA EPOCH (generation guard) ────────────────────────────────────
@@ -6302,6 +6337,7 @@ let dragUnit = null;
 let matPhotoData = null;
 let calYear = new Date().getFullYear();
 let calMonth = new Date().getMonth();
+let calView = 'month';   // 'month' | 'week' | 'day'
 let selDay = null;
 let cfg = {emails:[], gcal:false, gcalEmail:'', auth:['Alberto','Jarred','Tony','Dan'], rolePasswords:{admin:'2804',warehouse:'0000',factory:'0000',marriages:'0000',transit:'0000',organizer:'0000',viewer:'0000'}};
 
@@ -11129,6 +11165,7 @@ function showCellPanel(pos,cu){
         ${!isCover&&!isMaterial?`<button class="btn btn-sm btn-g" data-readonly-keep onclick="openDispForm(${u.id})">Dispatch</button>`:''}
         ${!isCover&&!isMaterial&&u.sn?`<button class="btn btn-sm uc-marry-btn" data-readonly-keep style="background:#fef2f2;border-color:#fecaca;color:#991b1b" onclick="openMarriageAdd('${u.sn}','${(u.dealer||'').replace(/'/g,'')}')">+ Marry</button>`:''}
         ${!isCover&&!isMaterial?`<button class="btn btn-sm tracking-btn" onclick="openTrackingHistory('unit',${u.id})" title="View tracking history (admin only)">📜</button>`:''}
+        <button class="btn btn-sm" style="background:#f0fdf4;border-color:#bbf7d0;color:#166534" onclick="printQRLabel(${u.id},'units')" title="View / print this tub's QR label">🏷 Label</button>
         <button class="btn btn-sm btn-r" onclick="rmUnit(${u.id})">Remove</button>
       </div>
     </div>`;
@@ -14930,6 +14967,12 @@ function renderCal(){
   }
   const M=['January','February','March','April','May','June','July','August','September','October','November','December'];
   const D=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+  // ── view switcher state + container toggling ──
+  try{ document.querySelectorAll('#cal-switch button').forEach(b=>b.classList.toggle('active', b.dataset.view===calView)); }catch(e){}
+  const _g=document.getElementById('cal-grid'),_wk=document.getElementById('cal-week'),_dy=document.getElementById('cal-day'),_dec=document.getElementById('day-evs-card');
+  if(calView==='week'){ if(_g)_g.style.display='none'; if(_wk)_wk.style.display=''; if(_dy)_dy.style.display='none'; if(_dec)_dec.style.display='none'; renderWeekView(M,D); renderAllEvts(); return; }
+  if(calView==='day'){ if(_g)_g.style.display='none'; if(_wk)_wk.style.display='none'; if(_dy)_dy.style.display=''; if(_dec)_dec.style.display='none'; renderDayView(M,D); renderAllEvts(); return; }
+  if(_g)_g.style.display=''; if(_wk)_wk.style.display='none'; if(_dy)_dy.style.display='none'; if(_dec)_dec.style.display='';
   document.getElementById('cal-lbl').textContent=`${M[calMonth]} ${calYear}`;
   const grid=document.getElementById('cal-grid');grid.innerHTML='';
   D.forEach(d=>{const e=document.createElement('div');e.className='cdn';e.textContent=d;grid.appendChild(e);});
@@ -14949,6 +14992,185 @@ function renderCal(){
   }
   renderAllEvts();
 }
+
+
+// ════════════════════════ DISPATCH CARD ENGINE (Month/Week/Day views) ════════════════════════
+function _calISO(d){return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;}
+
+// Derive all display data for one dispatch group (shared by all 3 card styles)
+function _dispGroupData(grp){
+  const first = grp[0];
+  const dealer = first.dealer || '\u2014';
+  const time = first.time || '';
+  const rows = grp.map(ev=>{
+    if(ev.isCover) return {ev, isCover:true, status:'Cover', location:`Pick from stock \u00b7 ${ev.coverColor||'Black'}`, color:'#7c3aed', icon:'\ud83d\udee1', locClickable:false};
+    if(ev.isAccessory) return {ev, isAccessory:true, status:'Accessory', location:ev.label||'Accessory', color:'#d97706', icon:'\ud83d\udd27', locClickable:false};
+    const info = findSpaBySn(ev.sn);
+    let status, location, color, icon, locClickable=false;
+    if(info && info.source==='units'){ status='Ready'; location=info.location; color='var(--teal)'; icon='\u2713'; locClickable=true; }
+    else if(info && info.source==='factory'){ status='At Factory'; location='At Factory'; color='var(--orange)'; icon='\ud83d\ude9a'; }
+    else if(info && info.source==='incoming'){ status='In Transit'; location='Incoming'; color='var(--amber)'; icon='\u23f3'; }
+    else if(info && info.source==='dispatched'){ status='Already shipped'; location='Dispatched'; color='var(--text3)'; icon='\u2197'; }
+    else { status='MISSING'; location='Not in warehouse'; color='var(--red)'; icon='\u26a0'; }
+    return {ev, info, status, location, color, icon, locClickable};
+  });
+  const missing = rows.filter(r=>r.status==='MISSING').length;
+  const ready = rows.filter(r=>r.status==='Ready').length;
+  const coverCount = rows.filter(r=>r.isCover).length;
+  const accCount = rows.filter(r=>r.isAccessory).length;
+  const spaCount = rows.length - coverCount - accCount;
+  const locatableSns = rows.filter(r=>r.locClickable && r.ev.sn).map(r=>String(r.ev.sn));
+  return {first, dealer, time, rows, missing, ready, coverCount, accCount, spaCount, locatableSns};
+}
+
+// Shared action buttons row (Locate / Scan / BOL / Print / Delete)
+function _dispActions(gid, data){
+  const sns = data.locatableSns;
+  let b='';
+  if(sns.length) b += `<button class="btn btn-sm" style="background:#fef3c7;border-color:#f59e0b;color:#78350f;font-weight:600" onclick="goToFloorMap('${sns.join(',')}'.split(','), {toast:'${sns.length} spa${sns.length>1?'s':''} highlighted on map'})" title="Show pickup locations on the 3D map">\ud83d\udccd Locate</button>`;
+  if(sns.length && (currentRole==='warehouse'||currentRole==='admin')) b += `<button class="btn btn-sm" style="background:#dbeafe;border-color:#3b82f6;color:#1e40af;font-weight:600" onclick="openQRScanner('dispatch')" title="Scan each spa's QR as you load it">\ud83d\udcf7 Scan</button>`;
+  if(data.first.bolPdf) b += `<button class="btn btn-sm" onclick="viewBolPdf('${gid}')" title="View BOL PDF">\ud83d\udcc4 BOL</button>`;
+  b += `<button class="btn btn-sm" onclick="printPreloadReport('${gid}')" title="Print pre-load report for warehouse">\ud83d\udda8</button>`;
+  if(canEdit()) b += `<button class="btn btn-sm btn-r" style="font-size:10px;padding:3px 7px" onclick="rmDispatchGroup('${gid}')">Delete</button>`;
+  return b;
+}
+
+// ── STYLE A — compact (Month view) ──
+function _dispCardA(gid, data){
+  const {first, dealer, time, rows, missing, ready, spaCount, coverCount} = data;
+  const allReady = missing===0 && ready===spaCount && spaCount>0;
+  const bar = missing?'var(--red)':allReady?'var(--teal)':'var(--amber)';
+  const rTxt = missing?`${ready}/${spaCount} ready \u00b7 \u26a0 ${missing} missing`:allReady?'\u2713 All ready':`${ready}/${spaCount} ready`;
+  const rBg = missing?'background:#fee2e2;color:#991b1b':allReady?'background:#d1fae5;color:#065f46':'background:#fef3c7;color:#92400e';
+  const chips = rows.map(r=>{
+    if(r.isCover) return `<span class="pillx" style="background:#f3e8ff;color:#6b21a8">\ud83d\udee1 ${escapeHTML(r.ev.coverModel||'')} Cover</span>`;
+    if(r.isAccessory) return `<span class="pillx" style="background:#ffedd5;color:#9a3412">\ud83d\udd27 ${escapeHTML(r.ev.partNum||r.ev.label||'Acc')}</span>`;
+    const bg = r.status==='Ready'?'background:#d1fae5;color:#065f46':r.status==='MISSING'?'background:#fee2e2;color:#991b1b':r.status==='At Factory'?'background:#ffedd5;color:#9a3412':r.status==='In Transit'?'background:#fef9c3;color:#854d0e':'background:#f1f5f9;color:#475569';
+    return `<span class="pillx" style="${bg};font-family:var(--mono)">${r.icon} ${escapeHTML(String(r.ev.sn||''))}</span>`;
+  }).join('');
+  return `<div style="display:flex;background:var(--bg2);border:1.5px solid ${missing?'var(--red)':'var(--accent)'};border-radius:var(--r-lg);overflow:hidden;margin-bottom:9px">
+    <div style="width:5px;flex:0 0 5px;background:${bar}"></div>
+    <div style="flex:1;padding:11px 13px;min-width:0">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px">
+        <div style="min-width:0">
+          <div style="font-size:14px;font-weight:800;line-height:1.1">\ud83d\ude9a ${escapeHTML(dealer)}</div>
+          <div style="font-size:10px;color:var(--text3);margin-top:3px">${time||'All day'} \u00b7 ${spaCount} spa${spaCount!==1?'s':''}${coverCount?` + ${coverCount} cover${coverCount>1?'s':''}`:''}${first.carrier?` \u00b7 ${escapeHTML(first.carrier)}`:''}${first.po?` \u00b7 PO ${escapeHTML(first.po)}`:''}</div>
+        </div>
+        <span style="flex:0 0 auto;${rBg};font-size:10px;font-weight:800;padding:4px 9px;border-radius:20px;white-space:nowrap">${rTxt}</span>
+      </div>
+      <div style="display:flex;flex-wrap:wrap;gap:5px;margin:9px 0">${chips}${first.bolPdf?'<span class="pillx" style="background:#eff6ff;color:#1e40af">\ud83d\udcc4 BOL</span>':''}</div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px;border-top:1px solid var(--line);padding-top:9px">${_dispActions(gid,data)}</div>
+    </div>
+  </div>`;
+}
+
+// ── STYLE B — detailed (Day view) ──
+function _dispCardB(gid, data){
+  const {first, dealer, time, rows, missing, ready, spaCount, coverCount} = data;
+  const allReady = missing===0 && ready===spaCount && spaCount>0;
+  const accent = missing?'var(--red)':allReady?'var(--teal)':'var(--amber)';
+  const rBox = missing?'background:#fef2f2;border-color:#fecaca':allReady?'background:#ecfdf5;border-color:#a7f3d0':'background:#fffbeb;border-color:#fde68a';
+  const rNum = missing?'color:var(--red)':allReady?'color:var(--teal)':'color:var(--amber)';
+  const items = rows.map(r=>{
+    let m, sn, mdl, loc;
+    if(r.isCover){ m=['\ud83d\udee1','#f3e8ff','#6b21a8']; sn=(r.ev.coverModel||'Spa')+' Cover'; mdl='\u00b7 '+(r.ev.coverColor||'Black')+(r.ev.coverFor?' \u2192 for '+r.ev.coverFor:''); loc='Pick from stock'; }
+    else if(r.isAccessory){ m=['\ud83d\udd27','#ffedd5','#9a3412']; sn=r.ev.label||'Accessory'; mdl=r.ev.partNum?'\u00b7 #'+r.ev.partNum:''; loc='Factory ship'; }
+    else { const M={'Ready':['\u2713','#d1fae5','#065f46'],'MISSING':['\u26a0','#fee2e2','#991b1b'],'At Factory':['\ud83d\ude9a','#ffedd5','#9a3412'],'In Transit':['\u23f3','#fef9c3','#854d0e'],'Already shipped':['\u2197','#f1f5f9','#475569']}; m=M[r.status]||['\u00b7','#f1f5f9','#475569']; sn=String(r.ev.sn||''); mdl=r.info&&r.info.type?'\u00b7 '+tl(r.info.type):''; loc=r.location; }
+    const snMono = (!r.isCover && !r.isAccessory)?'font-family:var(--mono);':'';
+    return `<div style="display:flex;align-items:center;gap:9px;padding:7px 0;border-bottom:1px solid var(--line)">
+      <div style="width:22px;height:22px;border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:12px;flex:0 0 auto;background:${m[1]};color:${m[2]}">${m[0]}</div>
+      <div style="min-width:0"><span style="font-weight:800;font-size:13px;${snMono}">${escapeHTML(sn)}</span> <span style="font-size:11px;color:var(--text2)">${escapeHTML(mdl)}</span></div>
+      <span style="margin-left:auto;font-size:10.5px;font-weight:700;padding:3px 9px;border-radius:20px;background:${m[1]};color:${m[2]};white-space:nowrap">${escapeHTML(loc)}</span>
+    </div>`;
+  }).join('');
+  return `<div style="background:var(--bg2);border:1.5px solid ${accent};border-radius:var(--r-lg);overflow:hidden;margin-bottom:11px">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:12px 14px;border-bottom:1px solid var(--line)">
+      <div style="min-width:0"><div style="font-size:17px;font-weight:800;line-height:1.05">\ud83d\ude9a ${escapeHTML(dealer)}</div><div style="font-size:11px;color:var(--text2);margin-top:3px;font-weight:600">Dealer pickup \u00b7 ${time||'All day'}</div></div>
+      <div style="text-align:center;flex:0 0 auto;border:1px solid;border-radius:10px;padding:6px 12px;${rBox}"><div style="font-size:18px;font-weight:800;line-height:1;${rNum}">${ready}/${spaCount||rows.length}</div><div style="font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;margin-top:2px;${rNum}">Ready</div></div>
+    </div>
+    ${(first.carrier||first.po)?`<div style="display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--line);border-bottom:1px solid var(--line)"><div style="background:var(--bg2);padding:8px 14px"><div style="font-size:9px;font-weight:700;color:var(--text3);text-transform:uppercase">Carrier</div><div style="font-size:12px;font-weight:700;margin-top:2px">${escapeHTML(first.carrier||'\u2014')}</div></div><div style="background:var(--bg2);padding:8px 14px"><div style="font-size:9px;font-weight:700;color:var(--text3);text-transform:uppercase">PO #</div><div style="font-size:12px;font-weight:700;margin-top:2px;font-family:var(--mono)">${escapeHTML(first.po||'\u2014')}</div></div></div>`:''}
+    <div style="padding:4px 14px 6px"><div style="font-size:9.5px;font-weight:800;color:var(--text3);text-transform:uppercase;letter-spacing:.05em;margin:8px 0 3px">Items \u00b7 ${spaCount} spa${spaCount!==1?'s':''}${coverCount?` + ${coverCount} cover${coverCount>1?'s':''}`:''}</div>${items}</div>
+    ${first.notes?`<div style="padding:9px 14px;background:var(--bg3);font-size:11px;color:var(--text2);border-top:1px solid var(--line)">\ud83d\udcdd ${escapeHTML(first.notes)}</div>`:''}
+    <div style="display:flex;flex-wrap:wrap;gap:6px;padding:11px 14px;border-top:1px solid var(--line)">${_dispActions(gid,data)}</div>
+  </div>`;
+}
+
+// ── STYLE C — compact tile (Week view) ──
+function _dispCardC(gid, data){
+  const {first, dealer, time, missing, ready, spaCount} = data;
+  const allReady = missing===0 && ready===spaCount && spaCount>0;
+  const bar = missing?'var(--red)':allReady?'var(--teal)':'var(--amber)';
+  const rTxt = missing?`${ready}/${spaCount} \u00b7 \u26a0${missing}`:allReady?'\u2713 Ready':`${ready}/${spaCount}`;
+  const rBg = missing?'background:#fee2e2;color:#991b1b':allReady?'background:#d1fae5;color:#065f46':'background:#fef3c7;color:#92400e';
+  return `<div class="wktile" style="border-left-color:${bar}" onclick="setCalView('day','${first.date}')" title="Open day view">
+    <div class="wt-dl">\ud83d\ude9a ${escapeHTML(dealer)}</div>
+    <div class="wt-meta">${time||'All day'} \u00b7 ${spaCount} spa${spaCount!==1?'s':''}${first.bolPdf?' \u00b7 \ud83d\udcc4':''}</div>
+    <span class="wt-ready" style="${rBg}">${rTxt}</span>
+  </div>`;
+}
+
+// ── WEEK VIEW (7 columns desktop, stacked on mobile) ──
+function renderWeekView(M,D){
+  const anchor = new Date((selDay||toISO())+'T12:00:00');
+  const ws = new Date(anchor); ws.setDate(ws.getDate()-ws.getDay());
+  const days=[]; for(let i=0;i<7;i++){ const d=new Date(ws); d.setDate(ws.getDate()+i); days.push(d); }
+  const last=days[6];
+  const lbl = ws.getMonth()===last.getMonth()
+    ? `${M[ws.getMonth()].slice(0,3)} ${ws.getDate()} \u2013 ${last.getDate()}, ${last.getFullYear()}`
+    : `${M[ws.getMonth()].slice(0,3)} ${ws.getDate()} \u2013 ${M[last.getMonth()].slice(0,3)} ${last.getDate()}, ${last.getFullYear()}`;
+  document.getElementById('cal-lbl').textContent = lbl;
+  const todayISO=_calISO(new Date());
+  let html='<div class="wkgrid">';
+  days.forEach(d=>{
+    const ds=_calISO(d);
+    const dayEvs=events.filter(e=>e.date===ds);
+    const groups={},others=[];
+    dayEvs.forEach(ev=>{ if(ev.type==='dispatch'&&ev.groupId){(groups[ev.groupId]=groups[ev.groupId]||[]).push(ev);} else others.push(ev); });
+    let body='';
+    Object.keys(groups).forEach(gid=>{ body+=_dispCardC(gid,_dispGroupData(groups[gid])); });
+    others.forEach(ev=>{ body+=`<div class="wktile" style="border-left-color:var(--text3)" onclick="setCalView('day','${ds}')"><div class="wt-dl">${escapeHTML(ev.title||'Event')}</div><div class="wt-meta">${ev.time||''}</div></div>`; });
+    if(!body) body='<div class="wkcol-empty">\u2014</div>';
+    const cls=(ds===todayISO?' is-today':'')+(ds===selDay?' is-sel':'');
+    html+=`<div class="wkcol${cls}"><div class="wkcol-hd" onclick="setCalView('day','${ds}')"><div class="dn">${D[d.getDay()]}</div><div class="dd">${d.getDate()}</div></div><div class="wkcol-body">${body}</div></div>`;
+  });
+  html+='</div>';
+  document.getElementById('cal-week').innerHTML=html;
+}
+
+// ── DAY VIEW (single day, full detail cards) ──
+function renderDayView(M,D){
+  const ds=selDay||toISO();
+  const d=new Date(ds+'T12:00:00');
+  const Dl=['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+  document.getElementById('cal-lbl').textContent=`${Dl[d.getDay()]}, ${M[d.getMonth()]} ${d.getDate()}, ${d.getFullYear()}`;
+  const dayEvs=events.filter(e=>e.date===ds);
+  const groups={},others=[];
+  dayEvs.forEach(ev=>{ if(ev.type==='dispatch'&&ev.groupId){(groups[ev.groupId]=groups[ev.groupId]||[]).push(ev);} else others.push(ev); });
+  const gids=Object.keys(groups);
+  let html=`<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:11px;flex-wrap:wrap;gap:8px"><div style="font-size:13px;font-weight:800">${gids.length} dispatch${gids.length!==1?'es':''}${others.length?` \u00b7 ${others.length} other`:''}</div><div style="display:flex;gap:6px"><button class="btn btn-sm btn-p" onclick="openCreateDispatch()">+ Dispatch</button><button class="btn btn-sm" onclick="openAddEvent()">+ Other Event</button></div></div>`;
+  if(!gids.length && !others.length){
+    html+=`<div style="text-align:center;color:var(--text3);font-size:12px;padding:34px">No events on this day. Click <strong>+ Dispatch</strong> to schedule one.</div>`;
+  } else {
+    gids.forEach(gid=>{ html+=_dispCardB(gid,_dispGroupData(groups[gid])); });
+    others.forEach(ev=>{ html+=`<div class="ev-item ev-${ev.type||'entry'}" style="margin-bottom:9px"><div class="ev-time">${ev.time||'All day'}</div><div class="ev-title">${escapeHTML(ev.title||'')}</div>${ev.dealer?`<div class="ev-sub">${escapeHTML(ev.dealer)}</div>`:''}</div>`; });
+  }
+  document.getElementById('cal-day').innerHTML=html;
+}
+
+// ── Switch between Month / Week / Day ──
+function setCalView(v, optDate){
+  calView=v;
+  if(optDate) selDay=optDate;
+  if(selDay){ const d=new Date(selDay+'T12:00:00'); calMonth=d.getMonth(); calYear=d.getFullYear(); }
+  renderCal();
+  if(v==='month' && selDay) selDayPanel(selDay);
+}
+function goCalToday(){
+  const t=new Date(); selDay=_calISO(t); calMonth=t.getMonth(); calYear=t.getFullYear();
+  renderCal();
+  if(calView==='month') selDayPanel(selDay);
+}
+window.setCalView=setCalView; window.goCalToday=goCalToday;
 
 function selDayPanel(ds){
   const dt=new Date(ds+'T12:00:00');
@@ -14993,70 +15215,9 @@ function selDayPanel(ds){
       </div>`;
     }
   }
-  // Render each dispatch group as a rich card
+  // Render each dispatch group as a compact card (Month view)
   for(const gid in dispatchGroups){
-    const grp = dispatchGroups[gid];
-    const first = grp[0];
-    const dealer = first.dealer || '—';
-    const time = first.time || 'All day';
-    // Re-check current status (the spa may have arrived since the event was created)
-    const rows = grp.map(ev=>{
-      // Cover row — distinct rendering
-      if(ev.isCover){
-        return {ev, isCover:true, status:'Cover', location:`Pick from stock · ${ev.coverColor||'Black'}`, color:'#7c3aed', icon:'🛡'};
-      }
-      const info = findSpaBySn(ev.sn);
-      let status, location, color, icon, locClickable=false;
-      if(info && info.source === 'units'){ status='Ready'; location=info.location; color='var(--teal)'; icon='✓'; locClickable=true; }
-      else if(info && info.source === 'factory'){ status='At Factory'; location='At Factory'; color='var(--orange)'; icon='🚚'; }
-      else if(info && info.source === 'incoming'){ status='In Transit'; location='Incoming'; color='var(--amber)'; icon='⏳'; }
-      else if(info && info.source === 'dispatched'){ status='Already shipped'; location='Dispatched'; color='var(--text3)'; icon='↗'; }
-      else { status='MISSING'; location='Not in warehouse'; color='var(--red)'; icon='⚠'; }
-      return {ev, info, status, location, color, icon, locClickable};
-    });
-    const missing = rows.filter(r=>r.status==='MISSING').length;
-    const ready = rows.filter(r=>r.status==='Ready').length;
-    const coverCount = rows.filter(r=>r.isCover).length;
-    const spaCount = rows.length - coverCount;
-    // SNs in this dispatch that are physically in the warehouse (only those can be located on map)
-    const locatableSns = rows.filter(r=>r.locClickable && r.ev.sn).map(r=>String(r.ev.sn));
-    html += `<div style="background:#fff;border:1.5px solid ${missing?'var(--red)':'var(--accent)'};border-radius:var(--r-lg);padding:11px 13px;margin-bottom:9px">
-      <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px;gap:8px">
-        <div>
-          <div style="font-size:13px;font-weight:700;color:var(--text1)">🚚 ${dealer}</div>
-          <div style="font-size:10px;color:var(--text3);margin-top:1px">${time} · ${spaCount} spa${spaCount!==1?'s':''}${coverCount?` + ${coverCount} cover${coverCount>1?'s':''}`:''}${missing?` · <strong style="color:var(--red)">${missing} missing</strong>`:''}${ready?` · ${ready} ready`:''}</div>
-        </div>
-        <div style="display:flex;gap:4px;flex-shrink:0;flex-wrap:wrap;justify-content:flex-end">
-          ${locatableSns.length ? `<button class="btn btn-sm" style="background:#fef3c7;border-color:#f59e0b;color:#78350f;font-weight:600" onclick="goToFloorMap('${locatableSns.join(',')}'.split(','), {toast:'${locatableSns.length} spa${locatableSns.length>1?'s':''} highlighted on map'})" title="Show pickup locations on the 3D map">📍 Locate</button>` : ''}
-          ${locatableSns.length && (currentRole==='warehouse'||currentRole==='admin') ? `<button class="btn btn-sm" style="background:#dbeafe;border-color:#3b82f6;color:#1e40af;font-weight:600" onclick="openQRScanner('dispatch')" title="Scan each spa's QR as you load it for the dealer pickup">📷 Scan</button>` : ''}
-          ${first.bolPdf?`<button class="btn btn-sm" onclick="viewBolPdf('${gid}')" title="View BOL PDF">📄 BOL</button>`:''}
-          <button class="btn btn-sm" onclick="printPreloadReport('${gid}')" title="Print pre-load report for warehouse">🖨</button>
-          ${canEdit() ? `<button class="btn btn-sm btn-r" style="font-size:10px;padding:3px 7px" onclick="rmDispatchGroup('${gid}')">Delete</button>` : ''}
-        </div>
-      </div>
-      <div style="background:var(--bg3);border-radius:6px;padding:6px 9px;font-size:11px">
-        ${rows.map(r=>{
-          // Location pill — clickable when the spa is physically in the warehouse
-          const locStyle = r.locClickable
-            ? `background:${r.color === 'var(--teal)' ? '#d1fae5' : '#fef3c7'};color:${r.color === 'var(--teal)' ? '#065f46' : '#78350f'};padding:3px 9px;border-radius:11px;font-size:10.5px;font-weight:700;cursor:pointer;transition:all .12s;border:1.5px solid transparent`
-            : `color:${r.color};font-size:10px;font-weight:600`;
-          const locContent = r.locClickable
-            ? `<span style="${locStyle}" onclick="goToFloorMap(['${r.ev.sn}'], {toast:'Spa ${r.ev.sn} highlighted'})" onmouseover="this.style.borderColor='#f59e0b';this.style.transform='scale(1.05)'" onmouseout="this.style.borderColor='transparent';this.style.transform=''" title="Click to find on 3D map">📍 ${r.location}</span>`
-            : `<span style="${locStyle}">${r.location}</span>`;
-          return `<div style="display:flex;justify-content:space-between;align-items:center;padding:3px 0;border-bottom:1px solid var(--line);${r.isCover?'background:#faf5ff;border-radius:3px;padding:4px 6px':''}">
-            <div style="display:flex;align-items:center;gap:7px">
-              <span style="color:${r.color};font-weight:700;font-size:11px">${r.icon}</span>
-              ${r.isCover
-                ? `<span style="color:#7c3aed;font-weight:700">${r.ev.coverModel||'Spa'} Cover</span><span style="color:#7c3aed;font-size:10px">→ for ${r.ev.coverFor||'—'}</span>`
-                : `<span style="font-family:var(--mono);font-weight:700;color:var(--text1)">${r.ev.sn}</span>${r.info && r.info.type ? `<span class="tbadge tb${r.info.type[0]}" style="font-size:8px;padding:1px 5px">${tl(r.info.type)}</span>`:''}`}
-            </div>
-            ${locContent}
-          </div>`;
-        }).join('')}
-      </div>
-      ${first.notes?`<div style="font-size:10px;color:var(--text3);margin-top:6px;font-style:italic">${first.notes}</div>`:''}
-      ${first.carrier||first.po?`<div style="font-size:10px;color:var(--text2);margin-top:4px;display:flex;gap:10px;flex-wrap:wrap">${first.carrier?`<span><strong>Carrier:</strong> ${first.carrier}</span>`:''}${first.po?`<span><strong>PO:</strong> ${first.po}</span>`:''}</div>`:''}
-    </div>`;
+    html += _dispCardA(gid, _dispGroupData(dispatchGroups[gid]));
   }
   // Other (non-dispatch) events
   otherEvents.forEach(ev=>{
@@ -15216,7 +15377,14 @@ function openEventDetail(dateStr){
   }, 80);
 }
 
-function calNav(dir){calMonth+=dir;if(calMonth>11){calMonth=0;calYear++;}if(calMonth<0){calMonth=11;calYear--;}renderCal();}
+function calNav(dir){
+  if(calView==='month'){ calMonth+=dir; if(calMonth>11){calMonth=0;calYear++;} if(calMonth<0){calMonth=11;calYear--;} renderCal(); return; }
+  const step = calView==='week' ? 7 : 1;
+  const base = new Date((selDay||toISO())+'T12:00:00');
+  base.setDate(base.getDate()+dir*step);
+  selDay=_calISO(base); calMonth=base.getMonth(); calYear=base.getFullYear();
+  renderCal();
+}
 
 function openAddEvent(){
   document.getElementById('sched-float').innerHTML=`<div class="det-panel" style="margin-top:12px">
