@@ -4620,7 +4620,7 @@ let _fbInitAttempts = 0;
 //   /app_version/current  (in Firebase console, manually, OR call
 //   pushVersionToFirebase() from the Admin console at deploy time)
 // ══════════════════════════════════════════════════════════════════
-const APP_VERSION = 'v4.49';
+const APP_VERSION = 'v4.51';
 window.APP_VERSION = APP_VERSION;
 
 // ── DATA EPOCH (generation guard) ────────────────────────────────────
@@ -12289,6 +12289,7 @@ function openMoveUnit(id){
     <div class="dp-hd"><div class="dp-pos">Move ${u.sn||u.dealer}</div><button class="btn btn-sm" onclick="document.getElementById('float-panel').innerHTML=''">✕</button></div>
     <div style="background:var(--accent-lt);border-radius:var(--r);padding:8px 12px;margin-bottom:11px;font-size:12px;color:var(--text2)">Current: <strong style="font-family:var(--mono);color:var(--accent)">${u.pos}</strong> — or drag directly on the map</div>
     <div class="fg" style="max-width:160px;margin-bottom:11px"><label class="fl">New Position</label><input class="fi" id="m-pos" placeholder="e.g. 7G" style="text-transform:uppercase"></div>
+    ${(typeof canStage==='function' && canStage()) ? `<div style="margin-bottom:11px"><div class="fl" style="margin-bottom:5px">Or move to a staging area</div><div style="display:flex;gap:6px"><button class="btn btn-sm" style="background:#ecfeff;border-color:#67e8f9;color:#155e75;font-weight:700" onclick="moveUnitToStage(${id},'STAGE1')">\ud83d\udce5 Stage 1</button><button class="btn btn-sm" style="background:#ecfeff;border-color:#67e8f9;color:#155e75;font-weight:700" onclick="moveUnitToStage(${id},'STAGE2')">\ud83d\udce5 Stage 2</button></div></div>` : ''}
     <div class="faction">
       <button class="btn btn-p" onclick="doMove(${id})">Move</button>
       <button class="btn" onclick="document.getElementById('float-panel').innerHTML=''">Cancel</button>
@@ -15090,7 +15091,7 @@ function _dispActions(gid, data){
   const sns = data.locatableSns;
   let b='';
   if(sns.length) b += `<button class="btn btn-sm" style="background:#fef3c7;border-color:#f59e0b;color:#78350f;font-weight:600" onclick="goToFloorMap('${sns.join(',')}'.split(','), {toast:'${sns.length} spa${sns.length>1?'s':''} highlighted on map'})" title="Show pickup locations on the 3D map">\ud83d\udccd Locate</button>`;
-  if(sns.length && (currentRole==='warehouse'||currentRole==='admin')) b += `<button class="btn btn-sm" style="background:#dbeafe;border-color:#3b82f6;color:#1e40af;font-weight:600" onclick="openQRScanner('dispatch')" title="Scan each spa's QR as you load it">\ud83d\udcf7 Scan</button>`;
+  if(sns.length && (currentRole==='warehouse'||currentRole==='admin')) b += `<button class="btn btn-sm" style="background:#dbeafe;border-color:#3b82f6;color:#1e40af;font-weight:600" onclick="openSchedScan('${gid}')" title="Scan each tub to stage it for this dispatch">\ud83d\udcf7 Scan</button>`;
   if(data.first.bolPdf) b += `<button class="btn btn-sm" onclick="viewBolPdf('${gid}')" title="View BOL PDF">\ud83d\udcc4 BOL</button>`;
   b += `<button class="btn btn-sm" onclick="printPreloadReport('${gid}')" title="Print pre-load report for warehouse">\ud83d\udda8</button>`;
   if(canEdit()) b += `<button class="btn btn-sm btn-r" style="font-size:10px;padding:3px 7px" onclick="rmDispatchGroup('${gid}')">Delete</button>`;
@@ -15152,6 +15153,10 @@ function _dispCardB(gid, data){
       <div style="margin-left:auto;display:flex;align-items:center;gap:6px;flex:0 0 auto">${labelBtn}${locPill}</div>
     </div>`;
   }).join('');
+  const canCycle=(currentRole==='warehouse'||currentRole==='admin') && data.locatableSns.length>0;
+  const cycleBtns = canCycle
+    ? `<button class="btn btn-sm" style="background:#ecfeff;border-color:#67e8f9;color:#155e75;font-weight:700" onclick="stageDispatchGroup('${gid}','STAGE1')" title="Move all in-warehouse tubs of this order to Stage 1">\ud83d\udce5 Stage</button><button class="btn btn-sm btn-g" style="font-weight:700" onclick="dispatchAndDeliverGroup('${gid}')" title="Mark all these tubs dispatched AND delivered (you already handed them off)">\u2713 Dispatch &amp; deliver</button>`
+    : '';
   return `<div style="background:var(--bg2);border:1.5px solid ${accent};border-radius:var(--r-lg);overflow:hidden;margin-bottom:11px">
     <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:12px 14px;border-bottom:1px solid var(--line)">
       <div style="min-width:0"><div style="font-size:17px;font-weight:800;line-height:1.05">\ud83d\ude9a ${escapeHTML(dealer)}</div><div style="font-size:11px;color:var(--text2);margin-top:3px;font-weight:600">Dealer pickup \u00b7 ${time||'All day'}</div></div>
@@ -15160,7 +15165,7 @@ function _dispCardB(gid, data){
     ${(first.carrier||first.po)?`<div style="display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--line);border-bottom:1px solid var(--line)"><div style="background:var(--bg2);padding:8px 14px"><div style="font-size:9px;font-weight:700;color:var(--text3);text-transform:uppercase">Carrier</div><div style="font-size:12px;font-weight:700;margin-top:2px">${escapeHTML(first.carrier||'\u2014')}</div></div><div style="background:var(--bg2);padding:8px 14px"><div style="font-size:9px;font-weight:700;color:var(--text3);text-transform:uppercase">PO #</div><div style="font-size:12px;font-weight:700;margin-top:2px;font-family:var(--mono)">${escapeHTML(first.po||'\u2014')}</div></div></div>`:''}
     <div style="padding:4px 14px 6px"><div style="font-size:9.5px;font-weight:800;color:var(--text3);text-transform:uppercase;letter-spacing:.05em;margin:8px 0 3px">Items \u00b7 ${spaCount} spa${spaCount!==1?'s':''}${coverCount?` + ${coverCount} cover${coverCount>1?'s':''}`:''}</div>${items}</div>
     ${first.notes?`<div style="padding:9px 14px;background:var(--bg3);font-size:11px;color:var(--text2);border-top:1px solid var(--line)">\ud83d\udcdd ${escapeHTML(first.notes)}</div>`:''}
-    <div style="display:flex;flex-wrap:wrap;gap:6px;padding:11px 14px;border-top:1px solid var(--line)">${_dispActions(gid,data)}</div>
+    <div style="display:flex;flex-wrap:wrap;gap:6px;padding:11px 14px;border-top:1px solid var(--line)">${_dispActions(gid,data)}${cycleBtns}</div>
   </div>`;
 }
 
@@ -15249,6 +15254,84 @@ function viewSpaLabelBySn(sn){
   toast('Label not available \u2014 this tub is not in the warehouse or factory','err');
 }
 window.viewSpaLabelBySn=viewSpaLabelBySn;
+
+// Move a single unit into a staging area (Stage 1/2) from the Move modal.
+function moveUnitToStage(id, stageId){
+  if(typeof canStage==='function' && !canStage()){ toast('Staging is Warehouse-Manager only','warn'); return; }
+  const u=units.find(x=>x.id===id); if(!u) return;
+  snapshot('stage '+(u.sn||u.dealer));
+  const old=u.pos; u.pos=stageId; delete u.stack; delete u.level;
+  const label = stageId==='STAGE1'?'Stage 1':'Stage 2';
+  addAct(`${u.sn||u.dealer}: ${old} \u2192 ${label}`,'var(--amber)');
+  toast(`Moved to ${label}`,'ok');
+  try{ const fp=document.getElementById('float-panel'); if(fp) fp.innerHTML=''; }catch(e){}
+  try{ closePanel(); }catch(e){}
+  drawMap(); updBadges(); try{ refresh3DIfOpen(); }catch(e){}
+  flushSave(); try{ if(typeof fbCloudSync==='function'&&_fbDb&&_fbAuthorized) fbCloudSync(false); }catch(e){}
+}
+window.moveUnitToStage=moveUnitToStage;
+
+// Stage every in-warehouse tub of a scheduled dispatch group → Stage 1/2.
+function stageDispatchGroup(gid, stageId){
+  if(typeof canStage==='function' && !canStage()){ toast('Staging is Warehouse-Manager only','warn'); return; }
+  const grp = events.filter(e=>String(e.groupId)===String(gid) && e.type==='dispatch' && !e.isCover && !e.isAccessory && e.sn);
+  const inWh = grp.map(e=>units.find(u=>String(u.sn)===String(e.sn))).filter(Boolean);
+  if(!inWh.length){ toast('No warehouse tubs to stage in this order','err'); return; }
+  const label = stageId==='STAGE1'?'Stage 1':'Stage 2';
+  snapshot('stage dispatch group');
+  inWh.forEach(u=>{ u.pos=stageId; delete u.stack; delete u.level; });
+  addAct(`\ud83d\udce5 Staged ${inWh.length} tub${inWh.length>1?'s':''} for ${grp[0].dealer} \u2192 ${label}`,'var(--amber)');
+  toast(`${inWh.length} tub${inWh.length>1?'s':''} moved to ${label} \u2014 dispatch when ready`,'ok');
+  flushSave(); try{ if(typeof fbCloudSync==='function'&&_fbDb&&_fbAuthorized) fbCloudSync(false); }catch(e){}
+  try{ drawMap(); }catch(e){} updBadges(); renderCal();
+  if(grp[0] && grp[0].date) try{ selDayPanel(grp[0].date); }catch(e){}
+}
+window.stageDispatchGroup=stageDispatchGroup;
+
+// Close the cycle: mark every in-warehouse (or staged) tub of a scheduled
+// dispatch group as DISPATCHED + DELIVERED in one confirmed step, remove it
+// from the floor, and log the 601 movement. Used when the manager has already
+// physically handed the order to the dealer.
+function dispatchAndDeliverGroup(gid){
+  if(!canEdit()){ toast('View-only mode','err'); return; }
+  const grp = events.filter(e=>String(e.groupId)===String(gid) && e.type==='dispatch' && !e.isCover && !e.isAccessory && e.sn);
+  if(!grp.length){ toast('No spas in this dispatch','err'); return; }
+  const dealer = grp[0].dealer || '';
+  const ready = grp.map(e=>units.find(u=>String(u.sn)===String(e.sn))).filter(Boolean);
+  if(!ready.length){ toast('None of these tubs are in the warehouse to dispatch','err'); return; }
+  if(!confirm(`Dispatch & deliver ${ready.length} tub${ready.length>1?'s':''} for ${dealer}?\n\nThis marks them shipped AND delivered (you already handed them off), removes them from the warehouse floor, and logs the movement.`)) return;
+  snapshot('dispatch & deliver group');
+  const now = (typeof toISO==='function'?toISO():new Date().toISOString().slice(0,10));
+  const nowTime = new Date().toTimeString().slice(0,5);
+  const bol = (grp.find(e=>e.bolPdf)||{}).bolPdf||null;
+  const by = (ROLES[currentRole]&&ROLES[currentRole].label)||'Warehouse';
+  let n=0;
+  ready.forEach(u=>{
+    const rec = {id:u.id, sn:u.sn, dealer:u.dealer||dealer, type:u.type, originalPos:u.pos, entryDate:u.entry||'\u2014',
+      dispatchDate:now, dispatchTime:nowTime, authorizedBy:by, notes:'Dispatched + delivered from Schedule',
+      coverPaired:u.coverPaired||null, bolPdf:bol,
+      deliveryStatus:'delivered-to-dealer', deliveryConfirmedAt: now+'T'+new Date().toTimeString().slice(0,8), deliveryConfirmedBy: by};
+    dispatched.unshift(rec);
+    try{ postMovement({type:'601', sn:u.sn, material:u.type||'', qty:1, from:LOC_WAREHOUSE(u.pos), to:LOC_DEALER(u.dealer||dealer), stockType:'unrestricted', ref:by, note:'Dispatch+deliver from schedule'}); }catch(e){}
+    units = units.filter(x=>x.id!==u.id);
+    n++;
+  });
+  addAct(`\ud83d\ude9a Dispatched + delivered ${n} tub${n>1?'s':''} to ${dealer} (from Schedule)`,'var(--teal)');
+  toast(`${n} tub${n>1?'s':''} dispatched & delivered \u2713`,'ok');
+  flushSave(); try{ if(typeof fbCloudSync==='function'&&_fbDb&&_fbAuthorized) fbCloudSync(false); }catch(e){}
+  try{ drawMap(); }catch(e){} updBadges(); renderCal();
+  if(grp[0] && grp[0].date) try{ selDayPanel(grp[0].date); }catch(e){}
+}
+window.dispatchAndDeliverGroup=dispatchAndDeliverGroup;
+
+// Open the camera scanner from a scheduled dispatch card. Each scanned tub is
+// moved to Stage 1 (see the 'sched-stage' branch in handleQRPayload).
+function openSchedScan(gid){
+  if(!(currentRole==='warehouse'||currentRole==='admin')){ toast('Warehouse / Admin only','warn'); return; }
+  window._schedScanCtx = { gid: gid };
+  openQRScanner('sched-stage');
+}
+window.openSchedScan=openSchedScan;
 
 function selDayPanel(ds){
   const dt=new Date(ds+'T12:00:00');
@@ -19217,11 +19300,12 @@ async function openQRScanner(mode, hint){
   const overlay = document.createElement('div');
   overlay.id = 'qr-scan-overlay';
   overlay.style.cssText = 'position:fixed;inset:0;background:rgba(15,23,42,.92);z-index:9999;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:18px;color:#fff';
-  const titleByMode = {load:'Scan to Load on Truck', receive:'Scan to Receive at Warehouse', dispatch:'Scan to Dispatch', 'factory-receive':'Scan to Receive Back at Factory', 'factory-pickup':'Scan Dealer Pickup', 'factory-request':'Scan Item · Factory Request'};
+  const titleByMode = {load:'Scan to Load on Truck', receive:'Scan to Receive at Warehouse', dispatch:'Scan to Dispatch', 'factory-receive':'Scan to Receive Back at Factory', 'factory-pickup':'Scan Dealer Pickup', 'factory-request':'Scan Item · Factory Request', 'sched-stage':'Scan to Stage for Dispatch'};
   const subByMode = {
     load: 'Driver: scan each item as it goes onto the truck.',
     receive: 'Manager: scan each item as it arrives at the warehouse.',
     dispatch: 'Loader: scan each spa being loaded for dealer pickup.',
+    'sched-stage': 'Manager: scan each tub of this order — it moves to Stage 1, ready to dispatch.',
     'factory-pickup': 'Factory only: scan a spa as the dealer collects it at the factory.'
   };
   // Factory-request mode advances the item's request by role (pending→approved→
@@ -19410,6 +19494,48 @@ function handleQRPayload(raw, mode){
     }
   }
   if(!tid){ toast('No tracking ID detected','err'); return; }
+
+  // ── SCHEDULE SCAN → STAGE (sched-stage mode) ──────────────────────────
+  // Launched from a scheduled dispatch card. Each scanned tub is moved to
+  // Stage 1 (reversible, non-destructive). When the whole order is staged, the
+  // manager taps "Dispatch & deliver" on the card to close the cycle.
+  if(mode === 'sched-stage'){
+    const ctx = window._schedScanCtx || {};
+    const sn = String(parsedSn || tid || '').trim();
+    let u = units.find(x => String(x.sn) === sn);
+    if(!u && ctx.gid){
+      const grp = events.filter(e=>String(e.groupId)===String(ctx.gid) && e.type==='dispatch' && e.sn);
+      const ev = grp.find(e=>String(e.sn)===sn);
+      if(ev) u = units.find(x=>String(x.sn)===String(ev.sn));
+    }
+    if(!u){
+      setScanResult('err', sn||tid, 'not in the warehouse — cannot stage');
+    } else {
+      let inOrder = true;
+      if(ctx.gid){
+        const grp = events.filter(e=>String(e.groupId)===String(ctx.gid) && e.type==='dispatch' && e.sn);
+        inOrder = grp.some(e=>String(e.sn)===String(u.sn));
+      }
+      if(u.pos==='STAGE1' || u.pos==='STAGE2'){
+        setScanResult('ok', u.sn, 'already staged ✓');
+      } else {
+        snapshot('scan-stage '+u.sn);
+        u.pos='STAGE1'; delete u.stack; delete u.level;
+        addAct(`\ud83d\udce5 Scanned + staged ${u.sn} → Stage 1`, 'var(--amber)');
+        flushSave(); try{ if(typeof fbCloudSync==='function'&&_fbDb&&_fbAuthorized) fbCloudSync(false); }catch(e){}
+        try{ drawMap(); }catch(e){} updBadges();
+        let prog='';
+        if(ctx.gid){
+          const grp = events.filter(e=>String(e.groupId)===String(ctx.gid) && e.type==='dispatch' && e.sn);
+          const staged = grp.filter(e=>{ const uu=units.find(x=>String(x.sn)===String(e.sn)); return uu && (uu.pos==='STAGE1'||uu.pos==='STAGE2'); }).length;
+          prog = ` · ${staged}/${grp.length} staged`;
+        }
+        setScanResult('ok', u.sn, `staged to Stage 1${inOrder?'':' (NOT in this order!)'}${prog}`);
+      }
+    }
+    if(_qrScanState) setTimeout(()=>{ if(_qrScanState) _qrScanState.scanning = true; }, 1200);
+    return;
+  }
 
   // ══════════════════════════════════════════════════════════════════
   // MARRIAGE LABEL — UNIVERSAL HANDLER (receive mode only)
@@ -24246,7 +24372,6 @@ document.addEventListener('keydown', e=>{
             <button id="apm-stats" style="background:#374151;color:#fff;border:0;border-radius:9px;padding:12px;font-weight:700;cursor:pointer;font-size:13px;text-align:left">📊 View protection stats<div style="font-size:10.5px;opacity:.9;font-weight:500;margin-top:3px">How many snapshots you have, last sync, etc.</div></button>
             <button id="apm-nuclear" style="background:#dc2626;color:#fff;border:0;border-radius:9px;padding:12px;font-weight:700;cursor:pointer;font-size:13px;text-align:left">🧨 Full cloud wipe (permanent)<div style="font-size:10.5px;opacity:.9;font-weight:500;margin-top:3px">Backs up everything, clears the junk from ALL devices, leaves only the 8 tubs. Use once.</div></button>
             <button id="apm-reset-empty" style="background:#0f766e;color:#fff;border:0;border-radius:9px;padding:12px;font-weight:700;cursor:pointer;font-size:13px;text-align:left">🧼 Start from scratch (EMPTY)<div style="font-size:10.5px;opacity:.9;font-weight:500;margin-top:3px">Backs up everything, clears ALL devices and leaves the warehouse 100% empty with epoch 4. Final fix — you start clean and nothing old can return.</div></button>
-            <button id="apm-reset-tubs" style="background:#1d4ed8;color:#fff;border:0;border-radius:9px;padding:12px;font-weight:700;cursor:pointer;font-size:13px;text-align:left">🛁 Reset to the 8 tubs (warehouse)<div style="font-size:10.5px;opacity:.9;font-weight:500;margin-top:3px">Backs up everything, clears the rest and leaves EXACTLY the 8 tubs ready in "Arriving to Warehouse". Canonical clean state — one click, always the same.</div></button>
             <button id="apm-close" style="background:#f1f5f9;color:#475569;border:0;border-radius:9px;padding:10px;font-weight:700;cursor:pointer;font-size:12.5px;margin-top:3px">Close</button>
           </div>
         </div>`;
@@ -24258,7 +24383,6 @@ document.addEventListener('keydown', e=>{
       document.getElementById('apm-stats').onclick = () => { if(!requireAdmin())return; menu.remove(); showStats(); };
       document.getElementById('apm-nuclear').onclick = () => { if(!requireAdmin())return; menu.remove(); nuclearCloudClean(); };
       { const _re = document.getElementById('apm-reset-empty'); if(_re) _re.onclick = () => { if(!requireAdmin())return; menu.remove(); factoryResetEmpty(); }; }
-      { const _rt = document.getElementById('apm-reset-tubs'); if(_rt) _rt.onclick = () => { if(!requireAdmin())return; menu.remove(); resetA8TubsWarehouse(); }; }
       document.getElementById('apm-close').onclick = () => menu.remove();
       menu.onclick = (e) => { if(e.target === menu) menu.remove(); };
     };
