@@ -4620,7 +4620,7 @@ let _fbInitAttempts = 0;
 //   /app_version/current  (in Firebase console, manually, OR call
 //   pushVersionToFirebase() from the Admin console at deploy time)
 // ══════════════════════════════════════════════════════════════════
-const APP_VERSION = 'v4.51';
+const APP_VERSION = 'v4.53';
 window.APP_VERSION = APP_VERSION;
 
 // ── DATA EPOCH (generation guard) ────────────────────────────────────
@@ -5710,7 +5710,7 @@ function fbApplyRemoteState(restored, sourceTimestamp){
     try {
       const ts = sourceTimestamp || fbServerNow();
       const state = {nid, units, dispatched, incoming, materials, events, activity, queue, cfg, factory, marriages, dispatchRequests, coverInventory, colorLibrary, coverModelMapping, movements, _saved: ts};
-      localStorage.setItem(LS_KEY, JSON.stringify(state));
+      localStorage.setItem(LS_KEY, JSON.stringify(state, _blobReplacer));
       _lastSavedHash = stateHash();  // integrity watchdog baseline (reflects repaired state)
       _lastSavedSig = _stateSig();    // sig baseline — prevents saveState from echo-pushing this state back to cloud
       _fbLastLocalWriteAt = ts;       // newness guard baseline (survives reload via loadState)
@@ -10440,7 +10440,10 @@ function openStagingPanel(id){
                 <div style="font-size:13px;font-weight:700;color:var(--text1);font-family:var(--mono)">${escapeHTML(u.sn || u.dealer || '\u2014')}</div>
                 <div style="font-size:11px;color:var(--text2);margin-top:3px">${escapeHTML(u.dealer||'')} ${typeChip(u.type)}</div>
               </div>
-              ${mgr?`<button class="btn" onclick="unstageUnit(${u.id})" style="padding:5px 10px;font-size:11px">\u21A9 Unstage</button>`:''}
+              <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+                <button class="btn" onclick="printQRLabel(${u.id},'units')" style="padding:5px 10px;font-size:11px" title="View this tub's label">\ud83c\udff7 Label</button>
+                ${mgr?`<button class="btn" onclick="unstageUnit(${u.id})" style="padding:5px 10px;font-size:11px">\u21A9 Unstage</button>`:''}
+              </div>
             </div>`).join('')}
           ${mars.map(m => `
             <div style="background:#fdf2f8;border:1px solid #fbcfe8;border-radius:10px;padding:11px 12px;display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
@@ -22591,6 +22594,18 @@ function _stateSig(){
   }
 }
 
+// ── LOCAL-STORAGE SLIMMING (v4.53) ───────────────────────────────────────────
+// Heavy base64 blobs (BOL PDFs, delivery photos/docs) are what fill the browser's
+// ~5MB localStorage quota. This replacer drops them from the LOCAL working copy
+// ONLY — it never mutates the in-memory objects, and the Firebase push (which uses
+// a plain JSON.stringify, no replacer) still carries the full blobs to the cloud.
+// On reload, the cloud-wins-on-open sync restores the blobs, so nothing is lost.
+function _blobReplacer(k, v){
+  if((k === 'bolPdf' || k === 'deliveryPhoto' || k === 'deliveryDoc') && typeof v === 'string' && v.length > 2000) return undefined;
+  return v;
+}
+window._blobReplacer = _blobReplacer;
+
 function saveState(){
   // ── ECHO LOOP GUARD ──
   // If we're applying remote state (set by the listener around fbApplyRemoteState
@@ -22626,7 +22641,7 @@ function saveState(){
     try{
       const now = fbServerNow();   // server-consistent clock
       const state = {nid, units, dispatched, incoming, materials, events, activity, queue, cfg, factory, marriages, dispatchRequests, coverInventory, colorLibrary, coverModelMapping, movements, _saved: now};
-      localStorage.setItem(LS_KEY, JSON.stringify(state));
+      localStorage.setItem(LS_KEY, JSON.stringify(state, _blobReplacer));
       _lastSavedHash = stateHash();  // mark integrity watchdog "clean" — drift detection from here
       _lastSavedSig = _stateSig();   // refresh sig in case more changes came in during debounce
       // ── EDGE CASE FIX: bump local-write timestamp ──
@@ -22661,7 +22676,7 @@ function flushSave(){
   try{
     const now = fbServerNow();   // server-consistent clock
     const state = {nid, units, dispatched, incoming, materials, events, activity, queue, cfg, factory, marriages, dispatchRequests, coverInventory, colorLibrary, coverModelMapping, movements, _saved: now};
-    localStorage.setItem(LS_KEY, JSON.stringify(state));
+    localStorage.setItem(LS_KEY, JSON.stringify(state, _blobReplacer));
     _lastSavedHash = stateHash();  // mark integrity watchdog "clean"
     _lastSavedSig = _stateSig();   // mark sig as "seen" to prevent echo in saveState
     _fbLastLocalWriteAt = now;
