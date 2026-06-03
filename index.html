@@ -4694,7 +4694,7 @@ let _fbInitAttempts = 0;
 //   /app_version/current  (in Firebase console, manually, OR call
 //   pushVersionToFirebase() from the Admin console at deploy time)
 // ══════════════════════════════════════════════════════════════════
-const APP_VERSION = 'v4.62';
+const APP_VERSION = 'v4.64';
 window.APP_VERSION = APP_VERSION;
 
 // ── DATA EPOCH (generation guard) ────────────────────────────────────
@@ -21456,6 +21456,17 @@ function openMarriageEdit(mid){
       </div>
     </div>
     <div class="fg" style="margin-bottom:11px">
+      <label class="fl">Placement — how it reaches the dealer</label>
+      <select class="fsel" id="me-mount">
+        <option value="shelf" ${(m.mountType||'shelf')!=='inside'?'selected':''}>📦 Ships separately from factory → Warehouse shelf</option>
+        <option value="inside" ${m.mountType==='inside'?'selected':''}>🛁 Packed inside the tub (travels inside the spa)</option>
+      </select>
+      <div style="font-size:10px;color:var(--text3);margin-top:4px;line-height:1.4">
+        <strong>Shelf:</strong> factory ships it on its own; it marries the tub at the warehouse.<br>
+        <strong>Inside:</strong> packed inside the tub at the factory — dispatches automatically with the spa.
+      </div>
+    </div>
+    <div class="fg" style="margin-bottom:11px">
       <label class="fl">Notes</label>
       <input class="fi" id="me-notes" value="${esc(m.notes)}" placeholder="PO number, special instructions...">
     </div>
@@ -21480,6 +21491,8 @@ function saveMarriageEdit(mid){
   if(!sn){ toast('Spa S/N required','err'); return; }
   if(!name){ toast('Accessory name required','err'); return; }
 
+  const newMount = (document.getElementById('me-mount')?.value === 'inside') ? 'inside' : 'shelf';
+  const oldMount = m.mountType || 'shelf';
   snapshot('edit marriage');
   m.spaSn = sn;
   m.spaDealer = dealer;
@@ -21488,16 +21501,48 @@ function saveMarriageEdit(mid){
   m.notes = notes;
   m.editedAt = toISO();
 
-  // Propagate changes to the linked factory accessory record so both views show
-  // the same data. The accessory record stores dealer = accessoryName by convention.
+  // ── Placement change: shelf <-> inside ──────────────────────────────────
+  if(newMount !== oldMount && m.status !== 'completed'){
+    if(newMount === 'inside'){
+      // Travels INSIDE the tub now: drop the separate shelf accessory + pack it in.
+      if(m.accessoryId != null){ factory = factory.filter(f => f.id !== m.accessoryId); m.accessoryId = null; }
+      m.location = null;
+      const found = (typeof findSpaRecordBySn === 'function') ? findSpaRecordBySn(sn) : null;
+      if(found){
+        attachInsideAccessory(found.record, name, qty);
+        m.status = 'delivered'; m.deliveredDate = m.deliveredDate || toISO();
+      } else if(m.status !== 'delivered'){
+        m.status = 'pending';   // tub not built yet — auto-packs when it is created
+      }
+    } else {
+      // Ships SEPARATELY again (shelf): unpack from the tub + recreate a factory accessory.
+      const found = (typeof findSpaRecordBySn === 'function') ? findSpaRecordBySn(sn) : null;
+      if(found && Array.isArray(found.record.looseAccessories)){
+        const norm = s => String(s==null?'':s).trim().toLowerCase();
+        const label = (qty && qty > 1) ? `${name} × ${qty}` : name;
+        found.record.looseAccessories = found.record.looseAccessories.filter(a => norm(a)!==norm(label) && norm(a)!==norm(name));
+      }
+      if(m.accessoryId == null || !factory.some(f => f.id === m.accessoryId)){
+        const accId = ++nid;
+        factory.push({id:accId, sn:'', dealer:name, type:'accessory', qty, added:toISO(), notes, marriedSn:sn});
+        m.accessoryId = accId;
+      }
+      if(!m.location) m.location = (typeof suggestMarriageLocation === 'function') ? suggestMarriageLocation() : 'MINV';
+      if(m.status === 'delivered'){ m.status = 'pending'; delete m.deliveredDate; }  // was inside-only → must ship now
+    }
+    m.mountType = newMount;
+  }
+
+  // Keep the linked shelf accessory (if any) in sync with the edited fields.
   const acc = factory.find(f => f.id === m.accessoryId);
   if(acc){
     acc.dealer = name;
     acc.qty = qty;
     if(notes) acc.notes = notes;
+    acc.marriedSn = sn;
   }
 
-  addAct(`Marriage edited: ${name} → S/N ${sn}`, 'var(--red)');
+  addAct(`Marriage edited: ${name} → S/N ${sn}${newMount!==oldMount?` · placement → ${newMount}`:''}`, 'var(--red)');
   toast('Marriage updated','ok');
   document.getElementById('marriage-edit-overlay')?.remove();
   renderMarriages();
@@ -21797,25 +21842,16 @@ function shipMarriageFromMarriages(mid){
     toast(`Marriage already ${m.status} — nothing to send`,'err');
     return;
   }
-  const acc = factory.find(f => f.id === m.accessoryId);
+  // Find OR create the linked factory accessory so the pairing ALWAYS routes
+  // through Loading Bay -> Truck scan -> In Transit -> Warehouse. Previously a
+  // missing accessory record made it jump straight to "delivered", skipping the
+  // loading bay AND transit entirely — that was the bug.
+  let acc = factory.find(f => f.id === m.accessoryId);
   if(!acc){
-    // Edge case: the accessory record is gone but the marriage is still
-    // pending. We can still flip the marriage to delivered for tracking.
-    if(!confirm(`The linked factory accessory for S/N ${m.spaSn} no longer exists in factory inventory. Mark this marriage as Delivered anyway?`)) return;
-    snapshot('marriage shipped from marriages (no factory record)');
-    m.status = 'delivered';
-    m.deliveredDate = toISO();
-    if(!m.location) m.location = 'MINV';
-    addAct(`✈ Marriage marked delivered (Marriages crew): ${m.accessoryName} → S/N ${m.spaSn}`,'var(--teal)');
-    toast(`Marriage marked delivered`,'ok');
-    renderMarriages();
-    updBadges();
-    // Auto-print so the physical paperwork is ready even in the recovery flow.
-    setTimeout(() => {
-      try { printMarriageLabel(m.id); }
-      catch(e){ console.warn('Auto-print marriage label failed:', e); }
-    }, 80);
-    return;
+    const accId = ++nid;
+    acc = {id:accId, sn:'', dealer:m.accessoryName, type:'accessory', qty:m.accessoryQty||1, added:toISO(), notes:m.notes||'', marriedSn:m.spaSn};
+    factory.push(acc);
+    m.accessoryId = accId;
   }
 
   if(!confirm(`Mark "${m.accessoryName}" as READY for Truck pickup?\n\nThis is for S/N ${m.spaSn}. It will:\n• Stay at the factory with a "ready" badge\n• Show up in Loading Bay for the Truck crew to scan\n• Move to In Transit only when Truck/Transit scans the QR\n• The marriage stays in "waiting" state until then`)) return;
