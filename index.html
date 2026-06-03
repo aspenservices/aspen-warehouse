@@ -4372,7 +4372,7 @@ body.dark-mode .mar-card-track {
         <div class="card-sub">Items shipped from warehouse · Check off as they arrive</div>
       </div>
       <div class="card-acts">
-        <button class="btn btn-sm btn-p" style="font-weight:700" onclick="openQRScanner('factory-receive')" title="Scan a tub's QR to receive it into the Factory Warehouse">\u{1F4F7} Scan to receive</button>
+        <button class="btn btn-sm btn-p" style="font-weight:700" onclick="openQRScanner('factory-receive')" title="Scan a tub's QR to receive it into the Factory Warehouse">📷 Scan to receive</button>
         <span style="font-size:11px;color:var(--text2)" id="rec-counter"></span>
       </div>
     </div>
@@ -4385,11 +4385,11 @@ body.dark-mode .mar-card-track {
   <div class="card">
     <div class="card-hd">
       <div>
-        <div class="card-title">\u{1F69A} Loading Bay \u2014 Outbound to Factory</div>
-        <div class="card-sub">Tubs pulled from the floor \u00b7 waiting for the truck to the factory</div>
+        <div class="card-title">🚚 Loading Bay — Outbound to Factory</div>
+        <div class="card-sub">Tubs pulled from the floor · waiting for the truck to the factory</div>
       </div>
       <div class="card-acts">
-        <button class="btn btn-sm btn-p" style="font-weight:700" onclick="openQRScanner('factory-request')" title="Scan a bay tub's QR to load it on the truck (in transit to factory)">\u{1F4F7} Scan to load on truck</button>
+        <button class="btn btn-sm btn-p" style="font-weight:700" onclick="openQRScanner('factory-request')" title="Scan a bay tub's QR to load it on the truck (in transit to factory)">📷 Scan to load on truck</button>
         <span style="font-size:11px;color:var(--text2)" id="lbay-counter"></span>
       </div>
     </div>
@@ -4643,7 +4643,7 @@ let _fbInitAttempts = 0;
 //   /app_version/current  (in Firebase console, manually, OR call
 //   pushVersionToFirebase() from the Admin console at deploy time)
 // ══════════════════════════════════════════════════════════════════
-const APP_VERSION = 'v4.59';
+const APP_VERSION = 'v4.60';
 window.APP_VERSION = APP_VERSION;
 
 // ── DATA EPOCH (generation guard) ────────────────────────────────────
@@ -8064,33 +8064,20 @@ function handleFactoryRequestScanByRole(r, role){
   if(!r) return false;
   const at = toISO();
   // Map roles to allowed state transitions for factory requests
-  if(r.status === 'pending'){
+  if(r.status === 'pending' || r.status === 'approved'){
     if(role !== 'warehouse' && role !== 'admin'){
-      toast(`Request pending — only warehouse can approve (you are ${ROLES[role]?.label||role})`,'err');
-      return true;
-    }
-    snapshot('scan: approve factory request');
-    r.status = 'approved';
-    r.approvedAt = at;
-    r.approvedBy = 'scan:' + role;
-    addAct(`📲 Scan approved factory request: ${r.description||r.sn||'item'}`, '#0891b2');
-    toast(`Approved factory request for ${r.sn||r.description} — ready to load on truck`,'ok');
-    renderRequests(); drawMap(); updBadges(); saveState();
-    return true;
-  }
-  if(r.status === 'approved'){
-    if(role !== 'warehouse' && role !== 'admin'){
-      toast(`Approved — warehouse pulls it to the loading bay (you are ${ROLES[role]?.label||role})`,'err');
+      toast(`Request ${r.status} — warehouse pulls it to the loading bay (you are ${ROLES[role]?.label||role})`,'err');
       return true;
     }
     snapshot('scan: pull factory request to loading bay');
-    // Tub leaves the warehouse floor and moves to the LOADING BAY (outbound, waiting
-    // for the truck). Tracked by this request (status 'loading-bay'); the sync merge
-    // treats loading-bay tubs as gone so it will not reappear on the floor.
+    // ONE scan: the warehouse pulls the tub off the floor straight into the LOADING
+    // BAY (outbound, waiting for the truck). Approval is implicit in this scan. The
+    // sync merge treats loading-bay tubs as gone, so it won't reappear on the floor.
     if(r.type === 'tub' && r.sn){
       const u = units.find(x => x.sn === r.sn);
       if(u) units = units.filter(x => x.id !== u.id);
     }
+    if(!r.approvedAt){ r.approvedAt = at; r.approvedBy = 'scan:' + role; }
     r.status = 'loading-bay';
     r.bayAt = at;
     r.bayBy = 'scan:' + role;
@@ -22249,7 +22236,7 @@ function renderRequests(){
     const typeLabel = {tub:'Tub', cover:'Cover', material:'Material', accessory:'Accessory'}[r.type] || r.type;
     const statusInfo = {
       'awaiting-stock': {color:'#dc2626', bg:'#fef2f2', border:'#fecaca', label:'⏳ Awaiting Stock at Warehouse'},
-      pending:  {color:'var(--amber)', bg:'#fffbeb', border:'#fde68a', label:'⏳ Pending — scan item to approve'},
+      pending:  {color:'var(--amber)', bg:'#fffbeb', border:'#fde68a', label:'⏳ Pending — scan to send to loading bay'},
       approved: {color:'#0891b2', bg:'#ecfeff', border:'#a5f3fc', label:'✓ Approved · scan to pull to loading bay'},
       'loading-bay': {color:'#7c2d12', bg:'#fff7ed', border:'#fed7aa', label:'📦 In Loading Bay · load on truck'},
       shipped:  {color:'var(--accent)', bg:'#eff6ff', border:'#bfdbfe', label:'🚚 In Transit · factory scans to receive'},
@@ -22286,7 +22273,7 @@ function renderRequests(){
         // the item's QR to approve). Covers/materials have no unique QR per
         // piece → direct approve button.
         if(r.type === 'tub' && r.sn){
-          actions.push(`<button class="btn btn-sm btn-p" onclick="openQRScanner('factory-request','${r.sn}')">📷 Scan to approve</button>`);
+          actions.push(`<button class="btn btn-sm btn-p" onclick="openQRScanner('factory-request','${r.sn}')">📷 Scan → loading bay</button>`);
         } else {
           actions.push(`<button class="btn btn-sm btn-p" onclick="approveRequest(${r.id})">✓ Approve</button>`);
         }
