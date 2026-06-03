@@ -4620,7 +4620,7 @@ let _fbInitAttempts = 0;
 //   /app_version/current  (in Firebase console, manually, OR call
 //   pushVersionToFirebase() from the Admin console at deploy time)
 // ══════════════════════════════════════════════════════════════════
-const APP_VERSION = 'v4.54';
+const APP_VERSION = 'v4.55';
 window.APP_VERSION = APP_VERSION;
 
 // ── DATA EPOCH (generation guard) ────────────────────────────────────
@@ -14130,6 +14130,7 @@ function refreshCoverDatalists(){
 function getCoverStockFor(model, color){
   const norm = s => (s||'').trim().toLowerCase();
   const mNorm = norm(model), cNorm = norm(color);
+  // Legacy materials-based covers (kept for backward compatibility).
   let totalReceived = 0;
   const matEntries = [];
   materials.forEach(m=>{
@@ -14139,8 +14140,43 @@ function getCoverStockFor(model, color){
     totalReceived += (m.qty || 1) - (m.coverShipped || 0);
     matEntries.push(m);
   });
-  return {available: Math.max(0, totalReceived), entries: matEntries};
+  // PRIMARY source of truth = Cover Inventory (warehouse rows). Covers arrive by
+  // truck + packing list and are entered manually in the Cover Inventory view.
+  let invQty = 0;
+  coverInventory.forEach(c=>{
+    if((c.source||'warehouse') !== 'warehouse') return;
+    if(mNorm && norm(c.model) !== mNorm) return;
+    if(cNorm && norm(c.color) !== cNorm) return;
+    invQty += (c.qty || 0);
+  });
+  return {available: Math.max(0, totalReceived + invQty), entries: matEntries, invQty, matAvailable: Math.max(0, totalReceived)};
 }
+
+// Auto-close factory cover-requests that were auto-created when stock hit 0, once
+// the matching cover is back in stock at the Warehouse (entered manually on truck
+// arrival). Keeps Cover Inventory and Factory Requests in sync.
+function reconcileCoverRequests(){
+  if(!Array.isArray(dispatchRequests)) return 0;
+  let closed = 0;
+  dispatchRequests.forEach(r => {
+    if(!r.autoCreated || r.type !== 'cover') return;
+    if(!(r.status === 'pending' || r.status === 'approved' || r.status === 'awaiting-stock')) return;
+    const stock = getCoverStockFor(r.coverModel, r.coverColor);
+    if(stock.available >= (r.qty || 1)){
+      r.status = 'fulfilled';
+      r.fulfilledAt = toISO();
+      r.notes = (r.notes ? r.notes + ' \u00b7 ' : '') + `Auto-closed: ${stock.available} now in stock at Warehouse`;
+      addAct(`\u2713 Cover request closed \u2014 back in stock at Warehouse: ${r.description}`, 'var(--teal)');
+      closed++;
+    }
+  });
+  if(closed > 0){
+    if(typeof renderRequests === 'function') renderRequests();
+    try{ flushSave(); }catch(e){}
+  }
+  return closed;
+}
+window.reconcileCoverRequests = reconcileCoverRequests;
 
 function addMaterial(){
   const name=(document.getElementById('mat-name').value||'').trim();
@@ -21666,6 +21702,8 @@ function renderCoverInventory(){
     }).join('')}
     </tbody>
   </table></div>`;
+  // Keep Factory Requests in sync: close any auto-created cover request now back in stock.
+  try{ reconcileCoverRequests(); }catch(e){}
 }
 
 function openCoverAdd(presetSource){
@@ -22068,6 +22106,7 @@ function renderRequests(){
       approved: {color:'#0891b2', bg:'#ecfeff', border:'#a5f3fc', label:'✓ Approved · scan to load on truck'},
       shipped:  {color:'var(--accent)', bg:'#eff6ff', border:'#bfdbfe', label:'🚚 In Transit · factory scans to receive'},
       received: {color:'var(--teal)', bg:'#ecfdf5', border:'#a7f3d0', label:'📬 Received'},
+      fulfilled: {color:'var(--teal)', bg:'#ecfdf5', border:'#a7f3d0', label:'✓ Fulfilled · back in stock'},
       rejected: {color:'#991b1b', bg:'#fef2f2', border:'#fecaca', label:'✗ Rejected'},
     }[r.status] || {color:'var(--text3)', bg:'#f8fafc', border:'#e2e8f0', label:r.status};
 
@@ -23739,6 +23778,7 @@ async function autoBackupToFirebase(){
 }
 // Run once at startup (after Firebase had a chance to init), then every 12 hours.
 setTimeout(autoBackupToFirebase, 30000);
+setTimeout(()=>{ try{ reconcileCoverRequests(); }catch(e){} }, 6000);  // clear cover-requests already back in stock
 setInterval(autoBackupToFirebase, 12 * 60 * 60 * 1000);
 
 // Global hotkeys
