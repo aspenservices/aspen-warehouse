@@ -852,6 +852,7 @@ body.dark-mode .help-bubble:hover {
   to { transform: translateX(calc(100vw + 200px)); }
 }
 @keyframes sun-pulse { 0%,100% { transform: scale(1); } 50% { transform: scale(1.06); } }
+@keyframes ob-truck-drive { 0% { left: -56px; } 100% { left: 100%; } }
 @keyframes smoke-rise {
   0% { transform: translateY(0) scale(.8); opacity: 0; }
   20% { opacity: .8; }
@@ -3945,6 +3946,19 @@ body.dark-mode .mar-card-track {
     </div>
   </div>
 
+  <!-- Outbound to factory: warehouse -> factory tub requests staged in the loading bay -->
+  <div class="card" id="trk-outbound-card" style="margin-bottom:12px;display:none;border:1.5px solid #fed7aa;background:#fff7ed">
+    <div class="card-hd">
+      <div>
+        <div class="card-title">📤 Outbound to Factory · Factory Requests</div>
+        <div class="card-sub" id="trk-outbound-sub">Tubs the warehouse staged to send back to the factory</div>
+      </div>
+    </div>
+    <div class="card-body" style="padding:12px 14px 4px">
+      <div id="trk-outbound-cards"></div>
+    </div>
+  </div>
+
   <!-- Ready to load list -->
   <div class="card" style="margin-bottom:12px">
     <div class="card-hd">
@@ -4087,6 +4101,39 @@ body.dark-mode .mar-card-track {
       <div id="truck-info-overlay" style="position:absolute;top:14px;left:50%;transform:translateX(-50%);background:rgba(15,23,42,.85);color:#fff;padding:8px 16px;border-radius:20px;font-size:11.5px;font-weight:600;display:flex;align-items:center;gap:8px;backdrop-filter:blur(4px);box-shadow:0 4px 12px rgba(0,0,0,.2)">
         <span style="color:#fde047">●</span> <span id="truck-info-text">Loading…</span>
       </div>
+    </div>
+  </div>
+
+  <!-- REVERSE DIRECTION: warehouse -> factory (outbound tubs returning) -->
+  <div class="card" id="intransit-outbound-card" style="margin-bottom:12px;display:none;border:1.5px solid #fed7aa;overflow:hidden">
+    <div style="position:relative;height:130px;overflow:hidden;background:linear-gradient(180deg,#bae6fd 0%,#7dd3fc 32%,#a3e635 32%,#86efac 100%)">
+      <div style="position:absolute;top:14px;right:34px;width:34px;height:34px;border-radius:50%;background:radial-gradient(circle,#fef08a,#facc15);box-shadow:0 0 16px #fde047"></div>
+      <!-- Warehouse (left, origin) -->
+      <div style="position:absolute;bottom:34px;left:10px;width:92px;height:66px;background:linear-gradient(180deg,#7c2d12,#92400e);border:2px solid #451a03;border-radius:5px 5px 0 0">
+        <div style="position:absolute;top:9px;left:0;right:0;text-align:center;color:#fff;font-size:8.5px;font-weight:800;letter-spacing:.04em">WAREHOUSE</div>
+        <div style="position:absolute;top:22px;left:0;right:0;text-align:center;color:#fed7aa;font-size:6.5px">4500 Goodfellow</div>
+      </div>
+      <!-- Factory (right, destination) -->
+      <div style="position:absolute;bottom:34px;right:10px;width:92px;height:66px;background:linear-gradient(180deg,#475569,#334155);border:2px solid #1e293b;border-radius:5px 5px 0 0">
+        <div style="position:absolute;top:9px;left:0;right:0;text-align:center;color:#fff;font-size:8.5px;font-weight:800;letter-spacing:.04em">ASPEN SPAS</div>
+        <div style="position:absolute;top:22px;left:0;right:0;text-align:center;color:#cbd5e1;font-size:6.5px">Factory · 4609 McRee</div>
+      </div>
+      <!-- Road -->
+      <div style="position:absolute;bottom:0;left:0;right:0;height:34px;background:linear-gradient(180deg,#3f3f46,#27272a)"></div>
+      <div style="position:absolute;bottom:16px;left:0;right:0;height:3px;overflow:hidden"><div style="position:absolute;top:0;left:0;width:200%;height:100%;background:repeating-linear-gradient(90deg,#fde047 0,#fde047 22px,transparent 22px,transparent 44px);animation:road-scroll 1.5s linear infinite"></div></div>
+      <!-- Returning truck (drives left->right, toward factory). Emoji flipped to face right. -->
+      <div style="position:absolute;bottom:8px;left:0;animation:ob-truck-drive 11s linear infinite"><div style="font-size:30px;transform:scaleX(-1)">🚚</div></div>
+      <!-- Banner -->
+      <div style="position:absolute;top:12px;left:50%;transform:translateX(-50%);background:rgba(124,45,18,.9);color:#fff;padding:6px 15px;border-radius:18px;font-size:11.5px;font-weight:700;backdrop-filter:blur(4px)" id="intransit-outbound-banner">Returning to factory</div>
+    </div>
+    <div class="card-hd" style="border-top:1px solid var(--border)">
+      <div>
+        <div class="card-title">📤 Outbound to Factory</div>
+        <div class="card-sub" id="intransit-outbound-sub">Tubs loaded on the truck, heading back to the factory — scan at Receiving to land them</div>
+      </div>
+    </div>
+    <div class="card-body" style="padding:12px 14px 4px">
+      <div id="intransit-outbound-cards"></div>
     </div>
   </div>
 
@@ -4643,7 +4690,7 @@ let _fbInitAttempts = 0;
 //   /app_version/current  (in Firebase console, manually, OR call
 //   pushVersionToFirebase() from the Admin console at deploy time)
 // ══════════════════════════════════════════════════════════════════
-const APP_VERSION = 'v4.60';
+const APP_VERSION = 'v4.61';
 window.APP_VERSION = APP_VERSION;
 
 // ── DATA EPOCH (generation guard) ────────────────────────────────────
@@ -5687,6 +5734,7 @@ function mergeCfgPreservingPins(localCfg, remoteCfg){
 }
 
 let _lastMergeKept = 0;
+let _lastReqMergeKept = 0;
 // ── KEEP-LOCAL UNIT MERGE (v4.56) ─────────────────────────────────────────────
 // Replaces the old wholesale `units = restored.units`, which silently dropped any
 // tub that existed locally but was missing from an incoming (stale) remote state —
@@ -5732,6 +5780,26 @@ function _mergeUnits(local, remote, restored){
   return merged;
 }
 
+// Merge factory requests on remote sync the SAME way tubs are merged: the remote
+// copy wins for any request it already knows (so status changes propagate), but a
+// request that exists ONLY locally — e.g. one a factory just created that a stale
+// device/tab hasn't seen yet — is KEPT so it can never be auto-deleted by a stale
+// push. Keyed by request id. Mirrors _mergeUnits; safe direction = keep, never drop.
+function _mergeRequests(local, remote){
+  remote = Array.isArray(remote) ? remote : [];
+  local  = Array.isArray(local)  ? local  : [];
+  const remoteIds = new Set(remote.map(r => r && r.id).filter(v => v != null));
+  const merged = remote.slice();
+  let kept = 0;
+  local.forEach(r => {
+    if(!r || r.id == null) return;
+    if(remoteIds.has(r.id)) return;  // remote has it -> remote copy wins (captures status updates)
+    merged.push(r); kept++;          // local-only request -> KEEP (never auto-delete)
+  });
+  _lastReqMergeKept = kept;
+  return merged;
+}
+
 function fbApplyRemoteState(restored, sourceTimestamp){
   // ═══ ASPEN PROTECTION LAYER — SAFE-PULL GUARD ═══
   // Block remote applies that would drop >50% of items. The user gets a banner
@@ -5753,7 +5821,7 @@ function fbApplyRemoteState(restored, sourceTimestamp){
     if(Array.isArray(restored.queue)) queue = restored.queue;
     if(Array.isArray(restored.factory)) factory = restored.factory;
     if(Array.isArray(restored.marriages)) marriages = restored.marriages;
-    if(Array.isArray(restored.dispatchRequests)) dispatchRequests = restored.dispatchRequests;
+    if(Array.isArray(restored.dispatchRequests)) dispatchRequests = _mergeRequests(dispatchRequests, restored.dispatchRequests);
     if(Array.isArray(restored.coverInventory)) coverInventory = restored.coverInventory;
     if(restored.colorLibrary && typeof restored.colorLibrary === 'object') colorLibrary = restored.colorLibrary;
     if(restored.coverModelMapping && typeof restored.coverModelMapping === 'object') coverModelMapping = restored.coverModelMapping;
@@ -5806,9 +5874,9 @@ function fbApplyRemoteState(restored, sourceTimestamp){
   // merged result so the cloud + every other device regain them (stops the
   // appear/disappear loop instead of just patching it on this screen).
   try {
-    if(_lastMergeKept > 0){
-      console.warn('[merge] kept ' + _lastMergeKept + ' local-only tub(s) the incoming state lacked \u2192 re-pushing merged state');
-      _lastMergeKept = 0;
+    if(_lastMergeKept > 0 || _lastReqMergeKept > 0){
+      console.warn('[merge] kept ' + _lastMergeKept + ' local-only tub(s) + ' + _lastReqMergeKept + ' local-only request(s) the incoming state lacked \u2192 re-pushing merged state');
+      _lastMergeKept = 0; _lastReqMergeKept = 0;
       setTimeout(() => { try { _bypassNextSafePush = true; if(typeof fbCloudSync === 'function') fbCloudSync(false); } catch(e){} }, 600);
     }
   } catch(e){}
@@ -8050,14 +8118,69 @@ function _receiveTubAtFactory(r){
   }
   // Already landed? don't duplicate.
   if(factory.some(x => String(x.sn) === key && x.trackingState === 'received-back-at-factory')) return;
+  const t = r.tub || {};
+  const noteParts = [r.description, r.notes, t.fromPos ? ('from ' + t.fromPos) : ''].filter(Boolean);
   factory.push({
-    id: nid++, type:'hot', sn: key, dealer: r.dealer || '(returned from warehouse)',
-    qty:1, added: at, notes: (`Returned from warehouse · ${r.notes||r.description||''}`).trim(),
+    id: nid++, type: (t.type === 'swim' ? 'swim' : 'hot'), sn: key,
+    dealer: t.dealer || r.dealer || '(returned from warehouse)',
+    qty:1, added: at,
+    notes: ('Returned from warehouse' + (noteParts.length ? ' · ' + noteParts.join(' · ') : '')),
     trackingState: 'received-back-at-factory',
     trackingHistory: [{state:'received-back-at-factory', at, note:'received at factory'}]
   });
 }
 window._receiveTubAtFactory = _receiveTubAtFactory;
+
+// Snapshot the physical tub onto its request, so every downstream view (loading
+// bay, truck bay, in transit, receiving, factory warehouse) keeps the label +
+// dealer + type even after the unit leaves the warehouse floor.
+function _snapshotTubOnRequest(r){
+  if(!r || r.type !== 'tub' || !r.sn) return;
+  const u = units.find(x => String(x.sn) === String(r.sn));
+  if(u){
+    r.tub = { sn: u.sn, dealer: u.dealer || '', type: u.type || 'hot', fromPos: u.pos || '' };
+  } else if(!r.tub){
+    r.tub = { sn: r.sn, dealer: r.dealer || '', type: 'hot', fromPos: '' };
+  }
+}
+window._snapshotTubOnRequest = _snapshotTubOnRequest;
+
+// Shared card for an outbound (warehouse -> factory) request. Same look as the
+// Factory Warehouse cards: big S/N, dealer + type, description + notes. Handles
+// tubs (icon + Hot/Swim) and non-tubs (cover/material/accessory).
+function _outboundTubCard(r, opts){
+  opts = opts || {};
+  const t = r.tub || {};
+  const reqType = r.type || 'tub';
+  let icon, typeLabel;
+  if(reqType === 'tub'){
+    const ty = t.type || 'hot';
+    icon = ({hot:'\u{1F6C1}', swim:'\u{1F3CA}', extra:'\u{1F4E6}'})[ty] || '\u{1F6C1}';
+    typeLabel = ({hot:'Hot Tub', swim:'Swim Spa', extra:'Extra/Stock'})[ty] || 'Hot Tub';
+  } else {
+    icon = ({cover:'\u{1F6E1}', material:'\u{1F4E6}', accessory:'\u{1F527}'})[reqType] || '\u{1F4E6}';
+    typeLabel = ({cover:'Cover', material:'Material', accessory:'Accessory'})[reqType] || 'Item';
+  }
+  const sn = escapeHTML(String(r.sn || t.sn || ''));
+  const dealer = escapeHTML(t.dealer || r.dealer || '');
+  const fromPos = t.fromPos ? (' \u00b7 from ' + escapeHTML(t.fromPos)) : '';
+  const headline = sn || escapeHTML(r.description || 'Item');
+  const meta = [dealer, typeLabel].filter(Boolean).join(' \u00b7 ') + fromPos;
+  return `<div style="background:${opts.bg||'#fff7ed'};border:1.5px solid ${opts.border||'#fed7aa'};border-radius:var(--r-lg);padding:13px 15px;margin-bottom:8px;display:flex;align-items:center;gap:13px">
+    <div style="font-size:24px;flex-shrink:0">${icon}</div>
+    <div style="flex:1;min-width:0">
+      <div style="display:flex;align-items:baseline;gap:9px;flex-wrap:wrap">
+        <span style="font-size:${sn?'18':'14'}px;font-weight:800;font-family:${sn?'var(--mono)':'inherit'};letter-spacing:.02em;color:var(--text1)">${headline}</span>
+        <span style="font-size:11px;font-weight:600;color:var(--text2)">${meta}</span>
+      </div>
+      ${sn?`<div style="font-size:12px;color:var(--text1);font-weight:600;margin-top:3px">${escapeHTML(r.description||'')}</div>`:''}
+      ${r.notes?`<div style="font-size:10.5px;color:var(--text3);margin-top:2px;font-style:italic">${escapeHTML(r.notes)}</div>`:''}
+      ${opts.statusLine?`<div style="font-size:10px;color:var(--text3);margin-top:4px">${opts.statusLine}</div>`:''}
+    </div>
+    ${opts.actionHtml ? `<div style="flex-shrink:0;display:flex;flex-direction:column;gap:5px;align-items:flex-end">${opts.actionHtml}</div>` : ''}
+  </div>`;
+}
+window._outboundTubCard = _outboundTubCard;
 
 function handleFactoryRequestScanByRole(r, role){
   // Returns true if the scan was consumed by request flow (caller should stop normal scan logic)
@@ -8074,6 +8197,7 @@ function handleFactoryRequestScanByRole(r, role){
     // BAY (outbound, waiting for the truck). Approval is implicit in this scan. The
     // sync merge treats loading-bay tubs as gone, so it won't reappear on the floor.
     if(r.type === 'tub' && r.sn){
+      _snapshotTubOnRequest(r);
       const u = units.find(x => x.sn === r.sn);
       if(u) units = units.filter(x => x.id !== u.id);
     }
@@ -13664,6 +13788,23 @@ function renderInTransit(){
   const summary = document.getElementById('intransit-summary');
   const adminActs = document.getElementById('intransit-admin-actions');
   if(!wrap) return;
+  // ── Reverse direction: outbound tubs warehouse -> factory (status 'shipped').
+  // Tracked on the request (not in factory[in-transit]) so the factory -> warehouse
+  // animation/items above are untouched.
+  const obCardI = document.getElementById('intransit-outbound-card');
+  const obCardsI = document.getElementById('intransit-outbound-cards');
+  if(obCardI && obCardsI){
+    const ob = dispatchRequests.filter(r => r.status === 'shipped' && r.type === 'tub');
+    if(ob.length){
+      obCardI.style.display = '';
+      const banner = document.getElementById('intransit-outbound-banner');
+      if(banner) banner.textContent = `${ob.length} tub${ob.length>1?'s':''} returning to factory`;
+      obCardsI.innerHTML = ob.map(r => _outboundTubCard(r, { statusLine: '\u{1F69A} In transit \u00b7 warehouse \u2192 factory' })).join('');
+    } else {
+      obCardI.style.display = 'none';
+      obCardsI.innerHTML = '';
+    }
+  }
   const items = getInTransitItems();
   // Sort by most recent transit timestamp (most recently scanned first)
   items.sort((a, b) => {
@@ -13948,6 +14089,26 @@ function renderTruck(){
   const loadedCards = document.getElementById('trk-loaded-cards');
   const readySub = document.getElementById('trk-ready-sub');
   const loadedSub = document.getElementById('trk-loaded-sub');
+  // ── Outbound to factory: tubs the warehouse staged in the loading bay (separate
+  // from the factory -> warehouse "Ready to Load" list so the truck crew is not
+  // confused). The truck loads them with the same shipFromLoadingBay action.
+  const obCardT = document.getElementById('trk-outbound-card');
+  const obCardsT = document.getElementById('trk-outbound-cards');
+  if(obCardT && obCardsT){
+    const outbound = dispatchRequests.filter(r => r.status === 'loading-bay');
+    if(outbound.length){
+      obCardT.style.display = '';
+      const sub = document.getElementById('trk-outbound-sub');
+      if(sub) sub.textContent = `${outbound.length} tub${outbound.length>1?'s':''} staged \u00b7 scan or tap to load on the truck (to factory)`;
+      obCardsT.innerHTML = outbound.map(r => _outboundTubCard(r, {
+        statusLine: '\u{1F4E4} Staged in loading bay \u00b7 destined for the factory',
+        actionHtml: `<button class="btn btn-p" style="padding:11px 16px;font-weight:700;background:#7c2d12;border:none;color:#fff" onclick="shipFromLoadingBay(${r.id})">\u{1F69A} Load on truck</button>`
+      })).join('');
+    } else {
+      obCardT.style.display = 'none';
+      obCardsT.innerHTML = '';
+    }
+  }
   if(!readyCards || !loadedCards) return;
 
   // Ready: factory items in 'ready-to-ship' state
@@ -22326,7 +22487,9 @@ function renderRequests(){
     if(r.type === 'tub' && r.sn){
       const info = findSpaBySn(r.sn);
       if(info){
-        snLine = `<div style="font-size:10.5px;color:${info.source==='units'?'var(--teal)':'var(--orange)'};margin-top:3px">↳ S/N ${r.sn} · ${info.location}</div>`;
+        const _loc = escapeHTML(info.location);
+        const _clk = info.source === 'units';
+        snLine = `<div style="font-size:10.5px;color:${_clk?'var(--teal)':'var(--orange)'};margin-top:3px">↳ S/N ${escapeHTML(String(r.sn))} · ${_clk?`<span onclick="goToFloorMap(['${escapeHTML(String(r.sn))}'],{toast:'Tub ${escapeHTML(String(r.sn))} highlighted on the floor'})" style="cursor:pointer;font-weight:700;text-decoration:underline;text-underline-offset:2px" title="Show this tub on the floor map">📍 ${_loc} · locate</span>`:_loc}</div>`;
       } else {
         snLine = `<div style="font-size:10.5px;color:var(--red);margin-top:3px">↳ S/N ${r.sn} · NOT IN WAREHOUSE</div>`;
       }
@@ -22746,22 +22909,19 @@ function renderReceiving(){
   }
 
   wrap.innerHTML = items.map(r=>{
-    const typeIcon = {tub:'🛁', cover:'🛡', material:'📦', accessory:'🔧'}[r.type] || '📦';
     const isReceived = r.status === 'received';
     const canToggle = currentRole === 'factory' || currentRole === 'admin';
-    return `<div style="display:flex;align-items:center;gap:11px;padding:11px 13px;background:${isReceived?'#f8fafc':'#fff'};border:1.5px solid ${isReceived?'#e2e8f0':'#bfdbfe'};border-radius:var(--r-lg);margin-bottom:6px;${isReceived?'opacity:.65':''}">
-      <div onclick="${canToggle?`toggleReceived(${r.id})`:''}" style="width:24px;height:24px;border-radius:6px;border:2px solid ${isReceived?'var(--teal)':'var(--accent)'};background:${isReceived?'var(--teal)':'transparent'};display:flex;align-items:center;justify-content:center;flex-shrink:0;${canToggle?'cursor:pointer':'cursor:not-allowed'};transition:all .15s">
-        ${isReceived?'<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="white" stroke-width="3"><path d="M3 8l3 3 7-7"/></svg>':''}
-      </div>
-      <div style="font-size:18px;flex-shrink:0">${typeIcon}</div>
-      <div style="flex:1;min-width:0">
-        <div style="font-size:13px;font-weight:${isReceived?'500':'700'};color:var(--text1);${isReceived?'text-decoration:line-through':''}">${r.description}</div>
-        <div style="font-size:10px;color:var(--text3);margin-top:1px">
-          ${r.sn?`<span style="font-family:var(--mono);font-weight:600;color:var(--text2);margin-right:6px">${r.sn}</span>`:''}
-          ${r.qty>1?`Qty ${r.qty} · `:''}${isReceived ? '✓ Received' : '🚚 In transit'}
-        </div>
-      </div>
-    </div>`;
+    const action = isReceived
+      ? `<span style="font-size:11px;font-weight:700;color:var(--teal);white-space:nowrap">\u2713 Received</span>`
+      : (canToggle
+          ? `<button class="btn btn-sm btn-p" style="font-weight:700;white-space:nowrap" onclick="toggleReceived(${r.id})">\u{1F4EC} Mark received</button>`
+          : `<span style="font-size:10.5px;color:var(--text3);white-space:nowrap">\u{1F69A} In transit</span>`);
+    return _outboundTubCard(r, {
+      bg: isReceived ? '#f0fdf4' : '#eff6ff',
+      border: isReceived ? '#bbf7d0' : '#bfdbfe',
+      statusLine: isReceived ? '\u2713 Received at factory' : '\u{1F69A} In transit \u2014 scan or tap to receive into Factory Warehouse',
+      actionHtml: action
+    });
   }).join('');
 }
 
@@ -22801,18 +22961,10 @@ function renderLoadingBay(){
   }
   const canLoad = currentRole === 'warehouse' || currentRole === 'transit' || currentRole === 'admin';
   wrap.innerHTML = items.map(r => {
-    const typeIcon = {tub:'\u{1F6C1}', cover:'\u{1F6E1}', material:'\u{1F4E6}', accessory:'\u{1F527}'}[r.type] || '\u{1F4E6}';
-    return `<div style="display:flex;align-items:center;gap:11px;padding:12px 14px;background:#fff7ed;border:1.5px solid #fed7aa;border-radius:var(--r-lg);margin-bottom:8px">
-      <div style="font-size:20px;flex-shrink:0">${typeIcon}</div>
-      <div style="flex:1;min-width:0">
-        <div style="font-size:13px;font-weight:700;color:var(--text1)">${escapeHTML(r.description||r.sn||'Item')}</div>
-        <div style="font-size:10.5px;color:var(--text3);margin-top:2px">
-          ${r.sn?`<span style="font-family:var(--mono);font-weight:600;color:var(--text2);margin-right:6px">${escapeHTML(String(r.sn))}</span>`:''}
-          ${r.dealer?escapeHTML(r.dealer)+' \u00b7 ':''}\u{1F4E6} In loading bay
-        </div>
-      </div>
-      ${canLoad?`<button class="btn btn-sm btn-p" style="font-weight:700;flex-shrink:0" onclick="shipFromLoadingBay(${r.id})">\u{1F69A} Load on truck</button>`:''}
-    </div>`;
+    const action = canLoad
+      ? `<button class="btn btn-sm btn-p" style="font-weight:700" onclick="shipFromLoadingBay(${r.id})">\u{1F69A} Load on truck</button>`
+      : '';
+    return _outboundTubCard(r, { statusLine: '\u{1F4E6} In loading bay \u00b7 waiting for the truck to the factory', actionHtml: action });
   }).join('');
 }
 window.renderLoadingBay = renderLoadingBay;
@@ -22827,6 +22979,7 @@ function pullToLoadingBay(rid){
     if(u){
       if(!confirm(`Pull tub ${r.sn} to the loading bay?\n\nIt leaves position ${u.pos} and waits in the bay for the truck to the factory.`)) return;
       snapshot('pull tub to loading bay');
+      _snapshotTubOnRequest(r);
       units = units.filter(x => x.id !== u.id);
       drawMap();
       extraNote = ` \u00b7 Pulled from ${u.pos}`;
