@@ -4330,6 +4330,10 @@ body.dark-mode .mar-card-track {
           All <span class="nb" id="mar-tab-all">0</span>
         </div>
       </div>
+      <div id="mar-view-toggle" style="display:flex;gap:2px;background:var(--bg3);border-radius:8px;padding:3px;flex-shrink:0;align-self:center">
+        <button id="mar-vt-cards" onclick="setMarView('cards')" title="Card view" style="border:none;padding:5px 11px;border-radius:6px;font-size:11px;font-weight:600;cursor:pointer">▦ Cards</button>
+        <button id="mar-vt-table" onclick="setMarView('table')" title="List view" style="border:none;padding:5px 11px;border-radius:6px;font-size:11px;font-weight:600;cursor:pointer">☰ List</button>
+      </div>
     </div>
     <div class="card-body" style="padding:14px 16px">
       <div id="mar-content"></div>
@@ -4690,7 +4694,7 @@ let _fbInitAttempts = 0;
 //   /app_version/current  (in Firebase console, manually, OR call
 //   pushVersionToFirebase() from the Admin console at deploy time)
 // ══════════════════════════════════════════════════════════════════
-const APP_VERSION = 'v4.61';
+const APP_VERSION = 'v4.62';
 window.APP_VERSION = APP_VERSION;
 
 // ── DATA EPOCH (generation guard) ────────────────────────────────────
@@ -7971,6 +7975,7 @@ let dispatchRequests = [
 // Tab state for new views
 let fctTab = 'spas';
 let marTab = 'pending';
+let marView = null; // null = use role default; 'cards' or 'table' when user picks
 let reqTab = 'pending';     // pending|shipped|received|all
 let recTab = 'pending';     // pending|received
 
@@ -20959,6 +20964,12 @@ function setMarTab(tab,btn){
   renderMarriages();
 }
 
+function setMarView(v){
+  marView = (v === 'cards' || v === 'table') ? v : null;
+  renderMarriages();
+}
+window.setMarView = setMarView;
+
 function renderMarriages(){
   // "Pending" here = marriages still being worked at the factory. Once the
   // Marriages crew marks one "Send to WH" (ready-to-ship) or "Ready to Pick Up"
@@ -21036,7 +21047,18 @@ function renderMarriages(){
   // The Marriages crew sees their pairings as visual cards (similar to how
   // Factory sees their factory items). Easier to scan and act on. Other roles
   // (admin, factory, warehouse) still see the dense table view below.
-  if(currentRole === 'marriages' || currentRole === 'admin'){
+  // A per-user toggle (marView) can override this default in either direction.
+  const useCards = marView ? (marView === 'cards') : (currentRole === 'marriages' || currentRole === 'admin');
+  // Reflect the effective view on the toggle buttons.
+  const _vtC = document.getElementById('mar-vt-cards'), _vtT = document.getElementById('mar-vt-table');
+  if(_vtC && _vtT){
+    const _on = 'background:var(--bg2);color:var(--accent);box-shadow:0 1px 2px rgba(0,0,0,.10)';
+    const _off = 'background:none;color:var(--text2)';
+    const _base = 'border:none;padding:5px 11px;border-radius:6px;font-size:11px;font-weight:600;cursor:pointer;';
+    _vtC.style.cssText = _base + (useCards ? _on : _off);
+    _vtT.style.cssText = _base + (!useCards ? _on : _off);
+  }
+  if(useCards){
     cont.innerHTML = `<div class="mar-cards-grid">${list.map(m => {
       const inWH = units.some(u => u.sn === m.spaSn);
       const sc = stCfg[m.status] || stCfg['pending'];
@@ -21108,6 +21130,7 @@ function renderMarriages(){
           <button class="btn btn-sm" onclick="printMarriageLabel(${m.id})" title="Print physical label">🏷 Label</button>
           ${m.status !== 'completed' ? `<button class="btn btn-sm" onclick="openMarriageEdit(${m.id})" title="Edit this marriage">✎ Edit</button>` : ''}
           ${isDelivered ? `<button class="btn btn-sm" onclick="goV('intransit')" title="Track shipment to warehouse">🚚 Track</button>` : ''}
+          ${isDelivered ? `<button class="btn btn-sm" style="background:#f3f4f6;border-color:#d1d5db;color:#374151;font-weight:600" onclick="undoMarriageDelivered(${m.id})" title="Undo delivery — revert to pending so you can re-edit">↶ Undo</button>` : ''}
           ${m.status !== 'completed' ? `<button class="btn btn-sm btn-r" onclick="rmMarriage(${m.id})">Remove</button>` : ''}
         </div>
       </div>`;
@@ -21154,6 +21177,7 @@ function renderMarriages(){
           ${m.status==='split-pending'?`<button class="btn btn-sm" style="background:#fef9c3;border-color:#f59e0b;color:#78350f" onclick="goV('requests')" title="View the auto-created Factory Request to ship this accessory">📋 Open follow-up</button>`:''}
           ${m.status!=='completed'?`<button class="btn btn-sm" onclick="printMarriageLabel(${m.id})" title="Print physical label for this pairing">🖨 Label</button>`:''}
           ${m.status!=='completed'?`<button class="btn btn-sm" onclick="openMarriageEdit(${m.id})" title="Edit this marriage">✎ Edit</button>`:''}
+          ${m.status==='delivered'?`<button class="btn btn-sm" style="background:#f3f4f6;border-color:#d1d5db;color:#374151;font-weight:600" onclick="undoMarriageDelivered(${m.id})" title="Undo delivery — back to pending">↶ Undo</button>`:''}
           ${m.status!=='completed'?`<button class="btn btn-sm btn-r" onclick="rmMarriage(${m.id})">Remove</button>`:''}
         </td>
       </tr>`;
@@ -21865,6 +21889,50 @@ function undoMarriageReady(mid){
   renderMarriages(); if(typeof renderFactory === 'function') renderFactory(); if(typeof renderTruck === 'function') renderTruck(); if(typeof renderInTransit === 'function') renderInTransit(); updBadges();
 }
 window.undoMarriageReady = undoMarriageReady;
+
+// Undo a "delivered" marriage back to pending so a mistake can be re-edited.
+// Reverses markMarriageDelivered: restores the factory accessory (shows at the
+// factory again), clears the delivered markers, and reopens any auto-created
+// follow-up request that this delivery had auto-closed. Mirrors undoMarriageReady.
+function undoMarriageDelivered(mid){
+  const m = marriages.find(x => x.id === mid);
+  if(!m){ toast('Marriage not found','err'); return; }
+  if(m.status !== 'delivered'){ toast('Only a delivered marriage can be undone','err'); return; }
+  if(!confirm(`Undo delivery for S/N ${m.spaSn}?\n\n"${m.accessoryName}" goes back to "at factory" (pending) so you can re-edit it.`)) return;
+  snapshot('undo marriage delivered');
+  // Put the accessory back into factory inventory if delivery had removed it.
+  if(m.accessoryId != null && !factory.some(f => f.id === m.accessoryId)){
+    factory.push({
+      id: m.accessoryId,
+      type: 'accessory',
+      name: m.accessoryName || 'Accessory',
+      qty: m.accessoryQty || 1,
+      dealer: m.spaDealer || '',
+      sn: '',
+      marriedSn: m.spaSn,
+      added: toISO(),
+      trackingState: 'created-at-factory',
+      trackingHistory: [{state:'created-at-factory', at: toISO(), by:(ROLES[currentRole]?ROLES[currentRole].label:currentRole), note:'Undo delivered'}]
+    });
+  }
+  // Reopen an auto-created follow-up request this delivery auto-closed.
+  const linkedReq = dispatchRequests.find(r => r.autoCreated && r.marriageId === mid && r.status === 'received');
+  if(linkedReq){
+    linkedReq.status = 'pending';
+    delete linkedReq.receivedAt;
+    linkedReq.notes = (linkedReq.notes ? linkedReq.notes + ' \u00b7 ' : '') + 'Reopened: delivery undone';
+  }
+  m.status = 'pending';
+  delete m.deliveredDate;
+  if(m.location === 'MINV') delete m.location;
+  addAct(`\u21b6 Marriage delivery undone: ${m.accessoryName} \u2192 S/N ${m.spaSn}`, 'var(--text2)');
+  toast(`Delivery undone for S/N ${m.spaSn} \u2014 back to pending`, 'ok');
+  renderMarriages();
+  if(typeof renderFactory === 'function') renderFactory();
+  if(typeof renderRequests === 'function') renderRequests();
+  drawMap(); updBadges();
+}
+window.undoMarriageDelivered = undoMarriageDelivered;
 
 function dispatchMarriagePickup(mid){
   if(currentRole !== 'factory' && currentRole !== 'admin'){ toast('🔒 Only Factory can dispatch a dealer pickup','err'); return; }
