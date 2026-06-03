@@ -3443,6 +3443,11 @@ body.dark-mode .mar-card-track {
       In Transit
       <span class="nb" style="background:#fef3c7;color:#78350f" id="nb-tra">0</span>
     </div>
+    <div class="ni" data-page="loadingbay" data-section="inventory" onclick="goV('loadingbay')">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="2" y="5" width="8" height="7" rx="1"/><path d="M10 7h3l1 2v3h-4z"/><circle cx="5" cy="13" r="1.2"/><circle cx="12" cy="13" r="1.2"/></svg>
+      Loading Bay
+      <span class="nb" style="background:#fff7ed;color:#7c2d12" id="nb-lbay">0</span>
+    </div>
     <div class="ni" data-page="materials" data-section="inventory" onclick="goV('materials')">
       <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="1" y="4" width="14" height="10" rx="1.5"/><path d="M5 4V3a1 1 0 011-1h4a1 1 0 011 1v1M6 8h4M8 6v4"/></svg>
       Materials
@@ -4367,10 +4372,28 @@ body.dark-mode .mar-card-track {
         <div class="card-sub">Items shipped from warehouse · Check off as they arrive</div>
       </div>
       <div class="card-acts">
+        <button class="btn btn-sm btn-p" style="font-weight:700" onclick="openQRScanner('factory-receive')" title="Scan a tub's QR to receive it into the Factory Warehouse">\u{1F4F7} Scan to receive</button>
         <span style="font-size:11px;color:var(--text2)" id="rec-counter"></span>
       </div>
     </div>
     <div class="card-body" id="rec-list" style="padding:10px"></div>
+  </div>
+</div>
+
+<!-- WAREHOUSE LOADING BAY (outbound to factory) -->
+<div id="view-loadingbay" class="view">
+  <div class="card">
+    <div class="card-hd">
+      <div>
+        <div class="card-title">\u{1F69A} Loading Bay \u2014 Outbound to Factory</div>
+        <div class="card-sub">Tubs pulled from the floor \u00b7 waiting for the truck to the factory</div>
+      </div>
+      <div class="card-acts">
+        <button class="btn btn-sm btn-p" style="font-weight:700" onclick="openQRScanner('factory-request')" title="Scan a bay tub's QR to load it on the truck (in transit to factory)">\u{1F4F7} Scan to load on truck</button>
+        <span style="font-size:11px;color:var(--text2)" id="lbay-counter"></span>
+      </div>
+    </div>
+    <div class="card-body" id="lbay-list" style="padding:10px"></div>
   </div>
 </div>
 
@@ -4620,7 +4643,7 @@ let _fbInitAttempts = 0;
 //   /app_version/current  (in Firebase console, manually, OR call
 //   pushVersionToFirebase() from the Admin console at deploy time)
 // ══════════════════════════════════════════════════════════════════
-const APP_VERSION = 'v4.57';
+const APP_VERSION = 'v4.59';
 window.APP_VERSION = APP_VERSION;
 
 // ── DATA EPOCH (generation guard) ────────────────────────────────────
@@ -5694,7 +5717,7 @@ function _mergeUnits(local, remote, restored){
   // Tubs the incoming state shows as shipped/received via a factory request are
   // legitimately en route to (or back at) the factory — never resurrect on the floor.
   (Array.isArray(restored && restored.dispatchRequests) ? restored.dispatchRequests : []).forEach(rq => {
-    if(rq && rq.type === 'tub' && rq.sn != null && (rq.status === 'shipped' || rq.status === 'received'))
+    if(rq && rq.type === 'tub' && rq.sn != null && (rq.status === 'loading-bay' || rq.status === 'shipped' || rq.status === 'received'))
       elsewhere.add('sn:' + String(rq.sn).trim());
   });
   const merged = remote.slice();
@@ -6519,16 +6542,16 @@ const ROLES = {
   admin:     { label:'Admin', subtitle:'Full access', icon:'🔑',
                pages:['*'], canEdit:true, defaultPage:'dashboard', password:'2804' },
   warehouse: { label:'Warehouse Manager', subtitle:'Receive · arrange · dispatch', icon:'🏭',
-               pages:['map','schedule','incoming','intransit','dispatched','materials','requests','covers','marriages','movements'], canEdit:true, defaultPage:'map', password:'0000' },
+               pages:['map','schedule','incoming','intransit','loadingbay','dispatched','materials','requests','covers','marriages'], canEdit:true, defaultPage:'map', password:'0000' },
   factory:   { label:'Factory', subtitle:'Ship spas · request items · receive', icon:'🚚',
-               pages:['factory','marriages','map','intransit','requests','receiving','covers','truck','movements'], canEdit:false, defaultPage:'factory', password:'0000' },
+               pages:['factory','marriages','map','intransit','requests','receiving','covers','truck'], canEdit:false, defaultPage:'factory', password:'0000' },
   // Marriages: its own department. Sees ONLY the marriages list (and
   // intransit so they can track what's coming from factory). Cannot see
   // factory's internal list or the floor map. When Marriages creates a
   // pending marriage, that IS the request to Factory — Factory sees the
   // same marriages list in their role and ships the accessory.
   marriages: { label:'Marriages', subtitle:'Spa + Accessory Pairings', icon:'🔗',
-               pages:['marriages','intransit','truck','movements'], canEdit:true, defaultPage:'marriages', password:'0000' },
+               pages:['marriages','intransit','truck'], canEdit:true, defaultPage:'marriages', password:'0000' },
   transit:   { label:'Truck / Transit', subtitle:'Scan QR when loading truck', icon:'🚛',
                pages:['truck','intransit'], canEdit:false, defaultPage:'truck', password:'0000' },
   organizer: { label:'Dispatch Organizer', subtitle:'Schedule pickups', icon:'📅',
@@ -7976,7 +7999,7 @@ function findActiveFactoryRequest(opts){
   const item = opts.item || null;
   if(!sn && !item) return null;
   return dispatchRequests.find(r => {
-    if(!['pending','approved','shipped'].includes(r.status)) return false;
+    if(!['pending','approved','loading-bay','shipped'].includes(r.status)) return false;
     // Tub request: match by S/N
     if(r.type === 'tub' && r.sn && sn && String(r.sn) === sn) return true;
     // For non-tub requests, matching by SN is not possible. Cover/material requests
@@ -8012,6 +8035,30 @@ function _moveUnitToFactoryTransit(sn, fallbackDealer, fallbackType, note){
 }
 window._moveUnitToFactoryTransit = _moveUnitToFactoryTransit;
 
+// Land a received tub into the Factory Warehouse (factory[] inventory) so it sits
+// there waiting for new movements. Used by every receive path (scan, checkbox,
+// manual button) so behavior is identical. Idempotent: won't create duplicates.
+function _receiveTubAtFactory(r){
+  if(!r || r.type !== 'tub' || !r.sn) return;
+  const at = toISO(); const key = String(r.sn);
+  // If an in-transit (to-factory) record exists, flip it instead of duplicating.
+  const transit = factory.find(x => String(x.sn) === key && x.trackingState === 'in-transit' && x.transitDir === 'to-factory');
+  if(transit){
+    transit.trackingState = 'received-back-at-factory';
+    transit.trackingHistory = [...(transit.trackingHistory||[]), {state:'received-back-at-factory', at, note:'received at factory'}];
+    return;
+  }
+  // Already landed? don't duplicate.
+  if(factory.some(x => String(x.sn) === key && x.trackingState === 'received-back-at-factory')) return;
+  factory.push({
+    id: nid++, type:'hot', sn: key, dealer: r.dealer || '(returned from warehouse)',
+    qty:1, added: at, notes: (`Returned from warehouse · ${r.notes||r.description||''}`).trim(),
+    trackingState: 'received-back-at-factory',
+    trackingHistory: [{state:'received-back-at-factory', at, note:'received at factory'}]
+  });
+}
+window._receiveTubAtFactory = _receiveTubAtFactory;
+
 function handleFactoryRequestScanByRole(r, role){
   // Returns true if the scan was consumed by request flow (caller should stop normal scan logic)
   if(!r) return false;
@@ -8032,22 +8079,38 @@ function handleFactoryRequestScanByRole(r, role){
     return true;
   }
   if(r.status === 'approved'){
-    if(role !== 'transit' && role !== 'admin' && role !== 'warehouse'){
-      toast(`Request approved — only truck can load (you are ${ROLES[role]?.label||role})`,'err');
+    if(role !== 'warehouse' && role !== 'admin'){
+      toast(`Approved — warehouse pulls it to the loading bay (you are ${ROLES[role]?.label||role})`,'err');
       return true;
     }
-    snapshot('scan: ship factory request to factory');
-    // Move tub into factory in-transit (warehouse \u2192 factory): leaves the floor,
-    // shows on the In Transit page, and is merge-safe (won't be resurrected).
+    snapshot('scan: pull factory request to loading bay');
+    // Tub leaves the warehouse floor and moves to the LOADING BAY (outbound, waiting
+    // for the truck). Tracked by this request (status 'loading-bay'); the sync merge
+    // treats loading-bay tubs as gone so it will not reappear on the floor.
     if(r.type === 'tub' && r.sn){
-      _moveUnitToFactoryTransit(r.sn, r.dealer, 'hot', (`Warehouse \u2192 factory \u00b7 ${r.notes||r.description||'request'}`).trim());
+      const u = units.find(x => x.sn === r.sn);
+      if(u) units = units.filter(x => x.id !== u.id);
     }
+    r.status = 'loading-bay';
+    r.bayAt = at;
+    r.bayBy = 'scan:' + role;
+    addAct(`📦 Scan: ${r.sn||r.description} pulled to loading bay — waiting for truck`, '#7c2d12');
+    toast(`${r.sn||'Item'} in the loading bay — load on truck when ready`,'ok');
+    renderRequests(); if(typeof renderLoadingBay==='function') renderLoadingBay(); drawMap(); updBadges(); saveState();
+    return true;
+  }
+  if(r.status === 'loading-bay'){
+    if(role !== 'transit' && role !== 'warehouse' && role !== 'admin'){
+      toast(`In loading bay — only truck/warehouse can load (you are ${ROLES[role]?.label||role})`,'err');
+      return true;
+    }
+    snapshot('scan: load loading-bay item on truck');
     r.status = 'shipped';
     r.shippedAt = at;
     r.shippedBy = 'scan:' + role;
-    addAct(`🚚 Scan: ${r.sn||r.description} on truck — in transit to factory`, 'var(--accent)');
+    addAct(`🚚 Scan: ${r.sn||r.description} loaded on truck — in transit to factory`, 'var(--accent)');
     toast(`${r.sn||'Item'} in transit to factory`,'ok');
-    renderRequests(); drawMap(); updBadges(); saveState();
+    renderRequests(); if(typeof renderLoadingBay==='function') renderLoadingBay(); drawMap(); updBadges(); saveState();
     return true;
   }
   if(r.status === 'shipped'){
@@ -8059,20 +8122,8 @@ function handleFactoryRequestScanByRole(r, role){
     r.status = 'received';
     r.receivedAt = at;
     r.receivedBy = 'scan:' + role;
-    // For tub requests: flip the existing in-transit record to received (no duplicate).
-    if(r.type === 'tub' && r.sn){
-      const existing = factory.find(f => String(f.sn) === String(r.sn) && f.trackingState === 'in-transit' && f.transitDir === 'to-factory');
-      if(existing){
-        existing.trackingState = 'received-back-at-factory';
-        existing.trackingHistory = [...(existing.trackingHistory||[]), {state:'received-back-at-factory', at, note:'received at factory'}];
-      } else {
-        factory.push({
-          id: nid++, type:'hot', sn: r.sn, dealer: r.dealer || '(returned from warehouse)',
-          qty:1, added: at, notes: `Returned from warehouse · ${r.notes||r.description||''}`.trim(),
-          trackingState: 'received-back-at-factory'
-        });
-      }
-    }
+    // For tub requests: land it in the Factory Warehouse (shared helper).
+    if(r.type === 'tub' && r.sn){ _receiveTubAtFactory(r); }
     addAct(`🏭 Scan: factory received ${r.sn||r.description}`, 'var(--teal)');
     toast(`Received ${r.sn||'item'} at factory`,'ok');
     renderRequests(); renderFactory(); drawMap(); updBadges(); saveState();
@@ -8828,6 +8879,7 @@ const PAGES = {
   schedule:['Schedule','Calendar of shipments & dispatches'],
   factory:['Factory Warehouse','Aspen production · Spas & accessories ready to ship'],
   marriages:['Marriages','Spa + accessory pairings — must ship together'],
+  loadingbay:['Loading Bay','Outbound · tubs staged for the truck to factory'],
   covers:['Cover Inventory','Spa covers in warehouse storage · auto-decrements when assigned to a spa'],
   incoming:['Incoming','All items arriving to warehouse · spas · accessories · marriages · materials · covers'],
   intransit:['In Transit','Spas & accessories loaded on truck · waiting at warehouse'],
@@ -8875,6 +8927,7 @@ function goV(v){
   if(v==='covers')renderCoverInventory();
   if(v==='requests')renderRequests();
   if(v==='receiving')renderReceiving();
+  if(v==='loadingbay')renderLoadingBay();
   updBadges();
 }
 
@@ -8905,6 +8958,9 @@ function updBadges(){
   if(nbReq){ nbReq.textContent = reqPending || ''; nbReq.className = 'nb' + (reqPending>0?' amber':''); }
   const nbRec = document.getElementById('nb-rec');
   if(nbRec){ nbRec.textContent = recPending || ''; nbRec.className = 'nb' + (recPending>0?' red':''); }
+  const bayCount = dispatchRequests.filter(r=>r.status==='loading-bay').length;
+  const nbLbay = document.getElementById('nb-lbay');
+  if(nbLbay){ nbLbay.textContent = bayCount || ''; nbLbay.className = 'nb' + (bayCount>0?' amber':''); }
   // Factory & marriage badges
   const fctCount = factoryVisibleCount();
   // Ready-to-ship / ready-for-pickup marriages have moved to the Loading Bay,
@@ -22171,6 +22227,8 @@ function renderRequests(){
   let rows = dispatchRequests.slice();
   if(reqTab === 'pending'){
     rows = rows.filter(r => r.status === 'pending' || r.status === 'awaiting-stock');
+  } else if(reqTab === 'approved'){
+    rows = rows.filter(r => r.status === 'approved' || r.status === 'loading-bay');
   } else if(reqTab !== 'all'){
     rows = rows.filter(r => r.status === reqTab);
   }
@@ -22192,7 +22250,8 @@ function renderRequests(){
     const statusInfo = {
       'awaiting-stock': {color:'#dc2626', bg:'#fef2f2', border:'#fecaca', label:'⏳ Awaiting Stock at Warehouse'},
       pending:  {color:'var(--amber)', bg:'#fffbeb', border:'#fde68a', label:'⏳ Pending — scan item to approve'},
-      approved: {color:'#0891b2', bg:'#ecfeff', border:'#a5f3fc', label:'✓ Approved · scan to load on truck'},
+      approved: {color:'#0891b2', bg:'#ecfeff', border:'#a5f3fc', label:'✓ Approved · scan to pull to loading bay'},
+      'loading-bay': {color:'#7c2d12', bg:'#fff7ed', border:'#fed7aa', label:'📦 In Loading Bay · load on truck'},
       shipped:  {color:'var(--accent)', bg:'#eff6ff', border:'#bfdbfe', label:'🚚 In Transit · factory scans to receive'},
       received: {color:'var(--teal)', bg:'#ecfdf5', border:'#a7f3d0', label:'📬 Received'},
       fulfilled: {color:'var(--teal)', bg:'#ecfdf5', border:'#a7f3d0', label:'✓ Fulfilled · back in stock'},
@@ -22250,6 +22309,14 @@ function renderRequests(){
         } else {
           actions.push(`<button class="btn btn-sm btn-p" onclick="markRequestShipped(${r.id})">📤 Mark loaded · ship</button>`);
         }
+      }
+    } else if(r.status === 'loading-bay'){
+      // Outbound tub waiting in the loading bay. Warehouse/truck loads it on the truck.
+      if(isAdmin || currentRole === 'warehouse' || currentRole === 'transit'){
+        if(r.type === 'tub' && r.sn){
+          actions.push(`<button class="btn btn-sm btn-p" onclick="openQRScanner('factory-request','${r.sn}')">📷 Scan to load on truck</button>`);
+        }
+        actions.push(`<button class="btn btn-sm btn-p" onclick="shipFromLoadingBay(${r.id})">🚚 Load on truck</button>`);
       }
     } else if(r.status === 'shipped'){
       // PRIMARY: factory scans QR to mark as received
@@ -22484,6 +22551,8 @@ function submitRequest(){
 function markRequestShipped(rid){
   const r = dispatchRequests.find(x=>x.id===rid); if(!r) return;
   if(r.status !== 'approved'){ toast('Request must be approved first','err'); return; }
+  // Tubs go to the LOADING BAY first (outbound staging), not straight to in-transit.
+  if(r.type === 'tub'){ pullToLoadingBay(rid); return; }
   // For tub requests: also remove the tub from units (it's leaving the warehouse)
   let extraNote = '';
   if(r.type === 'tub' && r.sn){
@@ -22492,9 +22561,9 @@ function markRequestShipped(rid){
       if(!confirm(`Ship tub ${r.sn} to factory?\n\nThis will REMOVE the tub from position ${u.pos} in the warehouse.`)) return;
       snapshot('ship tub to factory');
       const fromPos = u.pos;
-      _moveUnitToFactoryTransit(r.sn, r.dealer, 'hot', (`Warehouse → · ${r.notes||r.description||'request'}`).trim());
+      units = units.filter(x => x.id !== u.id);
       drawMap();
-      extraNote = ` · In transit from ${fromPos}`;
+      extraNote = ` · Outbound from ${fromPos}`;
     } else {
       if(!confirm(`Ship "${r.description}" to factory?\n\n⚠ Note: Tub ${r.sn} not currently in warehouse.`)) return;
       snapshot('ship factory request');
@@ -22590,6 +22659,10 @@ function markRequestReceived(rid){
   // Creates a new factory row if none exists for that color×model combo.
   // Also learns the color/model into the library so future datalists suggest them.
   let extraNote = '';
+  if(r.type === 'tub' && r.sn){
+    _receiveTubAtFactory(r);
+    extraNote = ` · Landed in Factory Warehouse`;
+  }
   if(r.type === 'cover' && r.coverModel && r.qty > 0){
     learnFromInput('cover', r.coverColor);
     learnFromInput('coverModel', r.coverModel);
@@ -22709,10 +22782,13 @@ function renderReceiving(){
 function toggleReceived(rid){
   const r = dispatchRequests.find(x=>x.id===rid); if(!r) return;
   if(r.status === 'shipped'){
+    snapshot('factory receive (checkbox)');
     r.status = 'received';
     r.receivedAt = toISO();
+    // Land tubs in the Factory Warehouse so they wait there for new movements.
+    if(r.type === 'tub' && r.sn) _receiveTubAtFactory(r);
     addAct(`Factory received: ${r.description}`,'var(--teal)');
-    toast('Marked as received','ok');
+    toast(r.type === 'tub' ? 'Received \u2192 in Factory Warehouse' : 'Marked as received','ok');
   } else if(r.status === 'received'){
     // Allow un-checking in case of mistake
     if(!confirm('Mark this as NOT received yet?')) return;
@@ -22720,8 +22796,79 @@ function toggleReceived(rid){
     r.receivedAt = null;
     toast('Reverted to in-transit','ok');
   }
-  renderReceiving(); renderRequests(); updBadges();
+  renderReceiving(); renderRequests(); if(typeof renderFactory==='function') renderFactory(); updBadges(); saveState();
 }
+
+// ── WAREHOUSE LOADING BAY (outbound to factory) ───────────────────────────────
+// Tubs pulled off the floor for a factory request wait here until loaded on the
+// truck. Flow: approved -> (warehouse scan) loading-bay -> (load) shipped -> factory.
+function renderLoadingBay(){
+  const wrap = document.getElementById('lbay-list');
+  if(!wrap) return;
+  const items = dispatchRequests.filter(r => r.status === 'loading-bay');
+  const counter = document.getElementById('lbay-counter');
+  if(counter) counter.innerHTML = items.length ? `<strong style="color:#7c2d12">${items.length}</strong> waiting for truck` : 'Bay is empty';
+  if(!items.length){
+    wrap.innerHTML = '<div style="padding:24px;text-align:center;color:var(--text3);font-size:12px">Loading bay is empty. Scan an approved tub off the floor and it lands here to wait for the truck to the factory.</div>';
+    return;
+  }
+  const canLoad = currentRole === 'warehouse' || currentRole === 'transit' || currentRole === 'admin';
+  wrap.innerHTML = items.map(r => {
+    const typeIcon = {tub:'\u{1F6C1}', cover:'\u{1F6E1}', material:'\u{1F4E6}', accessory:'\u{1F527}'}[r.type] || '\u{1F4E6}';
+    return `<div style="display:flex;align-items:center;gap:11px;padding:12px 14px;background:#fff7ed;border:1.5px solid #fed7aa;border-radius:var(--r-lg);margin-bottom:8px">
+      <div style="font-size:20px;flex-shrink:0">${typeIcon}</div>
+      <div style="flex:1;min-width:0">
+        <div style="font-size:13px;font-weight:700;color:var(--text1)">${escapeHTML(r.description||r.sn||'Item')}</div>
+        <div style="font-size:10.5px;color:var(--text3);margin-top:2px">
+          ${r.sn?`<span style="font-family:var(--mono);font-weight:600;color:var(--text2);margin-right:6px">${escapeHTML(String(r.sn))}</span>`:''}
+          ${r.dealer?escapeHTML(r.dealer)+' \u00b7 ':''}\u{1F4E6} In loading bay
+        </div>
+      </div>
+      ${canLoad?`<button class="btn btn-sm btn-p" style="font-weight:700;flex-shrink:0" onclick="shipFromLoadingBay(${r.id})">\u{1F69A} Load on truck</button>`:''}
+    </div>`;
+  }).join('');
+}
+window.renderLoadingBay = renderLoadingBay;
+
+// Pull an approved tub off the floor into the loading bay (outbound staging).
+function pullToLoadingBay(rid){
+  const r = dispatchRequests.find(x=>x.id===rid); if(!r) return;
+  if(r.status !== 'approved'){ toast('Request must be approved first','err'); return; }
+  let extraNote = '';
+  if(r.type === 'tub' && r.sn){
+    const u = units.find(x => x.sn === r.sn);
+    if(u){
+      if(!confirm(`Pull tub ${r.sn} to the loading bay?\n\nIt leaves position ${u.pos} and waits in the bay for the truck to the factory.`)) return;
+      snapshot('pull tub to loading bay');
+      units = units.filter(x => x.id !== u.id);
+      drawMap();
+      extraNote = ` \u00b7 Pulled from ${u.pos}`;
+    } else {
+      if(!confirm(`Move "${r.description}" to the loading bay?\n\n\u26a0 Note: Tub ${r.sn} not currently in warehouse.`)) return;
+      snapshot('pull factory request to loading bay');
+    }
+  }
+  r.status = 'loading-bay';
+  r.bayAt = toISO();
+  addAct(`\u{1F4E6} To loading bay: ${r.description}${extraNote}`,'#7c2d12');
+  toast('In loading bay \u2014 load on truck when ready','ok');
+  renderRequests(); if(typeof renderLoadingBay==='function') renderLoadingBay(); updBadges(); saveState();
+}
+window.pullToLoadingBay = pullToLoadingBay;
+
+// Load a loading-bay item on the truck -> in transit to factory.
+function shipFromLoadingBay(rid){
+  const r = dispatchRequests.find(x=>x.id===rid); if(!r) return;
+  if(r.status !== 'loading-bay'){ toast('Item is not in the loading bay','err'); return; }
+  if(!confirm(`Load "${r.description}" on the truck to the factory?`)) return;
+  snapshot('ship from loading bay');
+  r.status = 'shipped';
+  r.shippedAt = toISO();
+  addAct(`\u{1F69A} Loaded on truck: ${r.description} \u2014 in transit to factory`,'var(--accent)');
+  toast('On truck \u2014 in transit to factory','ok');
+  renderRequests(); if(typeof renderLoadingBay==='function') renderLoadingBay(); renderReceiving(); updBadges(); saveState();
+}
+window.shipFromLoadingBay = shipFromLoadingBay;
 
 
 // ══════════════════════════════════════════════════════════════════════════════
