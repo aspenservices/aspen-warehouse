@@ -4620,7 +4620,7 @@ let _fbInitAttempts = 0;
 //   /app_version/current  (in Firebase console, manually, OR call
 //   pushVersionToFirebase() from the Admin console at deploy time)
 // ══════════════════════════════════════════════════════════════════
-const APP_VERSION = 'v4.55';
+const APP_VERSION = 'v4.56';
 window.APP_VERSION = APP_VERSION;
 
 // ── DATA EPOCH (generation guard) ────────────────────────────────────
@@ -5663,6 +5663,46 @@ function mergeCfgPreservingPins(localCfg, remoteCfg){
   return merged;
 }
 
+let _lastMergeKept = 0;
+// ── KEEP-LOCAL UNIT MERGE (v4.56) ─────────────────────────────────────────────
+// Replaces the old wholesale `units = restored.units`, which silently dropped any
+// tub that existed locally but was missing from an incoming (stale) remote state —
+// the cause of tubs "appearing and disappearing" when a second device/tab pushes.
+// Rule: a local tub is KEPT only if the incoming state has no knowledge of it
+// ANYWHERE (not in units, dispatched, incoming, factory, or a marriage). If the
+// incoming state shows it elsewhere (e.g. dispatched), we respect that and don't
+// re-add it. Never loses a tub; only honors real progressions.
+function _mergeUnits(local, remote, restored){
+  remote = Array.isArray(remote) ? remote : [];
+  local  = Array.isArray(local)  ? local  : [];
+  const keyOf = u => {
+    if(!u) return null;
+    const sn = (u.sn != null && String(u.sn).trim() !== '') ? String(u.sn).trim() : null;
+    return sn ? ('sn:' + sn) : ('id:' + u.id);
+  };
+  const remoteKeys = new Set(remote.map(keyOf));
+  // S/Ns the incoming state already accounts for somewhere else → don't re-add to units.
+  const elsewhere = new Set();
+  ['dispatched','incoming','factory'].forEach(coll => {
+    (Array.isArray(restored && restored[coll]) ? restored[coll] : []).forEach(x => {
+      if(x && x.sn != null && String(x.sn).trim() !== '') elsewhere.add('sn:' + String(x.sn).trim());
+    });
+  });
+  (Array.isArray(restored && restored.marriages) ? restored.marriages : []).forEach(m => {
+    if(m && m.spaSn != null && String(m.spaSn).trim() !== '') elsewhere.add('sn:' + String(m.spaSn).trim());
+  });
+  const merged = remote.slice();
+  let kept = 0;
+  local.forEach(u => {
+    const k = keyOf(u); if(!k) return;
+    if(remoteKeys.has(k)) return;   // remote already has it (remote copy wins)
+    if(elsewhere.has(k)) return;    // incoming state knows it elsewhere (dispatched/etc) → respect
+    merged.push(u); kept++;         // local-only & unknown to incoming → KEEP (the fix)
+  });
+  _lastMergeKept = kept;
+  return merged;
+}
+
 function fbApplyRemoteState(restored, sourceTimestamp){
   // ═══ ASPEN PROTECTION LAYER — SAFE-PULL GUARD ═══
   // Block remote applies that would drop >50% of items. The user gets a banner
@@ -5675,7 +5715,7 @@ function fbApplyRemoteState(restored, sourceTimestamp){
   _fbApplyingRemote = true;
   try {
     if(typeof restored.nid === 'number') nid = Math.max(nid, restored.nid);
-    if(Array.isArray(restored.units)) units = restored.units;
+    if(Array.isArray(restored.units)) units = _mergeUnits(units, restored.units, restored);
     if(Array.isArray(restored.dispatched)) dispatched = restored.dispatched;
     if(Array.isArray(restored.incoming)) incoming = restored.incoming;
     if(Array.isArray(restored.materials)) materials = restored.materials;
@@ -5732,6 +5772,16 @@ function fbApplyRemoteState(restored, sourceTimestamp){
   // the _fbApplyingRemote block so its corrective push is allowed.
   try {
     if(typeof window.__aspenEnsureTubs === 'function') setTimeout(window.__aspenEnsureTubs, 300);
+  } catch(e){}
+  // If the merge preserved local-only tub(s) the incoming state lacked, push the
+  // merged result so the cloud + every other device regain them (stops the
+  // appear/disappear loop instead of just patching it on this screen).
+  try {
+    if(_lastMergeKept > 0){
+      console.warn('[merge] kept ' + _lastMergeKept + ' local-only tub(s) the incoming state lacked \u2192 re-pushing merged state');
+      _lastMergeKept = 0;
+      setTimeout(() => { try { _bypassNextSafePush = true; if(typeof fbCloudSync === 'function') fbCloudSync(false); } catch(e){} }, 600);
+    }
   } catch(e){}
 }
 
