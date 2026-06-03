@@ -4620,7 +4620,7 @@ let _fbInitAttempts = 0;
 //   /app_version/current  (in Firebase console, manually, OR call
 //   pushVersionToFirebase() from the Admin console at deploy time)
 // ══════════════════════════════════════════════════════════════════
-const APP_VERSION = 'v4.56';
+const APP_VERSION = 'v4.57';
 window.APP_VERSION = APP_VERSION;
 
 // ── DATA EPOCH (generation guard) ────────────────────────────────────
@@ -5690,6 +5690,12 @@ function _mergeUnits(local, remote, restored){
   });
   (Array.isArray(restored && restored.marriages) ? restored.marriages : []).forEach(m => {
     if(m && m.spaSn != null && String(m.spaSn).trim() !== '') elsewhere.add('sn:' + String(m.spaSn).trim());
+  });
+  // Tubs the incoming state shows as shipped/received via a factory request are
+  // legitimately en route to (or back at) the factory — never resurrect on the floor.
+  (Array.isArray(restored && restored.dispatchRequests) ? restored.dispatchRequests : []).forEach(rq => {
+    if(rq && rq.type === 'tub' && rq.sn != null && (rq.status === 'shipped' || rq.status === 'received'))
+      elsewhere.add('sn:' + String(rq.sn).trim());
   });
   const merged = remote.slice();
   let kept = 0;
@@ -7979,6 +7985,33 @@ function findActiveFactoryRequest(opts){
   });
 }
 
+// Move a warehouse tub into factory[] as an in-transit (warehouse \u2192 factory) shipment.
+// Makes it (a) leave the floor map, (b) show on the In Transit page, and (c) be
+// recognized by the sync merge as legitimately gone (so it is not resurrected).
+// Returns true if a matching unit was found and moved.
+function _moveUnitToFactoryTransit(sn, fallbackDealer, fallbackType, note){
+  const key = String(sn);
+  const u = units.find(x => String(x.sn) === key);
+  const at = toISO();
+  const dup = factory.find(f => String(f.sn) === key && f.trackingState === 'in-transit' && f.transitDir === 'to-factory');
+  if(!dup){
+    factory.push({
+      id: nid++,
+      type: (u && u.type === 'swim') ? 'swim' : (fallbackType === 'swim' ? 'swim' : 'hot'),
+      sn: key,
+      dealer: (u && u.dealer) || fallbackDealer || '',
+      qty: 1, added: at,
+      notes: note || 'Returning to factory \u00b7 warehouse request',
+      trackingState: 'in-transit',
+      transitDir: 'to-factory',
+      trackingHistory: [{ state: 'in-transit', at, note: 'warehouse \u2192 factory' }]
+    });
+  }
+  if(u) units = units.filter(x => x.id !== u.id);
+  return !!u;
+}
+window._moveUnitToFactoryTransit = _moveUnitToFactoryTransit;
+
 function handleFactoryRequestScanByRole(r, role){
   // Returns true if the scan was consumed by request flow (caller should stop normal scan logic)
   if(!r) return false;
@@ -8004,10 +8037,10 @@ function handleFactoryRequestScanByRole(r, role){
       return true;
     }
     snapshot('scan: ship factory request to factory');
-    // Remove tub from warehouse units (it's leaving)
+    // Move tub into factory in-transit (warehouse \u2192 factory): leaves the floor,
+    // shows on the In Transit page, and is merge-safe (won't be resurrected).
     if(r.type === 'tub' && r.sn){
-      const u = units.find(x => x.sn === r.sn);
-      if(u){ units = units.filter(x => x.id !== u.id); }
+      _moveUnitToFactoryTransit(r.sn, r.dealer, 'hot', (`Warehouse \u2192 factory \u00b7 ${r.notes||r.description||'request'}`).trim());
     }
     r.status = 'shipped';
     r.shippedAt = at;
@@ -8026,13 +8059,19 @@ function handleFactoryRequestScanByRole(r, role){
     r.status = 'received';
     r.receivedAt = at;
     r.receivedBy = 'scan:' + role;
-    // For tub requests: add back to factory inventory as a returned spa for rework
+    // For tub requests: flip the existing in-transit record to received (no duplicate).
     if(r.type === 'tub' && r.sn){
-      factory.push({
-        id: nid++, type:'hot', sn: r.sn, dealer: r.dealer || '(returned from warehouse)',
-        qty:1, added: at, notes: `Returned from warehouse · ${r.notes||r.description||''}`.trim(),
-        trackingState: 'received-back-at-factory'
-      });
+      const existing = factory.find(f => String(f.sn) === String(r.sn) && f.trackingState === 'in-transit' && f.transitDir === 'to-factory');
+      if(existing){
+        existing.trackingState = 'received-back-at-factory';
+        existing.trackingHistory = [...(existing.trackingHistory||[]), {state:'received-back-at-factory', at, note:'received at factory'}];
+      } else {
+        factory.push({
+          id: nid++, type:'hot', sn: r.sn, dealer: r.dealer || '(returned from warehouse)',
+          qty:1, added: at, notes: `Returned from warehouse · ${r.notes||r.description||''}`.trim(),
+          trackingState: 'received-back-at-factory'
+        });
+      }
     }
     addAct(`🏭 Scan: factory received ${r.sn||r.description}`, 'var(--teal)');
     toast(`Received ${r.sn||'item'} at factory`,'ok');
@@ -13683,7 +13722,7 @@ function renderInTransit(){
     const loadedBy = transitEvent?.by || '—';
     // Direction: if the latest transit event was caused by a warehouse rejection, the item
     // is returning to factory. Otherwise it's heading to the warehouse.
-    const isReturning = transitEvent?.note?.includes('rejected by warehouse');
+    const isReturning = item.transitDir === 'to-factory' || transitEvent?.note?.includes('rejected by warehouse');
     const directionLabel = isReturning ? '↩ TO FACTORY' : '🚚 TO WAREHOUSE';
     const directionColor = isReturning ? '#7c2d12' : '#f59e0b';
     // Time since loaded (helps spot stalled shipments)
@@ -22452,10 +22491,10 @@ function markRequestShipped(rid){
     if(u){
       if(!confirm(`Ship tub ${r.sn} to factory?\n\nThis will REMOVE the tub from position ${u.pos} in the warehouse.`)) return;
       snapshot('ship tub to factory');
-      // Remove from units
-      units = units.filter(x => x.id !== u.id);
+      const fromPos = u.pos;
+      _moveUnitToFactoryTransit(r.sn, r.dealer, 'hot', (`Warehouse → · ${r.notes||r.description||'request'}`).trim());
       drawMap();
-      extraNote = ` · Removed from ${u.pos}`;
+      extraNote = ` · In transit from ${fromPos}`;
     } else {
       if(!confirm(`Ship "${r.description}" to factory?\n\n⚠ Note: Tub ${r.sn} not currently in warehouse.`)) return;
       snapshot('ship factory request');
