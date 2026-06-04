@@ -4698,7 +4698,7 @@ let _fbInitAttempts = 0;
 //   /app_version/current  (in Firebase console, manually, OR call
 //   pushVersionToFirebase() from the Admin console at deploy time)
 // ══════════════════════════════════════════════════════════════════
-const APP_VERSION = 'v4.68';
+const APP_VERSION = 'v4.69';
 window.APP_VERSION = APP_VERSION;
 
 // ── DATA EPOCH (generation guard) ────────────────────────────────────
@@ -10534,7 +10534,7 @@ function drawMap(){
     // Taller cell so the full vertical stack (TOP → BTM cards) is visible,
     // mirroring the Stack detail panel right on the floor map.
     cell.style.overflow = 'visible';
-    cell.style.minHeight = (mode === 'swim' ? 106 : 148) + 'px';
+    cell.style.minHeight = (mode === 'swim' ? 112 : 156) + 'px';
     const body = el('div','');
     body.style.cssText = 'flex:1;display:flex;flex-direction:column;justify-content:center;gap:4px';
     // Per-LEVEL drop target. Lets a dragged tub land on a specific slot:
@@ -10608,13 +10608,12 @@ function drawMap(){
         const isSwim = su.type === 'swim';
         const isAccess = (lv === topLv);
         const bandCol = isSwim ? '#0d9e78' : rc.border;
-        row.style.cssText = `position:relative;display:flex;flex-direction:column;justify-content:center;min-height:38px;padding:5px 9px;border-radius:7px;background:${isAccess?'#fffdf5':'#ffffff'};border:1.5px solid ${isAccess?'#e0a52a':'#e6eaf0'};border-left:3px solid ${bandCol};box-shadow:${isAccess?'0 0 0 1.5px #fdebc4,0 1px 2px rgba(0,0,0,.04)':'0 1px 2px rgba(15,23,42,.06)'};cursor:grab`;
+        row.style.cssText = `position:relative;display:flex;flex-direction:column;justify-content:center;gap:2px;min-height:40px;padding:6px 9px;border-radius:6px;background:${isAccess?'#fffdf6':'#ffffff'};border:1px solid ${isAccess?'#e6b450':'#e6eaf0'};border-left:3px solid ${bandCol};box-shadow:0 1px 2px rgba(15,23,42,.05);cursor:grab`;
+        const badge = `<span style="position:absolute;top:5px;right:6px;font-size:7px;font-weight:800;letter-spacing:.05em;line-height:1.3;padding:1px 5px;border-radius:5px;color:${isAccess?'#b45309':'#64748b'};background:${isAccess?'#fef3c7':'#f1f5f9'};border:.5px solid ${isAccess?'#f0c659':'#e2e8f0'}">${lvLbl}</span>`;
         row.innerHTML =
-            `<div style="font-size:9px;font-weight:600;color:#64748b;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.2">${escapeHTML(su.dealer||'—')}</div>`
-          + `<div style="display:flex;align-items:baseline;gap:5px;margin-top:1px">`
-          +   `<span style="font-family:var(--mono);font-size:12px;font-weight:800;color:#0f172a;letter-spacing:.01em;line-height:1;flex:1 1 auto;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHTML(su.sn||'—')}</span>`
-          +   `<span style="flex:0 0 auto;font-size:7.5px;font-weight:800;letter-spacing:.06em;color:${isAccess?'#b9821a':'#94a3b8'}">${isAccess?'\u25cf ':''}${lvLbl}</span>`
-          + `</div>`;
+            badge
+          + `<div style="font-size:8.5px;font-weight:600;color:#64748b;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding-right:34px;line-height:1.2">${escapeHTML(su.dealer||'—')}</div>`
+          + `<div style="font-family:var(--mono);font-size:13px;font-weight:800;color:#0f172a;letter-spacing:.02em;line-height:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHTML(su.sn||'—')}</div>`;
         row.title = `${su.sn||''} · ${su.dealer||'—'} · ${isSwim?'swim spa':'hot tub'} · ${lvLbl}${isAccess?' · accessible (pick first)':''} · drag to move`;
         // Per-tub drag source — pick up THIS exact tub, not just the top one.
         row.setAttribute('draggable','true');
@@ -10643,8 +10642,8 @@ function drawMap(){
       } else {
         // Empty slot — dashed "+ place" box (placeable) or faint "empty".
         const canPlace = (lv === 1) || !!stack[lv-2];
-        row.style.cssText = `position:relative;display:flex;align-items:center;justify-content:center;min-height:38px;padding:4px 8px;border-radius:7px;border:1.5px dashed ${canPlace?'#9cc0f7':'#e2e8f0'};background:${canPlace?'#f4f8ff':'#fcfdfe'};color:${canPlace?'#2f6fe0':'#cbd5e1'};font-size:9px;font-weight:700;letter-spacing:.03em;${canPlace?'':'opacity:.6'}`;
-        row.innerHTML = `<span style="position:absolute;top:3px;right:6px;font-family:var(--mono);font-size:7px;font-weight:800;letter-spacing:.06em;color:#cbd5e1">${lvLbl}</span>${canPlace?'+ place':'empty'}`;
+        row.style.cssText = `position:relative;display:flex;align-items:center;justify-content:center;min-height:40px;padding:4px 9px;border-radius:6px;border:1px dashed ${canPlace?'#a8c5f5':'#e2e8f0'};background:${canPlace?'#f5f9ff':'#fcfdfe'};color:${canPlace?'#3b6fd4':'#cbd5e1'};font-size:9px;font-weight:700;letter-spacing:.03em;${canPlace?'':'opacity:.55'}`;
+        row.innerHTML = `<span style="position:absolute;top:5px;right:6px;font-size:7px;font-weight:800;letter-spacing:.05em;line-height:1.3;padding:1px 5px;border-radius:5px;color:#cbd5e1;background:#f8fafc;border:.5px solid #eef2f7">${lvLbl}</span>${canPlace?'+ place':'empty'}`;
       }
       wireLevelDrop(row, lv);
       body.appendChild(row);
