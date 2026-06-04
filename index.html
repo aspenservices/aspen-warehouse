@@ -4694,7 +4694,7 @@ let _fbInitAttempts = 0;
 //   /app_version/current  (in Firebase console, manually, OR call
 //   pushVersionToFirebase() from the Admin console at deploy time)
 // ══════════════════════════════════════════════════════════════════
-const APP_VERSION = 'v4.64';
+const APP_VERSION = 'v4.65';
 window.APP_VERSION = APP_VERSION;
 
 // ── DATA EPOCH (generation guard) ────────────────────────────────────
@@ -5739,6 +5739,8 @@ function mergeCfgPreservingPins(localCfg, remoteCfg){
 
 let _lastMergeKept = 0;
 let _lastReqMergeKept = 0;
+let _lastIncMergeKept = 0;
+let _lastFacMergeKept = 0;
 // ── KEEP-LOCAL UNIT MERGE (v4.56) ─────────────────────────────────────────────
 // Replaces the old wholesale `units = restored.units`, which silently dropped any
 // tub that existed locally but was missing from an incoming (stale) remote state —
@@ -5804,6 +5806,57 @@ function _mergeRequests(local, remote){
   return merged;
 }
 
+// Keep-local merge for incoming[] (same philosophy as _mergeUnits/_mergeRequests).
+// A just-force-received item lives only in OUR incoming until the cloud catches up.
+// Wholesale-replacing incoming with a stale remote made that item vanish (and the
+// matching factory record reappear in In Transit) -> the "Force Receive bounces back
+// to In Transit" bug. Remote wins for known ids; local-only arrivals are KEPT.
+function _mergeIncoming(local, remote){
+  remote = Array.isArray(remote) ? remote : [];
+  local  = Array.isArray(local)  ? local  : [];
+  const remoteIds = new Set(remote.map(r => r && r.id).filter(v => v != null));
+  const merged = remote.slice();
+  let kept = 0;
+  local.forEach(it => {
+    if(!it || it.id == null) return;
+    if(remoteIds.has(it.id)) return;   // remote has it -> remote copy wins
+    merged.push(it); kept++;           // local-only arrival -> KEEP (never vanish on stale remote)
+  });
+  _lastIncMergeKept = kept;
+  return merged;
+}
+
+// Keep-local merge for factory[]. Start from remote (so status updates like
+// ready-to-ship -> in-transit propagate), but DROP any in-transit spa we have
+// ALREADY received locally (its S/N is in our incoming as arrived/received) so a
+// stale remote can't resurrect it in In Transit. Local-only factory rows (e.g. a
+// spa we just created) are KEPT so they don't disappear before the cloud sees them.
+function _mergeFactory(local, remote, localIncoming){
+  remote = Array.isArray(remote) ? remote : [];
+  local  = Array.isArray(local)  ? local  : [];
+  localIncoming = Array.isArray(localIncoming) ? localIncoming : [];
+  const receivedSns = new Set(localIncoming
+    .filter(i => i && i.sn != null && String(i.sn).trim() !== '' &&
+      (i.status === 'arrived' || i.trackingState === 'received-at-warehouse'))
+    .map(i => String(i.sn).trim()));
+  const remoteIds = new Set(remote.map(f => f && f.id).filter(v => v != null));
+  const merged = remote.filter(f => {
+    if(!f) return false;
+    const isSpa = f.type !== 'accessory' && f.type !== 'misc';
+    if(isSpa && f.trackingState === 'in-transit' && f.sn != null && receivedSns.has(String(f.sn).trim()))
+      return false;   // received locally -> do not bring it back to In Transit
+    return true;
+  });
+  let kept = 0;
+  local.forEach(f => {
+    if(!f || f.id == null) return;
+    if(remoteIds.has(f.id)) return;    // remote has it -> remote copy wins
+    merged.push(f); kept++;            // local-only factory row -> KEEP
+  });
+  _lastFacMergeKept = kept;
+  return merged;
+}
+
 function fbApplyRemoteState(restored, sourceTimestamp){
   // ═══ ASPEN PROTECTION LAYER — SAFE-PULL GUARD ═══
   // Block remote applies that would drop >50% of items. The user gets a banner
@@ -5818,12 +5871,12 @@ function fbApplyRemoteState(restored, sourceTimestamp){
     if(typeof restored.nid === 'number') nid = Math.max(nid, restored.nid);
     if(Array.isArray(restored.units)) units = _mergeUnits(units, restored.units, restored);
     if(Array.isArray(restored.dispatched)) dispatched = restored.dispatched;
-    if(Array.isArray(restored.incoming)) incoming = restored.incoming;
+    if(Array.isArray(restored.incoming)) incoming = _mergeIncoming(incoming, restored.incoming);
     if(Array.isArray(restored.materials)) materials = restored.materials;
     if(Array.isArray(restored.events)) events = restored.events;
     if(Array.isArray(restored.activity)) activity = restored.activity;
     if(Array.isArray(restored.queue)) queue = restored.queue;
-    if(Array.isArray(restored.factory)) factory = restored.factory;
+    if(Array.isArray(restored.factory)) factory = _mergeFactory(factory, restored.factory, incoming);
     if(Array.isArray(restored.marriages)) marriages = restored.marriages;
     if(Array.isArray(restored.dispatchRequests)) dispatchRequests = _mergeRequests(dispatchRequests, restored.dispatchRequests);
     if(Array.isArray(restored.coverInventory)) coverInventory = restored.coverInventory;
@@ -5878,9 +5931,9 @@ function fbApplyRemoteState(restored, sourceTimestamp){
   // merged result so the cloud + every other device regain them (stops the
   // appear/disappear loop instead of just patching it on this screen).
   try {
-    if(_lastMergeKept > 0 || _lastReqMergeKept > 0){
+    if(_lastMergeKept > 0 || _lastReqMergeKept > 0 || _lastIncMergeKept > 0 || _lastFacMergeKept > 0){
       console.warn('[merge] kept ' + _lastMergeKept + ' local-only tub(s) + ' + _lastReqMergeKept + ' local-only request(s) the incoming state lacked \u2192 re-pushing merged state');
-      _lastMergeKept = 0; _lastReqMergeKept = 0;
+      _lastMergeKept = 0; _lastReqMergeKept = 0; _lastIncMergeKept = 0; _lastFacMergeKept = 0;
       setTimeout(() => { try { _bypassNextSafePush = true; if(typeof fbCloudSync === 'function') fbCloudSync(false); } catch(e){} }, 600);
     }
   } catch(e){}
@@ -14063,6 +14116,7 @@ function adminForceReceive(factoryId){
     }
     factory.splice(factory.indexOf(item), 1);
     renderMarriages?.(); renderInTransit(); renderFactory(); renderIncoming(); if(typeof drawMap==='function') drawMap(); updBadges();
+    try { flushSave(); } catch(e){}
     return;
   }
   // Move from factory[] to incoming[] with status=arrived (spa needs a position)
@@ -14081,6 +14135,7 @@ function adminForceReceive(factoryId){
   addAct(`📬 Admin force-received ${item.sn||factoryId}`,'var(--teal)');
   toast(`${item.sn||'Item'} marked as received — assign position`,'ok');
   renderInTransit(); renderFactory(); renderIncoming(); renderBanner(); updBadges();
+  try { flushSave(); } catch(e){}
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -23172,7 +23227,7 @@ function _stateSig(){
 // a plain JSON.stringify, no replacer) still carries the full blobs to the cloud.
 // On reload, the cloud-wins-on-open sync restores the blobs, so nothing is lost.
 function _blobReplacer(k, v){
-  if((k === 'bolPdf' || k === 'deliveryPhoto' || k === 'deliveryDoc') && typeof v === 'string' && v.length > 2000) return undefined;
+  if((k === 'bolPdf' || k === 'deliveryPhoto' || k === 'deliveryDoc' || k === 'photo') && typeof v === 'string' && v.length > 2000) return undefined;
   return v;
 }
 window._blobReplacer = _blobReplacer;
