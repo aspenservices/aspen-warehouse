@@ -19746,18 +19746,19 @@ async function printQRLabel(itemId, source){
       .label.landscape.accessory .qr-box svg { width: 2in; height: 2in; }
       .label.landscape.accessory .qr-box { padding: 9px; border-width: 3px; }
 
-      /* ═══ LANDSCAPE MODE — full letter page horizontal, HUGE 48px fonts ═══
-         When .label.landscape is applied (via the Print Landscape button), the label
-         fills the entire letter landscape page (10.2 × 7.7 in usable area).
-         min-height:7.7in + max-height:7.7in + overflow:hidden guarantees the label
-         occupies exactly one landscape sheet — content past 7.7in clips rather than
-         pushing to a second page. */
+      /* ═══ LANDSCAPE MODE — full letter page horizontal, HUGE fonts ═══
+         When .label.landscape is applied, the label sits centered on the letter
+         landscape page. It is intentionally sized SMALLER than the printable area
+         (9.8in wide × 7.3in tall vs the ~10.2 × 7.7in usable) and centered with
+         margin:0 auto, leaving a safety buffer on every side. Without that buffer the
+         right-hand QR column got clipped and the sheet overflowed to a 2nd page on
+         printers whose hardware margins differ slightly from the @page margin. */
       .label.landscape {
-        width: 10.2in;
-        min-height: 7.7in;
-        max-height: 7.7in;
+        width: 9.8in;
+        min-height: 7.2in;
+        max-height: 7.3in;
         overflow: hidden;
-        margin: 0;
+        margin: 0 auto;
         padding: 0.08in 0.3in 0.2in 0.3in;
       }
       .label.landscape .logo-bar { padding: 0 0 3px 0; }
@@ -19782,7 +19783,7 @@ async function printQRLabel(itemId, source){
          Cover+Wrap) sit side-by-side; "wide" fields (Dealer, Serial #, Model, Date) span both
          columns. This packs 8 fields into ~6 visual rows so the whole label fits on ONE
          landscape letter sheet (7.7in usable height) with comfortable buffer. */
-      .label.landscape.compact { min-height: 7.7in; max-height: 7.7in; overflow: hidden; }
+      .label.landscape.compact { min-height: 7.2in; max-height: 7.3in; overflow: hidden; }
       .label.landscape.compact .logo-bar img { height: 0.45in; }
       .label.landscape.compact .logo-bar { padding: 0 0 2px 0; }
       .label.landscape.compact .mid { grid-template-columns: minmax(0, 1fr) 1.5in; gap: 18px; }
