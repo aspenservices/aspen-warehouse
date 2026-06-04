@@ -5816,7 +5816,7 @@ function _mergeRequests(local, remote){
   // Fix: identity = requestedAt+type+(sn|description); keep the more-advanced
   // status for the same request, and keep id-collided local requests under a
   // fresh id so they never disappear.
-  const RANK = {'awaiting-stock':0, pending:1, approved:2, 'loading-bay':3, shipped:4, received:5, fulfilled:5, rejected:5};
+  const RANK = {'awaiting-stock':0, pending:1, approved:2, 'loading-bay':3, shipped:4, received:5, fulfilled:5, rejected:5, cancelled:5};
   const rank = s => (RANK[s] != null ? RANK[s] : 0);
   const sigOf = r => {
     if(!r || !r.requestedAt) return '';   // no stable identity → fall back to id-only
@@ -5827,11 +5827,12 @@ function _mergeRequests(local, remote){
   const remoteSigs   = new Set(remote.map(sigOf).filter(s => s));
   const localBySig   = new Map();
   local.forEach(r => { const s = sigOf(r); if(s) localBySig.set(s, r); });
-  // Start from remote, but if WE hold the SAME request at a more-advanced status,
-  // keep our version so an approval/ship isn't dragged backward by a stale remote.
+  // Start from remote, but if WE hold the SAME request (by identity) at a
+  // more-advanced/terminal status, keep our version — so an approval, ship, or
+  // CANCELLATION isn't dragged backward (or resurrected) by a stale remote.
   const merged = remote.map(r => {
     const mine = localBySig.get(sigOf(r));
-    if(mine && mine.id === r.id && rank(mine.status) > rank(r.status)) return mine;
+    if(mine && rank(mine.status) > rank(r.status)) return mine;
     return r;
   });
   const remoteIds = new Set(remote.map(r => r && r.id).filter(v => v != null));
@@ -5890,6 +5891,33 @@ function _mergeIncoming(local, remote){
 // ALREADY received locally (its S/N is in our incoming as arrived/received) so a
 // stale remote can't resurrect it in In Transit. Local-only factory rows (e.g. a
 // spa we just created) are KEPT so they don't disappear before the cloud sees them.
+// Keep-local merge for dispatched[] (same philosophy as units/factory/requests).
+// Previously dispatched was wholesale-replaced from remote, so a fresh dispatch
+// (incl. a dealer pickup straight from the factory) could be WIPED by a stale
+// remote, and downstream checks couldn't tell the tub had left. Key by S/N+time
+// (a tub can be dispatched, returned, re-dispatched → distinct events) and fall
+// back to id. Remote wins for known events so status updates (delivered/returned)
+// propagate; local-only dispatches are KEPT.
+function _mergeDispatched(local, remote){
+  remote = Array.isArray(remote) ? remote : [];
+  local  = Array.isArray(local)  ? local  : [];
+  const keyOf = d => {
+    if(!d) return null;
+    const sn = (d.sn != null && String(d.sn).trim() !== '') ? String(d.sn).trim() : null;
+    if(sn && d.dispatchedAt) return 'd:' + sn + '@' + d.dispatchedAt;
+    return d.id != null ? ('id:' + d.id) : null;
+  };
+  const remoteKeys = new Set(remote.map(keyOf).filter(v => v != null));
+  const merged = remote.slice();
+  local.forEach(d => {
+    if(!d) return;
+    const k = keyOf(d); if(k == null) return;
+    if(remoteKeys.has(k)) return;   // remote copy wins (status updates propagate)
+    merged.push(d);                 // local-only dispatch -> KEEP (don't let a stale remote wipe it)
+  });
+  return merged;
+}
+
 function _mergeFactory(local, remote, localIncoming){
   remote = Array.isArray(remote) ? remote : [];
   local  = Array.isArray(local)  ? local  : [];
@@ -5911,34 +5939,42 @@ function _mergeFactory(local, remote, localIncoming){
     return sn ? ('sn:' + sn) : (f.id != null ? ('id:' + f.id) : null);
   };
   const remoteKeys = new Set(remote.map(keyOf).filter(v => v != null));
-  // S/Ns physically accounted for on OUR side. units/incoming were already merged
-  // earlier this pass (they run before factory in fbApplyRemoteState), so reading
-  // the globals here reflects the reconciled floor/receiving state.
-  const onFloorSns    = new Set((Array.isArray(units) ? units : []).filter(u => u && u.sn != null && String(u.sn).trim() !== '').map(u => String(u.sn).trim()));
-  const dispatchedSns = new Set((Array.isArray(dispatched) ? dispatched : []).filter(d => d && d.sn != null && String(d.sn).trim() !== '').map(d => String(d.sn).trim()));
-  // A factory in-transit row is STALE when the physical tub is already elsewhere
-  // on our side: received at the dock (incoming), on the floor (units), or shipped
-  // to a dealer. The received-at-dock case applies regardless of direction; the
-  // floor/dispatched cases apply only to INBOUND (to-warehouse) legs — an OUTBOUND
-  // (to-factory) leg legitimately coexists with a stale floor copy that _mergeUnits
-  // has already removed. Applied to BOTH remote and local rows so a received tub
-  // can't bounce back to In Transit or end up duplicated (floor + in-transit).
-  const isStaleInbound = f => {
+  // S/Ns physically accounted for on OUR side. units/incoming/dispatched were
+  // already merged earlier this pass (they run before factory in
+  // fbApplyRemoteState), so reading the globals here reflects the reconciled state.
+  const onFloorSns = new Set((Array.isArray(units) ? units : []).filter(u => u && u.sn != null && String(u.sn).trim() !== '').map(u => String(u.sn).trim()));
+  // Dispatched-OUT (not a return): the tub left for a dealer (incl. dealer pickup
+  // straight from the factory) and must never be resurrected as a factory row.
+  const dispatchedOutSns = new Set((Array.isArray(dispatched) ? dispatched : [])
+    .filter(d => d && d.sn != null && String(d.sn).trim() !== '' && d.deliveryStatus !== 'returned')
+    .map(d => String(d.sn).trim()));
+  // A factory row is STALE when the physical tub is already accounted for elsewhere
+  // on our side, so the merge must not bring it back (the source of "received tub
+  // bounces to In Transit", "dealer pickup stays in Loading Bay", and duplicates):
+  //   • dispatched out (any state) → it left for a dealer → drop.
+  //   • in-transit + received at the dock (incoming) → drop, regardless of direction.
+  //   • in-transit INBOUND (to-warehouse) + already on the floor → drop (an OUTBOUND
+  //     to-factory leg legitimately coexists with a stale floor copy that _mergeUnits
+  //     has already removed, so it is left alone).
+  // Applied to BOTH remote and local rows.
+  const isStaleFactoryRow = f => {
     if(!f || f.sn == null) return false;
     if(f.type === 'accessory' || f.type === 'misc') return false;
-    if(f.trackingState !== 'in-transit') return false;
     const sn = String(f.sn).trim();
-    if(receivedSns.has(sn)) return true;
-    if(f.transitDir !== 'to-factory' && (onFloorSns.has(sn) || dispatchedSns.has(sn))) return true;
+    if(dispatchedOutSns.has(sn)) return true;
+    if(f.trackingState === 'in-transit'){
+      if(receivedSns.has(sn)) return true;
+      if(f.transitDir !== 'to-factory' && onFloorSns.has(sn)) return true;
+    }
     return false;
   };
-  const merged = remote.filter(f => f && !isStaleInbound(f));
+  const merged = remote.filter(f => f && !isStaleFactoryRow(f));
   let kept = 0;
   local.forEach(f => {
     if(!f) return;
     const k = keyOf(f); if(k == null) return;
     if(remoteKeys.has(k)) return;      // remote already has this spa (by S/N) or id -> remote copy wins
-    if(isStaleInbound(f)) return;      // a received/placed tub must not be re-added as In Transit
+    if(isStaleFactoryRow(f)) return;   // a received/placed/dispatched tub must not be re-added
     merged.push(f); kept++;            // local-only factory row -> KEEP (never vanish on id collision)
   });
   // De-collide ids: two rows may still carry the SAME numeric id (the same nid
@@ -5970,7 +6006,7 @@ function fbApplyRemoteState(restored, sourceTimestamp){
   try {
     if(typeof restored.nid === 'number') nid = Math.max(nid, restored.nid);
     if(Array.isArray(restored.units)) units = _mergeUnits(units, restored.units, restored);
-    if(Array.isArray(restored.dispatched)) dispatched = restored.dispatched;
+    if(Array.isArray(restored.dispatched)) dispatched = _mergeDispatched(dispatched, restored.dispatched);
     if(Array.isArray(restored.incoming)) incoming = _mergeIncoming(incoming, restored.incoming);
     if(Array.isArray(restored.materials)) materials = restored.materials;
     if(Array.isArray(restored.events)) events = restored.events;
@@ -22638,10 +22674,12 @@ function renderRequests(){
   setN('req-tab-approved-n', approved);
   setN('req-tab-shipped-n', shipped);
   setN('req-tab-received-n', received);
-  setN('req-tab-all-n', dispatchRequests.length);
+  setN('req-tab-all-n', dispatchRequests.filter(r => r.status !== 'cancelled').length);
 
-  // Filter rows — "pending" tab now also includes 'awaiting-stock' so factory can see queued items
-  let rows = dispatchRequests.slice();
+  // Filter rows — "pending" tab now also includes 'awaiting-stock' so factory can see queued items.
+  // Cancelled requests are kept in the data (so the merge knows they're terminal and
+  // never resurrects them) but hidden from every tab, so they look removed.
+  let rows = dispatchRequests.filter(r => r.status !== 'cancelled');
   if(reqTab === 'pending'){
     rows = rows.filter(r => r.status === 'pending' || r.status === 'awaiting-stock');
   } else if(reqTab === 'approved'){
@@ -23147,11 +23185,16 @@ function rejectRequest(rid){
 
 function cancelRequest(rid){
   const r = dispatchRequests.find(x=>x.id===rid); if(!r) return;
-  if(!confirm(`Cancel request "${r.description}"?\n\nThis will remove it from the list.`)) return;
+  if(!confirm(`Cancel request "${r.description}"?\n\nThis removes it from the active list.`)) return;
   snapshot('cancel factory request');
-  dispatchRequests = dispatchRequests.filter(x => x.id !== rid);
+  // Mark as cancelled instead of hard-deleting. A delete doesn't survive sync —
+  // a device that still has the request re-adds it ("cancelled requests reappear").
+  // 'cancelled' is a terminal status the merge preserves and the views hide.
+  r.status = 'cancelled';
+  r.cancelledAt = toISO();
   toast('Request cancelled','ok');
   renderRequests(); updBadges();
+  try { saveState(); } catch(e){}
 }
 
 function renderReceiving(){
@@ -24198,6 +24241,77 @@ function runIntegrityChecks(){
       if(dropped > 0) findings.push(`Removed ${dropped} Incoming entry(ies) for spa(s) already placed on the floor (de-duplicated)`);
     }
   } catch(e){ console.warn('[check 11]', e); }
+
+  // ─── Check 11b: Factory in-transit row for a spa already on the floor ───
+  // A physical tub lives in exactly ONE place. If the SAME S/N is BOTH on the
+  // floor (units) AND has a factory in-transit record, the two disagree (e.g. a
+  // received tub whose old in-transit copy lingered, or a rejected tub that was
+  // re-received). Resolve by the MOST RECENT action — whichever happened later
+  // reflects reality:
+  //   • transit event newer than the floor placement → it was sent OUT after
+  //     being on the floor → drop the stale floor copy (keep in-transit).
+  //   • floor placement newer (or unknown) → it was received/placed after the
+  //     transit record → drop the stale factory in-transit copy (keep floor).
+  // This is the cross-collection counterpart to Check 11 — dedupBySn only works
+  // WITHIN one collection, so it can't catch a units-vs-factory duplicate.
+  try {
+    const floorBySn = new Map();
+    units.forEach(u => { if(u && u.sn != null && String(u.sn).trim() !== '') floorBySn.set(String(u.sn).trim(), u); });
+    if(floorBySn.size){
+      const ts = s => { const d = Date.parse(s||''); return isNaN(d) ? 0 : d; };
+      const floorTimeOf = u => Math.max(ts(u.entry), 0, ...((u.trackingHistory||[]).map(h => ts(h && h.at))));
+      const transitTimeOf = f => {
+        const evs = (f.trackingHistory||[]).filter(h => h && h.state === 'in-transit').map(h => ts(h.at));
+        return Math.max(ts(f.added), 0, ...evs);
+      };
+      const floorIdsToDrop = new Set();
+      let droppedTransit = 0;
+      factory = factory.filter(f => {
+        if(!f) return false;
+        const isSpa = f.type !== 'accessory' && f.type !== 'misc';
+        if(!isSpa || f.trackingState !== 'in-transit' || f.sn == null) return true;
+        const u = floorBySn.get(String(f.sn).trim());
+        if(!u) return true;                       // not on the floor → leave it alone
+        if(transitTimeOf(f) > floorTimeOf(u)){    // sent out more recently than placed
+          floorIdsToDrop.add(u.id);
+          return true;                            // keep the in-transit row
+        }
+        droppedTransit++;
+        return false;                             // placed/received more recently → drop in-transit
+      });
+      let droppedFloor = 0;
+      if(floorIdsToDrop.size){
+        const before = units.length;
+        units = units.filter(u => !floorIdsToDrop.has(u.id));
+        droppedFloor = before - units.length;
+      }
+      if(droppedTransit > 0) findings.push(`Removed ${droppedTransit} stale factory in-transit record(s) for spa(s) already on the floor`);
+      if(droppedFloor > 0)   findings.push(`Removed ${droppedFloor} stale floor copy(ies) for spa(s) more recently sent back in transit`);
+    }
+  } catch(e){ console.warn('[check 11b]', e); }
+
+  // ─── Check 11c: Factory rows for spas already dispatched to a dealer ───
+  // A dealer pickup (or any dispatch) removes the tub from factory locally, but a
+  // stale remote can resurrect the factory row → it lingers in the Loading Bay
+  // while ALSO sitting in the Dispatch Log. If a spa's S/N is in dispatched and
+  // NOT a return, it left for the dealer — drop any leftover factory row for it.
+  try {
+    const dispatchedOut = new Set(
+      (Array.isArray(dispatched) ? dispatched : [])
+        .filter(d => d && d.sn != null && String(d.sn).trim() !== '' && d.deliveryStatus !== 'returned')
+        .map(d => String(d.sn).trim())
+    );
+    if(dispatchedOut.size){
+      const before = factory.length;
+      factory = factory.filter(f => {
+        if(!f || f.type === 'accessory' || f.type === 'misc') return true;
+        if(f.sn == null) return true;
+        return !dispatchedOut.has(String(f.sn).trim());
+      });
+      const dropped = before - factory.length;
+      if(dropped > 0) findings.push(`Removed ${dropped} stale factory row(s) for spa(s) already dispatched to a dealer`);
+    }
+  } catch(e){ console.warn('[check 11c]', e); }
 
   // ─── Check 12: inside-the-tub marriages whose tub now exists but isn't packed ───
   // An 'inside' marriage created before its tub existed waits as pending. Once the
