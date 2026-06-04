@@ -5794,15 +5794,53 @@ function _mergeUnits(local, remote, restored){
 function _mergeRequests(local, remote){
   remote = Array.isArray(remote) ? remote : [];
   local  = Array.isArray(local)  ? local  : [];
+  // Requests advance forward through a workflow. Two problems the old id-only
+  // merge caused (same nid-collision root cause as _mergeFactory):
+  //   1) Two devices minted the SAME id for DIFFERENT requests → "remote copy
+  //      wins" dropped the local one → the request you just approved vanished and
+  //      a different one appeared in its place (and its S/N looked like it changed).
+  //   2) A stale-but-newer remote with the SAME request at an EARLIER status
+  //      reverted a local approval → the request "reappeared" as pending.
+  // Fix: identity = requestedAt+type+(sn|description); keep the more-advanced
+  // status for the same request, and keep id-collided local requests under a
+  // fresh id so they never disappear.
+  const RANK = {'awaiting-stock':0, pending:1, approved:2, 'loading-bay':3, shipped:4, received:5, fulfilled:5, rejected:5};
+  const rank = s => (RANK[s] != null ? RANK[s] : 0);
+  const sigOf = r => {
+    if(!r || !r.requestedAt) return '';   // no stable identity → fall back to id-only
+    const k = (r.sn != null && String(r.sn).trim() !== '') ? String(r.sn).trim() : (r.description || '');
+    return [r.requestedAt, r.type || '', k].join('|');
+  };
+  const remoteById   = new Map(remote.filter(r => r && r.id != null).map(r => [r.id, r]));
+  const remoteSigs   = new Set(remote.map(sigOf).filter(s => s));
+  const localBySig   = new Map();
+  local.forEach(r => { const s = sigOf(r); if(s) localBySig.set(s, r); });
+  // Start from remote, but if WE hold the SAME request at a more-advanced status,
+  // keep our version so an approval/ship isn't dragged backward by a stale remote.
+  const merged = remote.map(r => {
+    const mine = localBySig.get(sigOf(r));
+    if(mine && mine.id === r.id && rank(mine.status) > rank(r.status)) return mine;
+    return r;
+  });
   const remoteIds = new Set(remote.map(r => r && r.id).filter(v => v != null));
-  const merged = remote.slice();
-  let kept = 0;
+  let kept = 0, reassigned = 0;
   local.forEach(r => {
     if(!r || r.id == null) return;
-    if(remoteIds.has(r.id)) return;  // remote has it -> remote copy wins (captures status updates)
-    merged.push(r); kept++;          // local-only request -> KEEP (never auto-delete)
+    const sig = sigOf(r);
+    if(sig && remoteSigs.has(sig)) return;   // same request already represented remotely (handled above) → no duplicate
+    if(remoteIds.has(r.id)){
+      const clash = remoteById.get(r.id);
+      if(clash && sigOf(clash) !== sig){
+        // ID COLLISION: same id, DIFFERENT request remotely → keep ours, fresh id.
+        r.id = ++nid; reassigned++;
+        merged.push(r); kept++;
+      }
+      return;                          // same request/id → remote (or our-advanced) copy already in merged
+    }
+    merged.push(r); kept++;            // local-only request → KEEP (never auto-delete)
   });
   _lastReqMergeKept = kept;
+  if(reassigned){ try { console.warn('[merge] _mergeRequests: reassigned ' + reassigned + ' id-collided request(s) to keep them'); } catch(e){} }
   return merged;
 }
 
@@ -5814,13 +5852,22 @@ function _mergeRequests(local, remote){
 function _mergeIncoming(local, remote){
   remote = Array.isArray(remote) ? remote : [];
   local  = Array.isArray(local)  ? local  : [];
-  const remoteIds = new Set(remote.map(r => r && r.id).filter(v => v != null));
+  // Key by S/N when present (one physical spa = one S/N), fall back to id for
+  // S/N-less rows. Same id-collision fix as _mergeFactory/_mergeUnits: two devices
+  // that minted the same nid for different arrivals no longer drop each other's row.
+  const keyOf = it => {
+    if(!it) return null;
+    const sn = (it.sn != null && String(it.sn).trim() !== '') ? String(it.sn).trim() : null;
+    return sn ? ('sn:' + sn) : (it.id != null ? ('id:' + it.id) : null);
+  };
+  const remoteKeys = new Set(remote.map(keyOf).filter(v => v != null));
   const merged = remote.slice();
   let kept = 0;
   local.forEach(it => {
-    if(!it || it.id == null) return;
-    if(remoteIds.has(it.id)) return;   // remote has it -> remote copy wins
-    merged.push(it); kept++;           // local-only arrival -> KEEP (never vanish on stale remote)
+    if(!it) return;
+    const k = keyOf(it); if(k == null) return;
+    if(remoteKeys.has(k)) return;      // remote has this arrival (by S/N) or id -> remote copy wins
+    merged.push(it); kept++;           // local-only arrival -> KEEP (never vanish on stale remote / id collision)
   });
   _lastIncMergeKept = kept;
   return merged;
@@ -5839,7 +5886,19 @@ function _mergeFactory(local, remote, localIncoming){
     .filter(i => i && i.sn != null && String(i.sn).trim() !== '' &&
       (i.status === 'arrived' || i.trackingState === 'received-at-warehouse'))
     .map(i => String(i.sn).trim()));
-  const remoteIds = new Set(remote.map(f => f && f.id).filter(v => v != null));
+  // Identity key: a physical spa == one S/N, so key by S/N when present and fall
+  // back to id only for S/N-less rows (accessories/misc). This mirrors _mergeUnits.
+  // CRITICAL FIX: keying purely by id meant that when two devices minted the SAME
+  // nid for two DIFFERENT spas, the merge saw the id in remote and dropped the
+  // local row ("remote copy wins") — that's why created tubs kept disappearing.
+  // S/N keying keeps both spas (different S/Ns -> different keys) and still
+  // de-dupes the same physical spa (same S/N -> remote wins, no duplicate).
+  const keyOf = f => {
+    if(!f) return null;
+    const sn = (f.sn != null && String(f.sn).trim() !== '') ? String(f.sn).trim() : null;
+    return sn ? ('sn:' + sn) : (f.id != null ? ('id:' + f.id) : null);
+  };
+  const remoteKeys = new Set(remote.map(keyOf).filter(v => v != null));
   const merged = remote.filter(f => {
     if(!f) return false;
     const isSpa = f.type !== 'accessory' && f.type !== 'misc';
@@ -5849,9 +5908,22 @@ function _mergeFactory(local, remote, localIncoming){
   });
   let kept = 0;
   local.forEach(f => {
-    if(!f || f.id == null) return;
-    if(remoteIds.has(f.id)) return;    // remote has it -> remote copy wins
-    merged.push(f); kept++;            // local-only factory row -> KEEP
+    if(!f) return;
+    const k = keyOf(f); if(k == null) return;
+    if(remoteKeys.has(k)) return;      // remote already has this spa (by S/N) or id -> remote copy wins
+    merged.push(f); kept++;            // local-only factory row -> KEEP (never vanish on id collision)
+  });
+  // De-collide ids: two rows may still carry the SAME numeric id (the same nid
+  // minted on two devices for different spas). Give the duplicate a fresh id so
+  // per-id operations (edit / delete / find) target the right row. Only SPAS are
+  // renumbered — accessory ids are referenced by marriages (accessoryId), so those
+  // are left untouched. Spas are referenced by S/N elsewhere, so renumbering is safe.
+  const seenIds = new Set();
+  merged.forEach(f => {
+    if(!f) return;
+    const isSpa = f.type !== 'accessory' && f.type !== 'misc';
+    if(f.id != null && seenIds.has(f.id) && isSpa){ f.id = ++nid; }
+    if(f.id != null) seenIds.add(f.id);
   });
   _lastFacMergeKept = kept;
   return merged;
@@ -13421,17 +13493,23 @@ function confirmPosition(incomingId, posRaw){
   if(!v.ok){ toast(v.reason || 'Invalid position','err'); return; }
   const it = incoming.find(x => x.id === incomingId);
   if(!it){ toast('Item not found','err'); closePositionPicker(); return; }
-  // Stack capacity check: hot tubs and swim spas can only stack up to MAX_PER_CELL (6) per cell.
-  // Other types (extras, materials) are unlimited. Warn before exceeding capacity.
+  // Stack-aware slot resolution. Hot tubs stack MAX_LEVELS_HOT high; swim spas
+  // MAX_LEVELS_SWIM high across their pair. findNextSlot returns {stack,level}
+  // for the next free slot (BTM→MID→TOP) or null when the cell is full — the
+  // same logic the drag and Add-Spa paths use. Without this the unit lands with
+  // no stack/level and falls into "overflow" (renders as S?-L0).
+  let slot = null;
   if(isStackedType(it.type)){
-    const atPos = units.filter(u => u.pos === v.pos && isStackedType(u.type));
-    if(atPos.length >= MAX_PER_CELL){
-      toast(`${v.pos} is already full (${MAX_PER_CELL} ${it.type === 'swim' ? 'swim spas' : 'hot tubs'} max). Choose another position.`, 'err');
+    slot = findNextSlot(v.pos, null, it.type);
+    if(!slot){
+      const maxLv = it.type === 'swim' ? MAX_LEVELS_SWIM : MAX_LEVELS_HOT;
+      toast(`${v.pos} is full (max ${maxLv} ${it.type === 'swim' ? 'swim spas' : 'hot tubs'}). Choose another position.`, 'err');
       return;
     }
-    if(atPos.length >= MAX_PER_CELL - 1){
-      // Confirm before stacking on a near-full cell
-      if(!confirm(`${v.pos} already has ${atPos.length} ${it.type === 'swim' ? 'swim spas' : 'hot tubs'}. This will be the ${atPos.length + 1}/${MAX_PER_CELL} (last available slot). Continue?`)) return;
+    const maxLv = it.type === 'swim' ? MAX_LEVELS_SWIM : MAX_LEVELS_HOT;
+    if(slot.level === maxLv){
+      // Confirm before taking the last (top) slot
+      if(!confirm(`${v.pos} will be full after this (${maxLv}/${maxLv} — ${LEVEL_SHORT(slot.level)} level). Continue?`)) return;
     }
   }
   snapshot('place via picker');
@@ -13465,12 +13543,16 @@ function confirmPosition(incomingId, posRaw){
     };
     addAct(`🛌 Cover paired with S/N ${it.sn}: ${it.cover.color}${it.cover.model?' '+it.cover.model:''}`,'var(--accent)');
   }
+  // Seat the unit in its resolved stack slot so it occupies BTM/MID/TOP
+  // instead of falling into overflow (S?-L0).
+  if(slot){ newUnit.stack = slot.stack; newUnit.level = slot.level; }
   units.push(newUnit);
   // Remove from incoming + queue
   incoming = incoming.filter(x => x.id !== incomingId);
   queue = queue.filter(q => q.id !== incomingId);
-  addAct(`Placed ${it.sn||it.dealer} at ${v.pos}`,'var(--teal)');
-  toast(`${it.sn||it.dealer} → ${v.pos}`,'ok');
+  const slotTag = slot ? ` (S${slot.stack}-${LEVEL_SHORT(slot.level)})` : '';
+  addAct(`Placed ${it.sn||it.dealer} at ${v.pos}${slotTag}`,'var(--teal)');
+  toast(`${it.sn||it.dealer} → ${v.pos}${slot ? ` · S${slot.stack}-${LEVEL_SHORT(slot.level)}` : ''}`,'ok');
   closePositionPicker();
   if(typeof drawMap === 'function') drawMap();
   renderIncoming(); renderQueue(); renderBanner(); updBadges();
@@ -22922,6 +23004,7 @@ function markRequestShipped(rid){
   addAct(`Shipped to factory: ${r.description}${extraNote}`,'var(--accent)');
   toast('Marked as shipped — Factory will receive notification','ok');
   renderRequests(); renderMaterials(); renderReceiving(); updBadges();
+  try { saveState(); } catch(e){}
 }
 
 // Manually promote an awaiting-stock request to pending (when stock has arrived)
@@ -22956,6 +23039,9 @@ function approveRequest(rid){
   addAct(`Approved factory request: ${r.description}`,'#0891b2');
   toast('Approved — ready to ship when you are','ok');
   renderRequests(); updBadges();
+  // Persist + push immediately so a background sync can't revert the approval
+  // while it's still only in memory (it would otherwise wait for the debounce).
+  try { saveState(); } catch(e){}
 }
 
 function markRequestReceived(rid){
