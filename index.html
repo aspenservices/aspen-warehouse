@@ -4269,6 +4269,10 @@ body.dark-mode .mar-card-track {
           <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="2" y="2" width="12" height="12" rx="1.5"/><path d="M2 6h12M6 2v12"/></svg>
           Accessories <span class="nb" id="fct-tab-acc">0</span>
         </div>
+        <div class="fct-tab" onclick="setFctTab('hold',this)">
+          <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="4.5" y="3" width="2.5" height="10" rx="1"/><rect x="9" y="3" width="2.5" height="10" rx="1"/></svg>
+          Hold <span class="nb" id="fct-tab-hold">0</span>
+        </div>
       </div>
       <div class="card-acts" style="padding:10px 0;display:flex;gap:6px;flex-wrap:wrap">
         <button class="btn btn-sm btn-p" onclick="openFactoryAdd()">
@@ -5984,12 +5988,26 @@ function _mergeFactory(local, remote, localIncoming){
     return false;
   };
   const merged = remote.filter(f => f && !isStaleFactoryRow(f));
+  // Index surviving (non-stale) remote rows by key so we can do LAST-EDIT-WINS:
+  // when the same spa exists on both sides, keep the copy edited most recently
+  // (by updatedAt). Without this the remote always won, so a local edit — e.g.
+  // fixing Hot Tub → Swim Spa, colors, notes — got reverted on the next sync.
+  const mergedIdx = new Map();
+  merged.forEach((f, i) => { const k = keyOf(f); if(k != null && !mergedIdx.has(k)) mergedIdx.set(k, i); });
   let kept = 0;
   local.forEach(f => {
     if(!f) return;
     const k = keyOf(f); if(k == null) return;
-    if(remoteKeys.has(k)) return;      // remote already has this spa (by S/N) or id -> remote copy wins
     if(isStaleFactoryRow(f)) return;   // a received/placed/dispatched tub must not be re-added
+    if(mergedIdx.has(k)){
+      // Same spa already present from remote → keep whichever was edited last.
+      const idx = mergedIdx.get(k);
+      const rem = merged[idx];
+      const lt = f.updatedAt || '';
+      const rt = (rem && rem.updatedAt) || '';
+      if(lt && lt > rt) merged[idx] = f;   // our edit is newer → ours wins
+      return;
+    }
     merged.push(f); kept++;            // local-only factory row -> KEEP (never vanish on id collision)
   });
   // De-collide ids: two rows may still carry the SAME numeric id (the same nid
@@ -18859,14 +18877,17 @@ function renderFactory(){
   const _readyInBay = f => f.trackingState==='ready-to-ship' || f.trackingState==='ready-for-pickup';
   const spasAll = atFactory.filter(f => f.type==='hot' || f.type==='swim' || f.type==='extra');
   // Ready spas (Ship to WH / Ready to Pick Up) now live in the Loading Bay, not here.
-  const spas = spasAll.filter(f => !_readyInBay(f));
-  const spasInBay = spasAll.length - spas.length;
+  // Held items (f.onHold) move OUT to the dedicated "Hold" tab so they don't clutter Ready.
+  const spas = spasAll.filter(f => !_readyInBay(f) && !f.onHold);
+  const spasInBay = spasAll.filter(f => _readyInBay(f) && !f.onHold).length;
   const acc = atFactory.filter(f => f.type==='accessory' || f.type==='misc');
   const married = acc.filter(a => a.marriedSn);
-  // The Accessories tab is for OTHER (non-married) items only — loose parts, misc.
+  // The Accessories tab is for OTHER (non-married, non-held) items only — loose parts, misc.
   // Married accessories belong to the marriage flow (Marriages / Marriage Requests
   // + Loading Bay when ready), so they are NOT shown here.
-  const accLoose = acc.filter(a => !a.marriedSn);
+  const accLoose = acc.filter(a => !a.marriedSn && !a.onHold);
+  // Hold tab: every held item (spa OR accessory), regardless of type.
+  const held = atFactory.filter(f => f.onHold);
   // ── IN-TRANSIT COUNTS, SPLIT BY TYPE ──
   // The Spas Ready card was previously showing "X on truck" using the TOTAL of
   // factory items with trackingState='in-transit'. That total includes shipped
@@ -18885,10 +18906,16 @@ function renderFactory(){
   `;
   document.getElementById('fct-tab-spas').textContent = spas.length || '';
   document.getElementById('fct-tab-acc').textContent = accLoose.length || '';
+  const _holdTabEl = document.getElementById('fct-tab-hold');
+  if(_holdTabEl) _holdTabEl.textContent = held.length || '';
   // Tab content — use atFactory (already filtered to exclude in-transit)
-  const list = fctTab === 'spas' ? spas : accLoose;
+  const list = fctTab === 'spas' ? spas : fctTab === 'hold' ? held : accLoose;
   const cont = document.getElementById('fct-content');
   if(!list.length){
+    if(fctTab === 'hold'){
+      cont.innerHTML = `<div style="padding:30px 14px;text-align:center;color:var(--text3);font-size:12px">⏸ Nothing on hold. Items you put on <strong>Hold</strong> move here automatically.</div>`;
+      return;
+    }
     const inTransitMsg = inTransitCount > 0 ? `<br><span style="font-size:11px;color:var(--text3)">${inTransitCount} item${inTransitCount>1?'s':''} on truck — see In Transit page</span>` : '';
     cont.innerHTML = `<div style="padding:30px 14px;text-align:center;color:var(--text3);font-size:12px">No items at factory in this category. <a href="#" onclick="event.preventDefault();openFactoryAdd()" style="color:var(--accent);font-weight:600">+ Add to factory</a>${inTransitMsg}</div>`;
     return;
@@ -19136,6 +19163,7 @@ function addFactorySpa(){
     model, colors, acrylicColor, cabinetColor, plasticWrap, cover,
     looseAccessories,
     trackingId,
+    updatedAt: toISO(),
     trackingState: 'created-at-factory',
     trackingHistory: [{state:'created-at-factory', at: toISO(), by: ROLES[currentRole].label}]
   });
@@ -19817,6 +19845,9 @@ async function printQRLabel(itemId, source){
     </style></head><body>
     <div class="${labelCssClass}" id="aspen-label">${labelInner}</div>
     <div class="no-print">
+      <div class="hint" style="background:#fef3c7;border:1px solid #f59e0b;border-radius:8px;padding:9px 13px;color:#78350f;font-weight:600;max-width:560px;margin:0 auto 12px;line-height:1.4">
+        ⚠ If the label prints <b>blank</b>, <b>cut off</b>, or on <b>2 pages</b>: in the Print dialog open <b>More settings</b> and set <b>Scale = Default</b> (NOT a custom % like 180) and <b>Margins = Default</b>. It then fits on ONE sheet with the QR fully visible.
+      </div>
       <div class="hint">📐 Default: Landscape · Standard. Click Portrait if you prefer 5.5″ × 5″ format.</div>
       <button onclick="setMode('portrait')">🖨 Portrait 5.5″ × 5″</button>
       <button onclick="setMode('landscape')">🖨 Landscape · Standard</button>
@@ -20771,10 +20802,12 @@ function holdFactoryItem(id){
   };
   f.trackingHistory = f.trackingHistory || [];
   f.trackingHistory.push({state:'on-hold', at:toISO(), by:ROLES[currentRole].label, note:f.onHold.reason});
+  f.updatedAt = toISO();   // last-edit-wins: keep the hold from being reverted by a stale remote
   addAct(`⏸ ${f.sn||f.dealer} put ON HOLD: ${f.onHold.reason}`,'var(--text2)');
   postMovement({type:'344', sn:f.sn, material:f.type||'', qty:f.qty||1, from:LOC_FACTORY, to:LOC_FACTORY, stockType:'blocked', note:f.onHold.reason});
   toast(`${f.sn||f.dealer} is now on hold`,'ok');
   renderFactory(); updBadges();
+  try { saveState(); } catch(e){}
 }
 
 function resumeFactoryItem(id){
@@ -20786,10 +20819,12 @@ function resumeFactoryItem(id){
   delete f.onHold;
   f.trackingHistory = f.trackingHistory || [];
   f.trackingHistory.push({state:'created', at:toISO(), by:ROLES[currentRole].label, note:'Resumed from hold (was: '+wasReason+')'});
+  f.updatedAt = toISO();   // last-edit-wins: keep the resume from being reverted by a stale remote
   addAct(`▶ ${f.sn||f.dealer} resumed from hold`,'var(--teal)');
   postMovement({type:'343', sn:f.sn, material:f.type||'', qty:f.qty||1, from:LOC_FACTORY, to:LOC_FACTORY, stockType:'unrestricted', note:'Resumed from hold'});
   toast(`${f.sn||f.dealer} resumed`,'ok');
   renderFactory(); updBadges();
+  try { saveState(); } catch(e){}
 }
 
 function shipFromFactory(id){
@@ -21182,6 +21217,7 @@ function saveFactoryEdit(id){
     f.looseAccessories = readLooseAccessories();
   }
   f.notes = document.getElementById('fe-notes').value.trim();
+  f.updatedAt = toISO();   // last-edit-wins: protects this edit (type/colors/notes) from a stale remote on sync
   document.getElementById('factory-float-panel').innerHTML='';
   toast('Saved'+_typeMsg,'ok');
   renderFactory(); updBadges();
