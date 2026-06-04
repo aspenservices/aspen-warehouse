@@ -9079,6 +9079,61 @@ function migrateUnitsToStacks(){
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// FLOOR STACK NORMALIZATION — the definitive cure for "tubs get rearranged
+// / show overflow for no reason."
+//
+// Stack LEVELS (Bottom/Mid/Top) are DERIVED state. Each device used to assign
+// them independently (migrate + findNextSlot, based on its own view of a cell),
+// so when two devices placed tubs in the SAME cell and then synced, the levels
+// COLLIDED — two tubs claiming the same level. cellStacks() then shoved the
+// loser into "overflow", which looked like tubs randomly moving around.
+//
+// This pass re-seats every cell DETERMINISTICALLY so every device converges to
+// the exact same layout. It is:
+//   • idempotent   — running it on already-clean data changes nothing;
+//   • order-preserving — sorts by current level, then entry date, then id, so a
+//                    healthy stack is never shuffled; only collisions/gaps move;
+//   • honest about real over-capacity — a genuine 4th tub in a 3-high cell is
+//                    encoded as level 90+ so it still surfaces as overflow for a
+//                    human to resolve physically.
+// Returns the number of units whose stack/level actually changed.
+function normalizeFloorStacks(){
+  let changed = 0;
+  const groups = {};
+  units.forEach(u => {
+    if(!u || !isStackedType(u.type)) return;
+    // Swim spas share ONE stack across the paired (left+right) cells, so group
+    // them by the pair owner. Hot/extra tubs are grouped by their own cell.
+    let key;
+    if(u.type === 'swim'){
+      const owner = (typeof swimPairOwnerOf === 'function' && swimPairOwnerOf(u.pos)) || u.pos;
+      key = 'swim:' + owner;
+    } else {
+      key = 'cell:' + u.pos;
+    }
+    (groups[key] = groups[key] || []).push(u);
+  });
+  for(const key in groups){
+    const list = groups[key];
+    const cap = key.startsWith('swim:') ? MAX_LEVELS_SWIM : MAX_LEVELS_HOT;
+    // Stable, deterministic order → identical result on every device.
+    const ordered = list.slice().sort((a,b) => {
+      const la = a.level || 999, lb = b.level || 999;   // unassigned/overflow sinks last
+      if(la !== lb) return la - lb;                      // preserve intended height
+      const ea = a.entry || '', eb = b.entry || '';
+      if(ea !== eb) return ea < eb ? -1 : 1;             // older tub first
+      return (a.id || 0) - (b.id || 0);                  // final deterministic tiebreak
+    });
+    ordered.forEach((u, i) => {
+      const lv = i + 1;                                  // compact from the bottom up
+      const newLevel = (lv <= cap) ? lv : (90 + (lv - cap)); // 90+ = genuine overflow
+      if(u.stack !== 1 || u.level !== newLevel){ u.stack = 1; u.level = newLevel; changed++; }
+    });
+  }
+  return changed;
+}
+
 // Stack visualization HTML — used in cell panel and add-form
 function renderStackTowers(pos, opts={}){
   const { stacks, overflow, mode, pair } = cellStacks(pos);
@@ -10151,6 +10206,10 @@ function selPosPanel(pos){
 }
 
 function drawMap(){
+  // Safety net: re-seat any colliding/gapped stack levels before drawing so the
+  // floor is ALWAYS shown consistent, no matter how the conflict arose (sync,
+  // import, legacy data). Idempotent + deterministic → a no-op on healthy data.
+  try { if(typeof normalizeFloorStacks === 'function') normalizeFloorStacks(); } catch(e){ console.warn('[normalize on draw]', e); }
   const floor = document.getElementById('floor');
   const q = (document.getElementById('map-srch')?.value||'').toLowerCase().trim();
   floor.innerHTML='';
@@ -24458,6 +24517,17 @@ function runIntegrityChecks(){
     }
     if(packed > 0) findings.push(`Packed ${packed} inside-the-tub accessory(ies) into their now-existing tub(s)`);
   } catch(e){ console.warn('[check 12]', e); }
+
+  // ─── Check 13: normalize floor stacks (deterministic) ───
+  // Re-seat every cell's tubs so stack levels can't collide across devices — the
+  // root cause of "tubs get rearranged / show overflow." Runs after every merge
+  // and on boot; idempotent, so it's a no-op on healthy data.
+  try {
+    if(typeof normalizeFloorStacks === 'function'){
+      const moved = normalizeFloorStacks();
+      if(moved > 0) findings.push(`Re-seated ${moved} tub${moved>1?'s':''} to fix stack level collisions/gaps on the floor`);
+    }
+  } catch(e){ console.warn('[check 13]', e); }
 
   return findings;
 }
