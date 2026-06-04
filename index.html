@@ -4698,7 +4698,7 @@ let _fbInitAttempts = 0;
 //   /app_version/current  (in Firebase console, manually, OR call
 //   pushVersionToFirebase() from the Admin console at deploy time)
 // ══════════════════════════════════════════════════════════════════
-const APP_VERSION = 'v4.65';
+const APP_VERSION = 'v4.67';
 window.APP_VERSION = APP_VERSION;
 
 // ── DATA EPOCH (generation guard) ────────────────────────────────────
@@ -6507,6 +6507,38 @@ const COVER_TYPES_NEW = [
   {t:'Etn',  a:'M', b:'N', name:'Eternal'},
   {t:'Rol',  a:'O', b:'P', name:'Roll'},
 ];
+
+// Map each warehouse cover MODEL to exactly ONE floor cover-cell type (Col, Pico,
+// Q, M/E, …) so the on-floor counts never double-count a model across cells.
+const COVER_MODEL_TO_CELL = {
+  'colorado':'Col', 'pioneer':'Pico', 'quattro':'Q',
+  'monarch':'M/E', 'eldorado':'M/E',
+  'pinnacle':'P/A', 'arcadia':'P/A',
+  'alpine':'Alp', 'northstar':'Alp',
+  'eternal':'Etn', 'roll':'Rol'
+};
+function cellTypeForCoverModel(model){
+  const m = (model||'').trim().toLowerCase();
+  if(!m) return null;
+  if(COVER_MODEL_TO_CELL[m]) return COVER_MODEL_TO_CELL[m];
+  for(const k in COVER_MODEL_TO_CELL){ if(m.includes(k)) return COVER_MODEL_TO_CELL[k]; }
+  return null;   // unmapped models (e.g. Avalanche Luxe, Cassian) have no floor cell yet
+}
+// Warehouse cover stock that belongs to a given floor cover-cell type.
+// Returns {qty, low, lines:[{color, model, qty, low}]}.
+function coverCellStock(cellType){
+  let qty = 0, low = false; const lines = [];
+  (Array.isArray(coverInventory) ? coverInventory : []).forEach(c => {
+    if(!c || (c.source||'warehouse') !== 'warehouse') return;
+    if(cellTypeForCoverModel(c.model) !== cellType) return;
+    const q = c.qty || 0;
+    qty += q;
+    const isLow = q <= (c.lowThreshold||0);
+    if(isLow) low = true;
+    lines.push({color: c.color||'—', model: c.model||'', qty: q, low: isLow});
+  });
+  return {qty, low, lines};
+}
 
 // ─────────────────────────────────────────────────────────────────────
 // MARRIAGE INVENTORY — single dedicated position 'MINV' (merged from
@@ -10302,9 +10334,19 @@ function drawMap(){
                   : (t === 'pstor' && P_LABELS_NEW[+rowKey]) ? P_LABELS_NEW[+rowKey]
                   : (rowKey === '15A' || rowKey === '15B') ? coverTypeFor(colLetter)
                   : pos;
-      cell.innerHTML = `<div style="font-size:11px;font-weight:700;color:${isBack?'#1e3a8a':(t==='pstor'?'#78350f':'#1e3a8a')};letter-spacing:.04em;text-align:center;line-height:1.1">${label}</div><div style="font-size:9px;font-family:var(--mono);color:${isBack?'#3b82f6':(t==='pstor'?'#b45309':'#60a5fa')};margin-top:3px">${pos}</div>
+      // Live warehouse cover stock for this model cell. Shown on the FRONT row
+      // (15A / cf) only — the back row (15B / cb) shares the same pool, so showing
+      // a count there too would look like double the covers.
+      const _ct = (rowKey === '15A' || rowKey === '15B') ? coverTypeFor(colLetter) : null;
+      const _st = (t === 'cf' && _ct && _ct !== '—' && typeof coverCellStock === 'function') ? coverCellStock(_ct) : null;
+      const _stockHtml = _st
+        ? `<div style="margin-top:4px;font-family:var(--mono);font-weight:800;font-size:15px;line-height:1;color:${_st.qty<=0?'#dc2626':(_st.low?'#b45309':'#047857')}">${_st.qty}<span style="font-size:8px;font-weight:600;opacity:.7"> cover${_st.qty===1?'':'s'}</span></div>`
+        : '';
+      cell.innerHTML = `<div style="font-size:11px;font-weight:700;color:${isBack?'#1e3a8a':(t==='pstor'?'#78350f':'#1e3a8a')};letter-spacing:.04em;text-align:center;line-height:1.1">${label}</div>${_stockHtml}<div style="font-size:9px;font-family:var(--mono);color:${isBack?'#3b82f6':(t==='pstor'?'#b45309':'#60a5fa')};margin-top:3px">${pos}</div>
         <div style="position:absolute;top:3px;right:4px;font-size:9px;color:${isBack?'#3b82f6':(t==='pstor'?'#b45309':'#60a5fa')};opacity:.6;cursor:pointer" onclick="event.stopPropagation();openCellEditor('${pos}')" title="Edit cell type">⚙</div>`;
-      cell.title = `${pos} · ${t==='cb'?'cover back':(t==='pstor'?'panel/cover storage':'cover front')} · click to view contents`;
+      cell.title = (_st && _st.lines.length)
+        ? `${pos} · ${_ct} covers (warehouse): ${_st.lines.map(l=>`${l.color}${l.model?' '+l.model:''} ×${l.qty}`).join(', ')} · click to view contents`
+        : `${pos} · ${t==='cb'?'cover back':(t==='pstor'?'panel/cover storage':'cover front')} · click to view contents`;
       cell.onclick = () => { selPosPanel(pos); };
       cell.dataset.pos = pos;
       if(isCellLocked(pos)){
@@ -10482,31 +10524,131 @@ function drawMap(){
     hdr.innerHTML = `<span style="color:#1e293b;font-size:10px">${pos}${mode==='swim'?'+'+pair.right:''}${alreadyPill}</span><span style="font-family:var(--mono);font-size:9px;color:#64748b">${filled}/${maxLv}</span>`;
     cell.appendChild(hdr);
 
-    // Top spa preview (dealer + SN + type tag)
-    if(top){
-      const body = el('div','');
-      body.style.cssText = 'flex:1;display:flex;flex-direction:column;justify-content:center;min-height:0;gap:1px';
-      const typeTag = top.type === 'swim'
-        ? '<div style="font-size:8px;font-weight:800;color:#fff;background:#10b981;letter-spacing:.08em;padding:1px 5px;border-radius:3px;align-self:flex-start;margin-top:2px">SWIM SPA</div>'
-        : '<div style="font-size:8px;font-weight:800;color:#fff;background:#3b82f6;letter-spacing:.08em;padding:1px 5px;border-radius:3px;align-self:flex-start;margin-top:2px">HOT TUB</div>';
-      body.innerHTML = `
-        <div style="font-size:10.5px;font-weight:700;color:#1e293b;line-height:1.15;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHTML(top.dealer||'—')}</div>
-        <div style="font-size:11px;font-family:var(--mono);font-weight:700;color:${dcol.color};line-height:1.05">${escapeHTML(top.sn||'')}</div>
-        ${typeTag}
-      `;
-      cell.appendChild(body);
+    // ── Stack list: one compact row per LEVEL, rendered TOP → BOTTOM so the
+    // on-screen order matches the physical stack (top tub on top, bottom tub at
+    // the bottom). Each occupied row shows just the serial number (per Alberto)
+    // with a dealer-color dot + hot/swim hint + a T/M/B level tag, and is
+    // INDIVIDUALLY draggable so any tub — top, middle, or bottom — can be picked
+    // up and dropped into its correct slot. Drop still honors all stacking rules.
+    const lvlTag = (lv) => lv === maxLv ? 'T' : (lv === 1 ? 'B' : 'M');
+    // Taller cell so the full vertical stack (TOP → BTM cards) is visible,
+    // mirroring the Stack detail panel right on the floor map.
+    cell.style.overflow = 'visible';
+    cell.style.minHeight = (mode === 'swim' ? 92 : 124) + 'px';
+    const body = el('div','');
+    body.style.cssText = 'flex:1;display:flex;flex-direction:column;justify-content:center;gap:3px';
+    // Per-LEVEL drop target. Lets a dragged tub land on a specific slot:
+    //  • empty slot  → place there (validateSlot enforces no-gap + capacity + swim rules)
+    //  • same cell, occupied slot → SWAP the two tubs' levels (reorder T/M/B)
+    //  • other cell, occupied slot → rejected (no surprise displacement)
+    // Queue drags are ignored here and fall through to the cell's own drop handler.
+    const wireLevelDrop = (row, targetLevel) => {
+      row.addEventListener('dragover', e => {
+        if(!dragUnit || dragQueueItem) return;   // queue items → let the cell handle it
+        e.preventDefault(); e.stopPropagation();
+        e.dataTransfer.dropEffect = 'move';
+        row.style.outline = '2px solid #2563eb'; row.style.outlineOffset = '-1px';
+      });
+      row.addEventListener('dragleave', () => { row.style.outline = ''; });
+      row.addEventListener('drop', e => {
+        if(!dragUnit || dragQueueItem) return;   // queue items → bubble to the cell
+        e.preventDefault(); e.stopPropagation();
+        row.style.outline = '';
+        const du = units.find(x => x.id === dragUnit.unitId);
+        const fromPos = dragUnit.fromPos;
+        dragUnit = null;
+        if(!du) return;
+        if(!isStackedType(du.type)){ toast('Only hot tubs / swim spas stack by level','warn'); return; }
+        // Destination lock check
+        const p = parsePos(pos);
+        const rowLocked = (p.valid && p.rowKey && !p.rowKey.startsWith('15') && isRowLocked(+p.rowKey));
+        if(rowLocked || isCellLocked(pos)){ toast(`${pos} is 🔒 locked — unlock it first`,'warn'); return; }
+        // Type/mode compatibility (don't mix hot + swim in one cell)
+        if((mode === 'swim') !== (du.type === 'swim')){
+          toast(`${pos} holds ${mode==='swim'?'swim spas':'hot tubs'} — can't mix types here`,'err'); return;
+        }
+        const occupant = stack[targetLevel-1];
+        if(occupant && occupant.id === du.id) return;   // dropped onto itself — no-op
+        if(!occupant){
+          // Place at this exact empty level
+          const v = (typeof validateSlot === 'function') ? validateSlot(pos, 1, targetLevel, du.id, du.type) : {ok:true};
+          if(!v.ok){ toast(v.reason || `Can't place at ${lvlTag(targetLevel)}`,'warn'); return; }
+          snapshot(`place ${du.sn||du.dealer}`);
+          const old = du.pos;
+          du.pos = pos; du.stack = 1; du.level = targetLevel;
+          addAct(`${du.sn?'S/N '+du.sn:du.dealer} placed: ${old} → ${pos} (${LEVEL_SHORT(targetLevel)})`,'var(--accent)');
+          if(old !== pos) postMovement({type:'309', sn:du.sn, material:du.type||'', qty:1, from:LOC_WAREHOUSE(old), to:LOC_WAREHOUSE(pos), stockType:'unrestricted', note:'Floor relocation'});
+          toast(`→ ${pos} · ${LEVEL_SHORT(targetLevel)}`,'ok');
+        } else if(fromPos === pos){
+          // Same cell, target occupied → swap the two tubs' levels (physical reorder)
+          snapshot(`reorder ${pos}`);
+          const dl = du.level;
+          du.level = occupant.level;
+          occupant.level = dl;
+          addAct(`Reordered ${pos}: ${du.sn||du.dealer} ↔ ${occupant.sn||occupant.dealer}`,'var(--accent)');
+          toast(`Reordered · ${du.sn||du.dealer} → ${LEVEL_SHORT(du.level)}`,'ok');
+        } else {
+          // Different cell, target occupied → refuse to silently displace it
+          toast(`${lvlTag(targetLevel)} at ${pos} is taken — drop on an empty slot, or reorder within the same cell`,'warn');
+          return;
+        }
+        if(selPos === fromPos) selPos = pos;
+        drawMap(); updBadges();
+      });
+    };
+    // Highest occupied level = the physically accessible tub (picked up first).
+    let topLv = 0;
+    for(let _l = maxLv; _l >= 1; _l--){ if(stack[_l-1]){ topLv = _l; break; } }
+    for(let lv = maxLv; lv >= 1; lv--){
+      const su = stack[lv-1];
+      const row = el('div','');
+      const lvLbl = LEVEL_SHORT(lv);   // BTM / MID / TOP
+      if(su){
+        const rc = dealerColor(su.dealer);
+        const isSwim = su.type === 'swim';
+        const isAccess = (lv === topLv);
+        const bandCol = isSwim ? '#0d9e78' : rc.border;
+        row.style.cssText = `position:relative;display:flex;flex-direction:column;justify-content:center;min-height:32px;padding:4px 8px 4px 8px;border-radius:6px;background:#fff;border:1.5px solid ${isAccess?'#f59e0b':'#e2e8f0'};border-left:3px solid ${bandCol};box-shadow:${isAccess?'0 0 0 1.5px #fde68a':'0 1px 2px rgba(0,0,0,.05)'};cursor:grab`;
+        row.innerHTML =
+            `<div style="position:absolute;top:2px;right:5px;font-family:var(--mono);font-size:7px;font-weight:700;letter-spacing:.05em;color:#94a3b8">${lvLbl}</div>`
+          + `<div style="font-size:9px;font-weight:600;color:#1e293b;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding-right:24px;line-height:1.15">${escapeHTML(su.dealer||'—')}</div>`
+          + `<div style="font-family:var(--mono);font-size:10.5px;font-weight:700;color:${rc.color};line-height:1.1">${escapeHTML(su.sn||'—')}</div>`
+          + (isAccess ? `<div style="position:absolute;bottom:2px;right:5px;font-size:6.5px;font-weight:700;letter-spacing:.04em;color:#d97706;text-transform:uppercase">↑ access</div>` : '');
+        row.title = `${su.sn||''} · ${su.dealer||'—'} · ${isSwim?'swim spa':'hot tub'} · ${lvLbl}${isAccess?' (accessible)':''} · drag to move`;
+        // Per-tub drag source — pick up THIS exact tub, not just the top one.
+        row.setAttribute('draggable','true');
+        row.addEventListener('dragstart', e => {
+          e.stopPropagation();   // take precedence over the cell-level drag source
+          const p = parsePos(pos);
+          const rowLocked = (p.valid && p.rowKey && !p.rowKey.startsWith('15') && isRowLocked(+p.rowKey));
+          if(rowLocked || isCellLocked(pos)){
+            e.preventDefault();
+            toast(`${pos} is 🔒 locked — unlock it via Manage Rows or the cell ⚙ first`, 'warn');
+            return;
+          }
+          dragUnit = { unitId: su.id, fromPos: pos };
+          dragQueueItem = null;
+          row.style.opacity = '0.45';
+          e.dataTransfer.effectAllowed = 'move';
+          try { e.dataTransfer.setData('text/plain', `${su.sn || su.dealer}@${pos}`); } catch(err){}
+        });
+        row.addEventListener('dragend', e => {
+          e.stopPropagation();
+          row.style.opacity = '1';
+          setTimeout(() => { if(dragUnit && dragUnit.unitId === su.id) dragUnit = null; }, 50);
+        });
+        // A plain click on a card still opens the full cell detail.
+        row.addEventListener('click', e => { e.stopPropagation(); selPosPanel(pos); });
+      } else {
+        // Empty slot — dashed "+ place" box (placeable) or faint "empty".
+        const canPlace = (lv === 1) || !!stack[lv-2];
+        row.style.cssText = `position:relative;display:flex;align-items:center;justify-content:center;min-height:32px;padding:3px 6px;border-radius:6px;border:1.5px dashed ${canPlace?'#93b4f5':'#e2e8f0'};background:${canPlace?'#f0f6ff':'#ffffff'};color:${canPlace?'#2563eb':'#cbd5e1'};font-size:9px;font-weight:600;${canPlace?'':'opacity:.55'}`;
+        row.innerHTML = `<div style="position:absolute;top:2px;right:5px;font-family:var(--mono);font-size:7px;font-weight:700;letter-spacing:.05em;color:#cbd5e1">${lvLbl}</div>${canPlace?'+ place':'empty'}`;
+      }
+      wireLevelDrop(row, lv);
+      body.appendChild(row);
     }
-
-    // Level dots (one per occupied slot, bottom-up)
-    const dots = el('div','');
-    dots.style.cssText = 'position:absolute;right:4px;bottom:4px;display:flex;flex-direction:column-reverse;gap:2px';
-    for(let lv = 1; lv <= maxLv; lv++){
-      const d = el('div','');
-      const occ = stack[lv-1];
-      d.style.cssText = `width:6px;height:6px;border-radius:50%;background:${occ?dcol.border:'#e2e8f0'};border:0.5px solid ${occ?dcol.color:'#cbd5e1'}`;
-      dots.appendChild(d);
-    }
-    cell.appendChild(dots);
+    cell.appendChild(body);
 
     // Overflow warning
     if(overflow.length){
@@ -12583,6 +12725,17 @@ function confirmDispatch(id){
   const allMar = [...marPending, ...marDelivered];
   const rec={id:u.id,sn:u.sn,dealer:u.dealer,type:u.type,originalPos:u.pos,entryDate:u.entry||'—',dispatchDate:date,dispatchTime:time,authorizedBy:auth,notes,marriageItems: allMar.map(m=>({name:m.accessoryName,qty:m.accessoryQty,wasPending:m.status==='pending'})),checklistConfirmed: Array.isArray(window._dispatchChecklist) ? [...window._dispatchChecklist] : null,coverPaired: u.coverPaired || null, bolPdf:(events.find(e=>e.type==='dispatch'&&String(e.sn)===String(u.sn)&&e.bolPdf)||{}).bolPdf||null};
   dispatched.unshift(rec);
+  // ── PULL THE WAREHOUSE COVER ──
+  // A warehouse-sourced cover sat on the 15A/15B rack waiting for this tub. Now that
+  // it ships, physically pull the matching cover (model+color) and decrement the
+  // warehouse stock. Factory-sourced covers already left with the tub from the factory
+  // (decremented at creation), so they're skipped. decrementCoverStock is idempotent
+  // per S/N, so legacy tubs that were already decremented at creation won't double-pull.
+  const _cp = u.coverPaired || u.cover;
+  if(_cp && (_cp.source || 'warehouse') === 'warehouse' && _cp.color){
+    try { decrementCoverStock(_cp.color, _cp.model, 'warehouse', u.sn); }
+    catch(e){ console.warn('[cover pull on dispatch]', e); }
+  }
   postMovement({type:'601', sn:u.sn, material:u.type||'', qty:1, from:LOC_WAREHOUSE(u.pos), to:LOC_DEALER(u.dealer), stockType:'unrestricted', ref:auth, note:'Dispatch to dealer'});
   units=units.filter(x=>x.id!==id);
   addAct(`Unit ${u.sn||u.dealer} dispatched to ${u.dealer}${marPending.length?' (with '+marPending.length+' missing accessor'+(marPending.length>1?'ies':'y')+')':''}`,marPending.length?'var(--red)':'var(--teal)');
@@ -19199,9 +19352,11 @@ function addFactorySpa(){
   if(dispatchedDup){
     if(!confirm(`ℹ S/N ${sn} was previously dispatched on ${fmtD(dispatchedDup.dispatchDate)} to ${dispatchedDup.dealer}.\n\nIs this a return/repair re-using the same S/N? Continue?`)) return;
   }
-  // If a cover is being added, try to decrement from the chosen source inventory
-  if(cover){
-    const ok = decrementCoverStock(cover.color, cover.model, cover.source, sn);
+  // Cover stock: only FACTORY-source covers are pulled now (they ship with the tub
+  // straight from the factory). WAREHOUSE-source covers stay on the 15A/15B rack and
+  // are pulled (decremented) only when the tub is DISPATCHED to the dealer.
+  if(cover && cover.source === 'factory'){
+    const ok = decrementCoverStock(cover.color, cover.model, 'factory', sn);
     if(!ok) return; // user cancelled at low/zero/missing-row prompt
   }
   // Learn every typed value so future datalists suggest them (auto-growing library)
@@ -21234,16 +21389,20 @@ function saveFactoryEdit(id){
       origModel.toLowerCase()  !== newModel.toLowerCase()  ||
       origSource              !== newSource
     );
+    // Cover stock reconciliation — WAREHOUSE covers are NOT touched here. They sit
+    // on the 15A/15B rack and are pulled (decremented) only when the tub is DISPATCHED
+    // to the dealer. So only FACTORY-source covers (which leave with the tub from the
+    // factory) adjust stock at create/edit time.
     if(!origHadCover && hasCover && newColor){
-      // Newly adding a cover → decrement new source
-      if(!decrementCoverStock(newColor, newModel, newSource, f.sn)) return;
+      // Newly adding a cover → decrement only if it's a factory cover.
+      if(newSource === 'factory' && !decrementCoverStock(newColor, newModel, 'factory', f.sn)) return;
     } else if(origHadCover && !hasCover){
-      // Removing cover → re-credit original source
-      incrementCoverStock(origColor, origModel, origSource, f.sn, 'cover removed via edit');
+      // Removing cover → re-credit only if the original was a factory cover.
+      if(origSource === 'factory') incrementCoverStock(origColor, origModel, 'factory', f.sn, 'cover removed via edit');
     } else if(identityChanged){
-      // Switched color/model/source → re-credit original, decrement new
-      incrementCoverStock(origColor, origModel, origSource, f.sn, 'cover changed via edit');
-      if(!decrementCoverStock(newColor, newModel, newSource, f.sn)) return;
+      // Switched color/model/source → re-credit original factory stock, decrement new factory stock.
+      if(origSource === 'factory') incrementCoverStock(origColor, origModel, 'factory', f.sn, 'cover changed via edit');
+      if(newSource === 'factory' && !decrementCoverStock(newColor, newModel, 'factory', f.sn)) return;
     }
     // Learn library
     learnFromInput('spaModel',    model);
@@ -25065,7 +25224,11 @@ document.addEventListener('keydown', e=>{
       for(const f of factory){
         if(!f.trackingId || !PROTECTED_TIDS.has(f.trackingId)) continue; // only the 8 tubs
         if(!f.cover || f.cover._reconciled) continue;
-        decrementCoverStock(f.cover.color, f.cover.model, f.cover.source || 'warehouse', f.sn);
+        // Only factory-source covers are pulled here. Warehouse covers wait on the
+        // 15A/15B rack and are decremented at dispatch (see confirmDispatch).
+        if((f.cover.source||'warehouse') === 'factory'){
+          decrementCoverStock(f.cover.color, f.cover.model, 'factory', f.sn);
+        }
         f.cover._reconciled = true;
         changed = true;
       }
