@@ -3436,7 +3436,7 @@ body.dark-mode .mar-card-track {
     </div>
     <div class="ni" data-page="truck" data-section="inventory" onclick="goV('truck')">
       <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="1" y="6" width="9" height="6" rx="1"/><path d="M10 8h3l2 2v2h-5z"/><circle cx="4" cy="13" r="1.4"/><circle cx="12" cy="13" r="1.4"/><path d="M4 4l1-2h3l1 2"/></svg>
-      Loading Bay
+      Loading Bay · Factory
       <span class="nb" style="background:#dbeafe;color:#1e40af" id="nb-trk">0</span>
     </div>
     <div class="ni" data-page="intransit" data-section="inventory" onclick="goV('intransit')">
@@ -3446,7 +3446,7 @@ body.dark-mode .mar-card-track {
     </div>
     <div class="ni" data-page="loadingbay" data-section="inventory" onclick="goV('loadingbay')">
       <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="2" y="5" width="8" height="7" rx="1"/><path d="M10 7h3l1 2v3h-4z"/><circle cx="5" cy="13" r="1.2"/><circle cx="12" cy="13" r="1.2"/></svg>
-      Loading Bay
+      Loading Bay · Warehouse
       <span class="nb" style="background:#fff7ed;color:#7c2d12" id="nb-lbay">0</span>
     </div>
     <div class="ni" data-page="materials" data-section="inventory" onclick="goV('materials')">
@@ -4436,7 +4436,7 @@ body.dark-mode .mar-card-track {
   <div class="card">
     <div class="card-hd">
       <div>
-        <div class="card-title">🚚 Loading Bay — Outbound to Factory</div>
+        <div class="card-title">🚚 Loading Bay · Warehouse — Outbound to Factory</div>
         <div class="card-sub">Tubs pulled from the floor · waiting for the truck to the factory</div>
       </div>
       <div class="card-acts">
@@ -5832,8 +5832,23 @@ function _mergeRequests(local, remote){
   // CANCELLATION isn't dragged backward (or resurrected) by a stale remote.
   const merged = remote.map(r => {
     const mine = localBySig.get(sigOf(r));
-    if(mine && rank(mine.status) > rank(r.status)) return mine;
-    return r;
+    if(!mine) return r;
+    // Status: keep the more-advanced/terminal side so an approval, ship, or
+    // CANCELLATION isn't dragged backward (or resurrected) by a stale remote.
+    let base = (rank(mine.status) > rank(r.status)) ? mine : r;
+    // Notes & target date: last edit wins, independent of which status we kept,
+    // so a freshly typed note isn't clobbered by a stale remote at equal status.
+    // Only override once someone has actually edited (has notesUpdatedAt) — legacy
+    // rows without a timestamp keep the status-based copy untouched.
+    const myT = mine.notesUpdatedAt || '';
+    const rT  = r.notesUpdatedAt || '';
+    if(myT || rT){
+      const newer = (myT > rT) ? mine : r;
+      if(base.notes !== newer.notes || base.targetDate !== newer.targetDate || (base.notesUpdatedAt||'') !== (newer.notesUpdatedAt||'')){
+        base = Object.assign({}, base, { notes: newer.notes, targetDate: newer.targetDate, notesUpdatedAt: newer.notesUpdatedAt });
+      }
+    }
+    return base;
   });
   const remoteIds = new Set(remote.map(r => r && r.id).filter(v => v != null));
   let kept = 0, reassigned = 0;
@@ -7618,7 +7633,7 @@ const ROLE_TOURS = {
   ],
   'transit': [
     { title: 'On the road 🚛', body: 'You load spas onto the truck and bring them from factory to warehouse.', target: null },
-    { title: 'Loading Bay', body: 'Scan a QR code here to mark a spa as "loaded on truck".', target: '[data-page="truck"]' },
+    { title: 'Loading Bay · Factory', body: 'Scan a QR code here to mark a spa as "loaded on truck".', target: '[data-page="truck"]' },
     { title: 'In Transit', body: 'See everything currently on your truck. The animation shows the route from Aspen Spas to 4500 Goodfellow.', target: '[data-page="intransit"]' },
   ],
   'organizer': [
@@ -9184,11 +9199,11 @@ const PAGES = {
   schedule:['Schedule','Calendar of shipments & dispatches'],
   factory:['Factory Warehouse','Aspen production · Spas & accessories ready to ship'],
   marriages:['Marriages','Spa + accessory pairings — must ship together'],
-  loadingbay:['Loading Bay','Outbound · tubs staged for the truck to factory'],
+  loadingbay:['Loading Bay · Warehouse','Outbound · tubs the warehouse staged for the truck back to the factory'],
   covers:['Cover Inventory','Spa covers in warehouse storage · auto-decrements when assigned to a spa'],
   incoming:['Incoming','All items arriving to warehouse · spas · accessories · marriages · materials · covers'],
   intransit:['In Transit','Spas & accessories loaded on truck · waiting at warehouse'],
-  truck:['Loading Bay','Ready to load · scan QR to put on truck'],
+  truck:['Loading Bay · Factory','At the factory · ready to load on the truck to the warehouse · scan QR to load'],
   materials:['Materials','Receive & log supplies with photo'],
   dispatched:['Dispatch Log','Units picked up by dealers'],
   movements:['Movements','Stock ledger · receipts, issues & transfers (SAP-style)'],
@@ -14428,7 +14443,7 @@ function renderTruck(){
     let h = '';
     h += `<div class="card" style="margin-bottom:14px">
       <div class="card-hd"><div>
-        <div class="card-title">\u{1F69A} Loading Bay \u2014 Ready &amp; Waiting</div>
+        <div class="card-title">\u{1F69A} Loading Bay · Factory \u2014 Ready &amp; Waiting</div>
         <div class="card-sub">${bayItems.length ? `${readyShip.length} waiting for truck pickup \u00B7 ${readyPickup.length} dealer pickup at factory` : 'Nothing ready yet \u2014 Factory marks items \u201CShip to WH\u201D or \u201CReady to Pick Up\u201D'}</div>
       </div></div>
       <div class="card-body">${bayItems.length
@@ -21026,7 +21041,13 @@ function openFactoryEdit(id){
         <input class="fi" id="fe-wrap" list="dl-wrap-e" value="${(f.plasticWrap||'').replace(/"/g,'&quot;')}" placeholder="Type or pick…">
         <datalist id="dl-wrap-e">${libOptions('plasticWrap')}</datalist>
       </div>
-      <div class="fg"></div>
+      <div class="fg"><label class="fl">Type <span style="color:var(--accent);font-size:9px;font-weight:700">· swim = floor pairing rule</span></label>
+        <select class="fsel" id="fe-type">
+          <option value="hot"${f.type==='hot'?' selected':''}>🛁 Hot Tub / Spa</option>
+          <option value="swim"${f.type==='swim'?' selected':''}>🏊 Swim Spa</option>
+          <option value="extra"${f.type==='extra'?' selected':''}>📦 Extra / Stock</option>
+        </select>
+      </div>
       <div class="fg"></div>
     </div>
     <!-- Cover section (edit). Hidden inputs track original color/model/source so on save
@@ -21092,6 +21113,7 @@ function openFactoryEdit(id){
 function saveFactoryEdit(id){
   const f = factory.find(x=>x.id===id); if(!f) return;
   const isAcc = f.type==='accessory' || f.type==='misc';
+  let _typeMsg = '';
   if(isAcc){
     snapshot('factory edit');
     f.dealer = document.getElementById('fe-name').value.trim();
@@ -21143,6 +21165,15 @@ function saveFactoryEdit(id){
     f.acrylicColor = acrylicColor;
     f.cabinetColor = cabinetColor;
     f.plasticWrap = plasticWrap;
+    // Type fix (Hot Tub / Swim Spa / Extra) — corrects a mis-typed item so the
+    // floor map applies the right rule (swim spas pair across 2 cells, stack 2 high).
+    const _newType = document.getElementById('fe-type')?.value;
+    if(_newType && ['hot','swim','extra'].includes(_newType) && _newType !== f.type){
+      const _lbl = {hot:'Hot Tub', swim:'Swim Spa', extra:'Extra/Stock'};
+      _typeMsg = ` · type → ${_lbl[_newType]}`;
+      addAct(`Type changed for ${f.sn||f.dealer}: ${_lbl[f.type]||f.type} → ${_lbl[_newType]}`, 'var(--accent)');
+      f.type = _newType;
+    }
     f.colors = [acrylicColor && `Acrylic: ${acrylicColor}`, cabinetColor && `Cabinet: ${cabinetColor}`].filter(Boolean).join(' · ');
     f.cover = (hasCover && newColor)
       ? {color: newColor, model: newModel, note: newNote, source: newSource, addedAt: f.cover?.addedAt || toISO()}
@@ -21151,8 +21182,9 @@ function saveFactoryEdit(id){
   }
   f.notes = document.getElementById('fe-notes').value.trim();
   document.getElementById('factory-float-panel').innerHTML='';
-  toast('Saved','ok');
+  toast('Saved'+_typeMsg,'ok');
   renderFactory(); updBadges();
+  try { saveState(); } catch(e){}
 }
 
 // ═══════════════════════════════════════════════════════
@@ -22719,6 +22751,10 @@ function renderRequests(){
     // can still cancel their own requests in any non-terminal state.
     const actions = [];
     const isAdmin = currentRole === 'admin';
+    // Notes & target date — editable by factory/warehouse/admin on any active request.
+    if((isAdmin || currentRole === 'factory' || currentRole === 'warehouse') && r.status !== 'cancelled'){
+      actions.push(`<button class="btn btn-sm" onclick="openRequestNotes(${r.id})" title="Add or edit notes and a target date">📝 Notes & date</button>`);
+    }
     if(r.status === 'awaiting-stock'){
       // Show live stock indicator + only allow cancel
       if(r.type === 'cover'){
@@ -22826,7 +22862,8 @@ function renderRequests(){
             <strong style="color:${statusInfo.color}">${statusInfo.label}</strong> · ${typeLabel}${r.qty>1?` × ${r.qty}`:''} · ${tl.join(' · ')}
           </div>
           ${snLine}
-          ${r.notes?`<div style="font-size:10.5px;color:var(--text2);margin-top:5px;font-style:italic;background:rgba(255,255,255,.6);padding:4px 8px;border-radius:5px">${r.notes}</div>`:''}
+          ${r.targetDate?`<div style="font-size:10.5px;color:#6d28d9;margin-top:4px;font-weight:700">🗓 Needed by ${fmtD(r.targetDate)}</div>`:''}
+          ${r.notes?`<div style="font-size:10.5px;color:var(--text2);margin-top:5px;font-style:italic;background:rgba(255,255,255,.6);padding:4px 8px;border-radius:5px;white-space:pre-wrap">${escapeHTML(String(r.notes))}</div>`:''}
         </div>
         <div style="display:flex;gap:4px;flex-wrap:wrap;flex-shrink:0">${actions.join('')}</div>
       </div>
@@ -23193,6 +23230,53 @@ function cancelRequest(rid){
   r.status = 'cancelled';
   r.cancelledAt = toISO();
   toast('Request cancelled','ok');
+  renderRequests(); updBadges();
+  try { saveState(); } catch(e){}
+}
+
+// Open an inline editor to add/edit notes and a target ("needed by") date on a
+// request. Anyone who can edit (factory/warehouse/admin) may use it. Reuses the
+// req-float-panel container so it sits right under the New Request flow.
+function openRequestNotes(rid){
+  const r = dispatchRequests.find(x=>x.id===rid); if(!r) return;
+  if(!canEdit()){ toast('View-only mode','err'); return; }
+  const panel = document.getElementById('req-float-panel'); if(!panel) return;
+  const curNotes = r.notes != null ? String(r.notes) : '';
+  const curDate  = r.targetDate ? String(r.targetDate) : '';
+  panel.innerHTML = `<div class="det-panel" style="margin-top:12px">
+    <div class="dp-hd">
+      <div><div class="dp-pos">📝 Notes &amp; target date</div><div class="dp-sub">${escapeHTML(r.description||'Request')}</div></div>
+      <button class="btn btn-sm" onclick="document.getElementById('req-float-panel').innerHTML=''">✕</button>
+    </div>
+    <div class="fg" style="margin-bottom:9px">
+      <label class="fl">Notes</label>
+      <textarea class="fi" id="rn-notes" rows="3" style="resize:vertical;min-height:62px;font-family:inherit" placeholder="Add details, instructions, status…">${escapeHTML(curNotes)}</textarea>
+    </div>
+    <div class="fg" style="margin-bottom:11px">
+      <label class="fl">🗓 Target date (needed by)</label>
+      <input type="date" class="fi" id="rn-date" value="${escapeHTML(curDate)}">
+    </div>
+    <div class="faction">
+      <button class="btn btn-p" onclick="saveRequestNotes(${r.id})">Save</button>
+      <button class="btn" onclick="document.getElementById('rn-date').value=''">Clear date</button>
+      <button class="btn" onclick="document.getElementById('req-float-panel').innerHTML=''">Cancel</button>
+    </div>
+  </div>`;
+  panel.scrollIntoView({behavior:'smooth',block:'nearest'});
+  const ta = document.getElementById('rn-notes'); if(ta) ta.focus();
+}
+
+function saveRequestNotes(rid){
+  const r = dispatchRequests.find(x=>x.id===rid); if(!r) return;
+  if(!canEdit()){ toast('View-only mode','err'); return; }
+  const ta = document.getElementById('rn-notes');
+  const di = document.getElementById('rn-date');
+  snapshot('edit request notes/date');
+  r.notes = ta ? ta.value.trim() : (r.notes || '');
+  r.targetDate = (di && di.value) ? di.value : '';   // 'YYYY-MM-DD' or cleared
+  r.notesUpdatedAt = toISO();                         // drives last-edit-wins on sync
+  const panel = document.getElementById('req-float-panel'); if(panel) panel.innerHTML = '';
+  toast('Notes saved','ok');
   renderRequests(); updBadges();
   try { saveState(); } catch(e){}
 }
