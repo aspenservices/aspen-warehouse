@@ -4698,7 +4698,7 @@ let _fbInitAttempts = 0;
 //   /app_version/current  (in Firebase console, manually, OR call
 //   pushVersionToFirebase() from the Admin console at deploy time)
 // ══════════════════════════════════════════════════════════════════
-const APP_VERSION = 'v4.67';
+const APP_VERSION = 'v4.68';
 window.APP_VERSION = APP_VERSION;
 
 // ── DATA EPOCH (generation guard) ────────────────────────────────────
@@ -10516,12 +10516,12 @@ function drawMap(){
 
     // Header: pos code + count + (optional) "already in WH" amber pill
     const hdr = el('div','');
-    hdr.style.cssText = 'display:flex;justify-content:space-between;align-items:baseline;font-size:9.5px;font-weight:700;color:#475569;letter-spacing:.04em;line-height:1;margin-bottom:3px';
+    hdr.style.cssText = 'display:flex;justify-content:space-between;align-items:center;line-height:1;margin-bottom:5px;padding:0 1px';
     const anyAlready = units.some(u => u.pos === pos && u.alreadyInWh);
     const alreadyPill = anyAlready
-      ? `<span style="display:inline-flex;align-items:center;gap:2px;font-size:7.5px;font-weight:800;color:#854d0e;background:#fde68a;border:.5px solid #d97706;padding:1px 4px;border-radius:3px;letter-spacing:.05em;line-height:1;margin-left:4px" title="Pre-existing inventory">📍 WH</span>`
+      ? `<span style="display:inline-flex;align-items:center;gap:2px;font-size:7px;font-weight:800;color:#854d0e;background:#fde68a;border:.5px solid #d97706;padding:1px 4px;border-radius:4px;letter-spacing:.04em;line-height:1;margin-left:5px" title="Pre-existing inventory">📍 WH</span>`
       : '';
-    hdr.innerHTML = `<span style="color:#1e293b;font-size:10px">${pos}${mode==='swim'?'+'+pair.right:''}${alreadyPill}</span><span style="font-family:var(--mono);font-size:9px;color:#64748b">${filled}/${maxLv}</span>`;
+    hdr.innerHTML = `<span style="font-size:11px;font-weight:800;color:#0f172a;letter-spacing:.02em">${pos}${mode==='swim'?'+'+pair.right:''}</span>${alreadyPill}<span style="margin-left:auto;font-family:var(--mono);font-size:8.5px;font-weight:700;color:#64748b;background:#f1f5f9;border:.5px solid #e2e8f0;padding:1.5px 6px;border-radius:9px">${filled}/${maxLv}</span>`;
     cell.appendChild(hdr);
 
     // ── Stack list: one compact row per LEVEL, rendered TOP → BOTTOM so the
@@ -10534,9 +10534,9 @@ function drawMap(){
     // Taller cell so the full vertical stack (TOP → BTM cards) is visible,
     // mirroring the Stack detail panel right on the floor map.
     cell.style.overflow = 'visible';
-    cell.style.minHeight = (mode === 'swim' ? 92 : 124) + 'px';
+    cell.style.minHeight = (mode === 'swim' ? 106 : 148) + 'px';
     const body = el('div','');
-    body.style.cssText = 'flex:1;display:flex;flex-direction:column;justify-content:center;gap:3px';
+    body.style.cssText = 'flex:1;display:flex;flex-direction:column;justify-content:center;gap:4px';
     // Per-LEVEL drop target. Lets a dragged tub land on a specific slot:
     //  • empty slot  → place there (validateSlot enforces no-gap + capacity + swim rules)
     //  • same cell, occupied slot → SWAP the two tubs' levels (reorder T/M/B)
@@ -10608,13 +10608,14 @@ function drawMap(){
         const isSwim = su.type === 'swim';
         const isAccess = (lv === topLv);
         const bandCol = isSwim ? '#0d9e78' : rc.border;
-        row.style.cssText = `position:relative;display:flex;flex-direction:column;justify-content:center;min-height:32px;padding:4px 8px 4px 8px;border-radius:6px;background:#fff;border:1.5px solid ${isAccess?'#f59e0b':'#e2e8f0'};border-left:3px solid ${bandCol};box-shadow:${isAccess?'0 0 0 1.5px #fde68a':'0 1px 2px rgba(0,0,0,.05)'};cursor:grab`;
+        row.style.cssText = `position:relative;display:flex;flex-direction:column;justify-content:center;min-height:38px;padding:5px 9px;border-radius:7px;background:${isAccess?'#fffdf5':'#ffffff'};border:1.5px solid ${isAccess?'#e0a52a':'#e6eaf0'};border-left:3px solid ${bandCol};box-shadow:${isAccess?'0 0 0 1.5px #fdebc4,0 1px 2px rgba(0,0,0,.04)':'0 1px 2px rgba(15,23,42,.06)'};cursor:grab`;
         row.innerHTML =
-            `<div style="position:absolute;top:2px;right:5px;font-family:var(--mono);font-size:7px;font-weight:700;letter-spacing:.05em;color:#94a3b8">${lvLbl}</div>`
-          + `<div style="font-size:9px;font-weight:600;color:#1e293b;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding-right:24px;line-height:1.15">${escapeHTML(su.dealer||'—')}</div>`
-          + `<div style="font-family:var(--mono);font-size:10.5px;font-weight:700;color:${rc.color};line-height:1.1">${escapeHTML(su.sn||'—')}</div>`
-          + (isAccess ? `<div style="position:absolute;bottom:2px;right:5px;font-size:6.5px;font-weight:700;letter-spacing:.04em;color:#d97706;text-transform:uppercase">↑ access</div>` : '');
-        row.title = `${su.sn||''} · ${su.dealer||'—'} · ${isSwim?'swim spa':'hot tub'} · ${lvLbl}${isAccess?' (accessible)':''} · drag to move`;
+            `<div style="font-size:9px;font-weight:600;color:#64748b;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.2">${escapeHTML(su.dealer||'—')}</div>`
+          + `<div style="display:flex;align-items:baseline;gap:5px;margin-top:1px">`
+          +   `<span style="font-family:var(--mono);font-size:12px;font-weight:800;color:#0f172a;letter-spacing:.01em;line-height:1;flex:1 1 auto;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHTML(su.sn||'—')}</span>`
+          +   `<span style="flex:0 0 auto;font-size:7.5px;font-weight:800;letter-spacing:.06em;color:${isAccess?'#b9821a':'#94a3b8'}">${isAccess?'\u25cf ':''}${lvLbl}</span>`
+          + `</div>`;
+        row.title = `${su.sn||''} · ${su.dealer||'—'} · ${isSwim?'swim spa':'hot tub'} · ${lvLbl}${isAccess?' · accessible (pick first)':''} · drag to move`;
         // Per-tub drag source — pick up THIS exact tub, not just the top one.
         row.setAttribute('draggable','true');
         row.addEventListener('dragstart', e => {
@@ -10642,8 +10643,8 @@ function drawMap(){
       } else {
         // Empty slot — dashed "+ place" box (placeable) or faint "empty".
         const canPlace = (lv === 1) || !!stack[lv-2];
-        row.style.cssText = `position:relative;display:flex;align-items:center;justify-content:center;min-height:32px;padding:3px 6px;border-radius:6px;border:1.5px dashed ${canPlace?'#93b4f5':'#e2e8f0'};background:${canPlace?'#f0f6ff':'#ffffff'};color:${canPlace?'#2563eb':'#cbd5e1'};font-size:9px;font-weight:600;${canPlace?'':'opacity:.55'}`;
-        row.innerHTML = `<div style="position:absolute;top:2px;right:5px;font-family:var(--mono);font-size:7px;font-weight:700;letter-spacing:.05em;color:#cbd5e1">${lvLbl}</div>${canPlace?'+ place':'empty'}`;
+        row.style.cssText = `position:relative;display:flex;align-items:center;justify-content:center;min-height:38px;padding:4px 8px;border-radius:7px;border:1.5px dashed ${canPlace?'#9cc0f7':'#e2e8f0'};background:${canPlace?'#f4f8ff':'#fcfdfe'};color:${canPlace?'#2f6fe0':'#cbd5e1'};font-size:9px;font-weight:700;letter-spacing:.03em;${canPlace?'':'opacity:.6'}`;
+        row.innerHTML = `<span style="position:absolute;top:3px;right:6px;font-family:var(--mono);font-size:7px;font-weight:800;letter-spacing:.06em;color:#cbd5e1">${lvLbl}</span>${canPlace?'+ place':'empty'}`;
       }
       wireLevelDrop(row, lv);
       body.appendChild(row);
