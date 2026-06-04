@@ -5760,10 +5760,22 @@ function _mergeUnits(local, remote, restored){
   const remoteKeys = new Set(remote.map(keyOf));
   // S/Ns the incoming state already accounts for somewhere else → don't re-add to units.
   const elsewhere = new Set();
-  ['dispatched','incoming','factory'].forEach(coll => {
+  ['dispatched','incoming'].forEach(coll => {
     (Array.isArray(restored && restored[coll]) ? restored[coll] : []).forEach(x => {
       if(x && x.sn != null && String(x.sn).trim() !== '') elsewhere.add('sn:' + String(x.sn).trim());
     });
+  });
+  // Factory rows normally mean "not on our floor" — EXCEPT an INBOUND in-transit
+  // tub (one heading TO the warehouse). That tub may already be received and
+  // sitting on our floor; counting it as "elsewhere" would wrongly yank a
+  // just-received tub back off the floor (the "force-receive bounces to
+  // in-transit" / duplicate-record bug). Outbound (to-factory) in-transit and
+  // at-factory/ready states DO mean it left us, so those still block the floor.
+  (Array.isArray(restored && restored.factory) ? restored.factory : []).forEach(x => {
+    if(!x || x.sn == null || String(x.sn).trim() === '') return;
+    const inboundTransit = x.trackingState === 'in-transit' && x.transitDir !== 'to-factory';
+    if(inboundTransit) return;   // arriving to us → don't block our floor copy
+    elsewhere.add('sn:' + String(x.sn).trim());
   });
   (Array.isArray(restored && restored.marriages) ? restored.marriages : []).forEach(m => {
     if(m && m.spaSn != null && String(m.spaSn).trim() !== '') elsewhere.add('sn:' + String(m.spaSn).trim());
@@ -5899,18 +5911,34 @@ function _mergeFactory(local, remote, localIncoming){
     return sn ? ('sn:' + sn) : (f.id != null ? ('id:' + f.id) : null);
   };
   const remoteKeys = new Set(remote.map(keyOf).filter(v => v != null));
-  const merged = remote.filter(f => {
-    if(!f) return false;
-    const isSpa = f.type !== 'accessory' && f.type !== 'misc';
-    if(isSpa && f.trackingState === 'in-transit' && f.sn != null && receivedSns.has(String(f.sn).trim()))
-      return false;   // received locally -> do not bring it back to In Transit
-    return true;
-  });
+  // S/Ns physically accounted for on OUR side. units/incoming were already merged
+  // earlier this pass (they run before factory in fbApplyRemoteState), so reading
+  // the globals here reflects the reconciled floor/receiving state.
+  const onFloorSns    = new Set((Array.isArray(units) ? units : []).filter(u => u && u.sn != null && String(u.sn).trim() !== '').map(u => String(u.sn).trim()));
+  const dispatchedSns = new Set((Array.isArray(dispatched) ? dispatched : []).filter(d => d && d.sn != null && String(d.sn).trim() !== '').map(d => String(d.sn).trim()));
+  // A factory in-transit row is STALE when the physical tub is already elsewhere
+  // on our side: received at the dock (incoming), on the floor (units), or shipped
+  // to a dealer. The received-at-dock case applies regardless of direction; the
+  // floor/dispatched cases apply only to INBOUND (to-warehouse) legs — an OUTBOUND
+  // (to-factory) leg legitimately coexists with a stale floor copy that _mergeUnits
+  // has already removed. Applied to BOTH remote and local rows so a received tub
+  // can't bounce back to In Transit or end up duplicated (floor + in-transit).
+  const isStaleInbound = f => {
+    if(!f || f.sn == null) return false;
+    if(f.type === 'accessory' || f.type === 'misc') return false;
+    if(f.trackingState !== 'in-transit') return false;
+    const sn = String(f.sn).trim();
+    if(receivedSns.has(sn)) return true;
+    if(f.transitDir !== 'to-factory' && (onFloorSns.has(sn) || dispatchedSns.has(sn))) return true;
+    return false;
+  };
+  const merged = remote.filter(f => f && !isStaleInbound(f));
   let kept = 0;
   local.forEach(f => {
     if(!f) return;
     const k = keyOf(f); if(k == null) return;
     if(remoteKeys.has(k)) return;      // remote already has this spa (by S/N) or id -> remote copy wins
+    if(isStaleInbound(f)) return;      // a received/placed tub must not be re-added as In Transit
     merged.push(f); kept++;            // local-only factory row -> KEEP (never vanish on id collision)
   });
   // De-collide ids: two rows may still carry the SAME numeric id (the same nid
