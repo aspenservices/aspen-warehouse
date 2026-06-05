@@ -4698,7 +4698,7 @@ let _fbInitAttempts = 0;
 //   /app_version/current  (in Firebase console, manually, OR call
 //   pushVersionToFirebase() from the Admin console at deploy time)
 // ══════════════════════════════════════════════════════════════════
-const APP_VERSION = 'v4.69';
+const APP_VERSION = 'v4.77';
 window.APP_VERSION = APP_VERSION;
 
 // ── DATA EPOCH (generation guard) ────────────────────────────────────
@@ -5745,6 +5745,8 @@ let _lastMergeKept = 0;
 let _lastReqMergeKept = 0;
 let _lastIncMergeKept = 0;
 let _lastFacMergeKept = 0;
+let _lastCoverMergeKept = 0;
+let _lastMarMergeKept = 0;
 // ── KEEP-LOCAL UNIT MERGE (v4.56) ─────────────────────────────────────────────
 // Replaces the old wholesale `units = restored.units`, which silently dropped any
 // tub that existed locally but was missing from an incoming (stale) remote state —
@@ -5791,11 +5793,26 @@ function _mergeUnits(local, remote, restored){
       elsewhere.add('sn:' + String(rq.sn).trim());
   });
   const merged = remote.slice();
+  // Index remote-derived rows by key so we can do LAST-EDIT-WINS when the SAME tub
+  // exists on both sides: a tub you just moved/reordered locally must not be reverted
+  // by a stale remote that still holds its old position/level. Mirrors _mergeFactory.
+  const mergedIdx = new Map();
+  merged.forEach((u, i) => { const k = keyOf(u); if(k && !mergedIdx.has(k)) mergedIdx.set(k, i); });
   let kept = 0;
   local.forEach(u => {
     const k = keyOf(u); if(!k) return;
-    if(remoteKeys.has(k)) return;   // remote already has it (remote copy wins)
-    if(elsewhere.has(k)) return;    // incoming state knows it elsewhere (dispatched/etc) → respect
+    if(remoteKeys.has(k)){
+      // Same tub on both sides → keep whichever was edited most recently.
+      const idx = mergedIdx.get(k);
+      if(idx != null){
+        const rem = merged[idx];
+        const lt = (u && u.updatedAt) || '';
+        const rt = (rem && rem.updatedAt) || '';
+        if(lt && lt > rt) merged[idx] = u;   // our edit is newer → ours wins
+      }
+      return;
+    }
+    if(elsewhere.has(k)) return;    // local-only but incoming knows it elsewhere (dispatched/etc) → respect
     merged.push(u); kept++;         // local-only & unknown to incoming → KEEP (the fix)
   });
   _lastMergeKept = kept;
@@ -5976,15 +5993,30 @@ function _mergeFactory(local, remote, localIncoming){
   //     to-factory leg legitimately coexists with a stale floor copy that _mergeUnits
   //     has already removed, so it is left alone).
   // Applied to BOTH remote and local rows.
+  // EXCEPTION — return legs: a tub heading BACK to the factory (in-transit
+  // to-factory) or already returned (received-back-at-factory / rejected) is
+  // LEGITIMATELY at the factory. Any stale floor/incoming copy is the obsolete
+  // side (reconciled by _mergeUnits / the integrity checks), so a return-leg
+  // factory row must NEVER be treated as stale here — otherwise a returning tub
+  // would vanish whenever an old device still shows it on the floor.
+  const isReturnLeg = f =>
+    (f.trackingState === 'in-transit' && f.transitDir === 'to-factory') ||
+    f.trackingState === 'received-back-at-factory' ||
+    /reject|return/i.test(f.trackingState || '');
   const isStaleFactoryRow = f => {
     if(!f || f.sn == null) return false;
     if(f.type === 'accessory' || f.type === 'misc') return false;
     const sn = String(f.sn).trim();
-    if(dispatchedOutSns.has(sn)) return true;
-    if(f.trackingState === 'in-transit'){
-      if(receivedSns.has(sn)) return true;
-      if(f.transitDir !== 'to-factory' && onFloorSns.has(sn)) return true;
-    }
+    if(dispatchedOutSns.has(sn)) return true;        // left for a dealer → drop
+    if(isReturnLeg(f)) return false;                 // legitimately at/returning to factory
+    // Any other (outbound/at-factory) state — created-at-factory, ready-to-ship,
+    // ready-for-pickup, or in-transit to-warehouse — is OBSOLETE once the physical
+    // tub is already received at the dock (incoming) or placed on the floor. This
+    // is the fix for floor+factory / incoming+factory duplicates that appeared when
+    // a device stale on the load/receive scans still carried a created-at-factory
+    // row for a tub another device had already received.
+    if(receivedSns.has(sn)) return true;
+    if(onFloorSns.has(sn)) return true;
     return false;
   };
   const merged = remote.filter(f => f && !isStaleFactoryRow(f));
@@ -6026,6 +6058,107 @@ function _mergeFactory(local, remote, localIncoming){
   return merged;
 }
 
+// Keep-local + last-edit-wins merge for coverInventory[]. Covers are now real
+// mutable stock (decremented at dispatch, +/- in the Cover Inventory page), so a
+// wholesale "cloud wins" replace would resurrect a decremented cover or wipe a
+// local +/- when a stale device pushes. Key by color|model|source; for a row on
+// both sides keep whichever was edited most recently (updatedAt); keep local-only
+// rows so a new color/model never vanishes. (Residual edge case: two devices
+// decrementing the SAME color+model+source within one sync window keep only the
+// newer row — reconcileCovers() still dedups duplicate per-S/N decrements.)
+function _mergeCovers(local, remote){
+  remote = Array.isArray(remote) ? remote : [];
+  local  = Array.isArray(local)  ? local  : [];
+  const keyOf = c => c ? [String(c.color||'').trim().toLowerCase(), String(c.model||'').trim().toLowerCase(), String(c.source||'warehouse').trim().toLowerCase()].join('|') : null;
+  const merged = remote.slice();
+  const idx = new Map();
+  merged.forEach((c, i) => { const k = keyOf(c); if(k && !idx.has(k)) idx.set(k, i); });
+  let kept = 0;
+  local.forEach(c => {
+    const k = keyOf(c); if(!k) return;
+    if(idx.has(k)){
+      const i = idx.get(k); const rem = merged[i];
+      // CONSERVATION-SAFE MERGE. A plain last-edit-wins on the whole row LOSES
+      // decrements when two devices/partitions each consumed the SAME cover model
+      // for DIFFERENT spas (each row only knows its own −1). Instead we:
+      //   1. Reconstruct each side's pre-decrement stock level = qty + |own decrements|
+      //      (decrements are idempotent per spaSn, so |own decrements| is exact).
+      //   2. Take the UNION of decrement spaSns across both sides — the true set of
+      //      tubs that consumed this cover.
+      //   3. mergedQty = max(stockLevel) − |union of decrements|  (clamped ≥ 0).
+      //   4. Union history + pending (dedup) so the full ledger survives and future
+      //      decrements stay idempotent; keep the newest scalar fields/updated stamp.
+      const decSet = h => new Set((Array.isArray(h)?h:[])
+        .filter(e => e && e.action === 'decrement' && e.spaSn != null && String(e.spaSn) !== '')
+        .map(e => String(e.spaSn)));
+      const decL = decSet(c.history), decR = decSet(rem.history);
+      const union = new Set([...decL, ...decR]);
+      const levelL = (typeof c.qty === 'number' ? c.qty : 0) + decL.size;
+      const levelR = (typeof rem.qty === 'number' ? rem.qty : 0) + decR.size;
+      const mergedQty = Math.max(0, Math.max(levelL, levelR) - union.size);
+      const histSig = e => [e&&e.at, e&&e.action, e&&e.spaSn, e&&e.reason, e&&e.queuedAt].join('~');
+      const histMap = new Map();
+      [...(Array.isArray(rem.history)?rem.history:[]), ...(Array.isArray(c.history)?c.history:[])]
+        .forEach(e => { if(e){ const s = histSig(e); if(!histMap.has(s)) histMap.set(s, e); } });
+      const pendMap = new Map();
+      [...(Array.isArray(rem.pending)?rem.pending:[]), ...(Array.isArray(c.pending)?c.pending:[])]
+        .forEach(p => { if(p){ const s = String(p.spaSn||'') + '~' + (p.queuedAt||''); if(!pendMap.has(s)) pendMap.set(s, p); } });
+      const lt = (c && c.updated) || '';
+      const rt = (rem && rem.updated) || '';
+      const newer = (lt > rt) ? c : rem;
+      merged[i] = Object.assign({}, newer, {
+        qty: mergedQty,
+        history: Array.from(histMap.values()),
+        pending: Array.from(pendMap.values()),
+        updated: (lt > rt ? lt : rt)
+      });
+      return;
+    }
+    merged.push(c); idx.set(k, merged.length - 1); kept++;   // local-only cover row → KEEP
+  });
+  _lastCoverMergeKept = kept;
+  return merged;
+}
+
+// Keep-local merge for marriages[]. A marriage created locally must not vanish if
+// a stale remote lacks it (same id-collision / clobber class). Key by spaSn+accessory;
+// remote wins for marriages it already knows (so status updates propagate), local-only
+// marriages are KEPT. (Deletions behave as before — the cloud copy wins on presence.)
+function _mergeMarriages(local, remote){
+  remote = Array.isArray(remote) ? remote : [];
+  local  = Array.isArray(local)  ? local  : [];
+  const keyOf = m => {
+    if(!m) return null;
+    const sn  = (m.spaSn != null && String(m.spaSn).trim() !== '') ? String(m.spaSn).trim() : '';
+    const acc = (m.accessoryId != null && m.accessoryId !== '') ? ('a' + m.accessoryId) : (m.accessoryName || '');
+    if(sn || acc) return 'm:' + sn + '|' + acc;
+    return m.id != null ? ('id:' + m.id) : null;
+  };
+  const remoteKeys = new Set(remote.map(keyOf).filter(v => v != null));
+  const merged = remote.slice();
+  // Index remote-derived rows by key so a marriage present on BOTH sides keeps the
+  // copy edited most recently (by updatedAt) instead of always letting remote win —
+  // otherwise a stale device could revert a marriage's status (e.g. completed →
+  // delivered) on sync. Mirrors _mergeUnits/_mergeFactory/_mergeCovers.
+  const idx = new Map();
+  merged.forEach((m, i) => { const k = keyOf(m); if(k != null && !idx.has(k)) idx.set(k, i); });
+  let kept = 0;
+  local.forEach(m => {
+    if(!m) return;
+    const k = keyOf(m); if(k == null) return;
+    if(idx.has(k)){
+      const i = idx.get(k); const rem = merged[i];
+      const lt = (m && m.updatedAt) || '';
+      const rt = (rem && rem.updatedAt) || '';
+      if(lt && lt > rt) merged[i] = m;   // our marriage edit is newer → keep ours
+      return;
+    }
+    merged.push(m); kept++;         // local-only marriage → KEEP (don't vanish on stale remote / id collision)
+  });
+  _lastMarMergeKept = kept;
+  return merged;
+}
+
 function fbApplyRemoteState(restored, sourceTimestamp){
   // ═══ ASPEN PROTECTION LAYER — SAFE-PULL GUARD ═══
   // Block remote applies that would drop >50% of items. The user gets a banner
@@ -6046,9 +6179,9 @@ function fbApplyRemoteState(restored, sourceTimestamp){
     if(Array.isArray(restored.activity)) activity = restored.activity;
     if(Array.isArray(restored.queue)) queue = restored.queue;
     if(Array.isArray(restored.factory)) factory = _mergeFactory(factory, restored.factory, incoming);
-    if(Array.isArray(restored.marriages)) marriages = restored.marriages;
+    if(Array.isArray(restored.marriages)) marriages = _mergeMarriages(marriages, restored.marriages);
     if(Array.isArray(restored.dispatchRequests)) dispatchRequests = _mergeRequests(dispatchRequests, restored.dispatchRequests);
-    if(Array.isArray(restored.coverInventory)) coverInventory = restored.coverInventory;
+    if(Array.isArray(restored.coverInventory)) coverInventory = _mergeCovers(coverInventory, restored.coverInventory);
     if(restored.colorLibrary && typeof restored.colorLibrary === 'object') colorLibrary = restored.colorLibrary;
     if(restored.coverModelMapping && typeof restored.coverModelMapping === 'object') coverModelMapping = restored.coverModelMapping;
     if(Array.isArray(restored.movements)) movements = restored.movements;
@@ -6100,9 +6233,9 @@ function fbApplyRemoteState(restored, sourceTimestamp){
   // merged result so the cloud + every other device regain them (stops the
   // appear/disappear loop instead of just patching it on this screen).
   try {
-    if(_lastMergeKept > 0 || _lastReqMergeKept > 0 || _lastIncMergeKept > 0 || _lastFacMergeKept > 0){
+    if(_lastMergeKept > 0 || _lastReqMergeKept > 0 || _lastIncMergeKept > 0 || _lastFacMergeKept > 0 || _lastCoverMergeKept > 0 || _lastMarMergeKept > 0){
       console.warn('[merge] kept ' + _lastMergeKept + ' local-only tub(s) + ' + _lastReqMergeKept + ' local-only request(s) the incoming state lacked \u2192 re-pushing merged state');
-      _lastMergeKept = 0; _lastReqMergeKept = 0; _lastIncMergeKept = 0; _lastFacMergeKept = 0;
+      _lastMergeKept = 0; _lastReqMergeKept = 0; _lastIncMergeKept = 0; _lastFacMergeKept = 0; _lastCoverMergeKept = 0; _lastMarMergeKept = 0;
       setTimeout(() => { try { _bypassNextSafePush = true; if(typeof fbCloudSync === 'function') fbCloudSync(false); } catch(e){} }, 600);
     }
   } catch(e){}
@@ -6806,6 +6939,12 @@ const STACK_TYPES = ['hot','swim'];
 const isStackedType = t => STACK_TYPES.includes(t);
 const LEVEL_LABEL = lv => lv===1?'Bottom' : lv===2?'Middle' : lv===3?'Top' : `L${lv}`;
 const LEVEL_SHORT = lv => lv===1?'BTM' : lv===2?'MID' : lv===3?'TOP' : `L${lv}`;
+// Stamp a unit's last-edit time so the Firebase merge (_mergeUnits) can keep the
+// most-recently-edited copy when the same tub exists on two devices. Call this on
+// any USER edit to a tub's position/level/dealer — NOT from normalize/migrate
+// (those are deterministic re-seats every device computes, so stamping them would
+// make devices fight over "newest").
+function touchUnit(u){ if(u){ try { u.updatedAt = editStamp(); } catch(e){} } }
 
 // ═══════════════════════════════════════════════════════
 // REAL DATA — extracted from Excel
@@ -8251,7 +8390,20 @@ const toISO = () => {
   return `${y}-${m}-${day}`;
 };
 window.toISO = toISO;
-const fmtD = d => { try{ return new Date((d||toISO())+'T12:00:00').toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}); }catch{return d||'—';} };
+// High-resolution timestamp for last-edit-wins merge comparisons. toISO() is
+// date-only (YYYY-MM-DD), so two edits on the SAME DAY compared as date-only tie
+// and the merge can't tell which is newer (it then defaults to remote → the local
+// edit reverts). editStamp() is a full ISO timestamp (ms), so same-day edits
+// compare correctly. ISO strings sort lexicographically = chronologically, and a
+// full ISO ("…T…Z") sorts AFTER a bare date ("YYYY-MM-DD"), so a new edit always
+// beats a legacy date-only stamp. Used for the merge fields (units/factory/cover/
+// request updatedAt|updated|notesUpdatedAt) — NOT for human-facing dates.
+const editStamp = () => { try { return new Date().toISOString(); } catch(e){ return toISO(); } };
+window.editStamp = editStamp;
+// fmtD: robust to BOTH a bare date ("2026-06-04") and a full ISO timestamp
+// ("2026-06-04T21:45:30.123Z"). Bare dates get a noon time appended (avoids TZ
+// off-by-one); full ISO strings are parsed as-is. Either way we show only the date.
+const fmtD = d => { try{ const s = d || toISO(); const dt = (typeof s === 'string' && s.indexOf('T') !== -1) ? new Date(s) : new Date(s + 'T12:00:00'); return dt.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}); }catch{return d||'—';} };
 const typeColor = t => ({hot:'var(--accent)',swim:'var(--teal)',extra:'var(--purple)',misc:'var(--amber)',material:'var(--orange)',accessory:'var(--orange)'}[t]||'var(--text3)');
 
 // ═══════════════════════════════════════════════════════
@@ -8531,7 +8683,7 @@ function lookupSpaDealer(sn, targetElId){
 function markMarriageDelivered(mid){
   const m = marriages.find(x=>x.id===mid); if(!m) return;
   snapshot(`marriage delivered ${m.spaSn}`);
-  m.status = 'delivered';
+  m.status = 'delivered'; m.updatedAt = editStamp();
   m.deliveredDate = toISO();
   // Auto-locate at marriage inventory shelf — accessory has physically
   // arrived at the warehouse, so it lives at MINV until dispatch.
@@ -10192,7 +10344,7 @@ function setupDropExtended(el,pos){
         const slot = findNextSlot(pos, null, u.type);
         if(!slot){ toast(`${pos} is full (max ${u.type==='swim'?MAX_LEVELS_SWIM:MAX_LEVELS_HOT})`,'err'); dragUnit=null; return; }
         snapshot(`move ${u.sn||u.dealer}`);
-        const old=u.pos;u.pos=pos;u.stack=slot.stack;u.level=slot.level;
+        const old=u.pos;u.pos=pos;u.stack=slot.stack;u.level=slot.level; touchUnit(u);
         addAct(`${u.sn?'S/N '+u.sn:u.dealer} moved: ${old} → ${pos} (S${slot.stack}-${LEVEL_SHORT(slot.level)})`,'var(--accent)');
         if(old!==pos) postMovement({type:'309', sn:u.sn, material:u.type||'', qty:1, from:LOC_WAREHOUSE(old), to:LOC_WAREHOUSE(pos), stockType:'unrestricted', note:'Floor relocation'});
         toast(`→ ${pos} · S${slot.stack}-${LEVEL_SHORT(slot.level)}`,'ok');
@@ -10534,9 +10686,9 @@ function drawMap(){
     // Taller cell so the full vertical stack (TOP → BTM cards) is visible,
     // mirroring the Stack detail panel right on the floor map.
     cell.style.overflow = 'visible';
-    cell.style.minHeight = (mode === 'swim' ? 112 : 156) + 'px';
+    cell.style.minHeight = (mode === 'swim' ? 94 : 128) + 'px';
     const body = el('div','');
-    body.style.cssText = 'flex:1;display:flex;flex-direction:column;justify-content:center;gap:4px';
+    body.style.cssText = 'flex:1;display:flex;flex-direction:column;justify-content:center;gap:3px';
     // Per-LEVEL drop target. Lets a dragged tub land on a specific slot:
     //  • empty slot  → place there (validateSlot enforces no-gap + capacity + swim rules)
     //  • same cell, occupied slot → SWAP the two tubs' levels (reorder T/M/B)
@@ -10575,7 +10727,7 @@ function drawMap(){
           if(!v.ok){ toast(v.reason || `Can't place at ${lvlTag(targetLevel)}`,'warn'); return; }
           snapshot(`place ${du.sn||du.dealer}`);
           const old = du.pos;
-          du.pos = pos; du.stack = 1; du.level = targetLevel;
+          du.pos = pos; du.stack = 1; du.level = targetLevel; touchUnit(du);
           addAct(`${du.sn?'S/N '+du.sn:du.dealer} placed: ${old} → ${pos} (${LEVEL_SHORT(targetLevel)})`,'var(--accent)');
           if(old !== pos) postMovement({type:'309', sn:du.sn, material:du.type||'', qty:1, from:LOC_WAREHOUSE(old), to:LOC_WAREHOUSE(pos), stockType:'unrestricted', note:'Floor relocation'});
           toast(`→ ${pos} · ${LEVEL_SHORT(targetLevel)}`,'ok');
@@ -10585,6 +10737,7 @@ function drawMap(){
           const dl = du.level;
           du.level = occupant.level;
           occupant.level = dl;
+          touchUnit(du); touchUnit(occupant);   // both reordered → both win over stale remote
           addAct(`Reordered ${pos}: ${du.sn||du.dealer} ↔ ${occupant.sn||occupant.dealer}`,'var(--accent)');
           toast(`Reordered · ${du.sn||du.dealer} → ${LEVEL_SHORT(du.level)}`,'ok');
         } else {
@@ -10608,12 +10761,12 @@ function drawMap(){
         const isSwim = su.type === 'swim';
         const isAccess = (lv === topLv);
         const bandCol = isSwim ? '#0d9e78' : rc.border;
-        row.style.cssText = `position:relative;display:flex;flex-direction:column;justify-content:center;gap:2px;min-height:40px;padding:6px 9px;border-radius:6px;background:${isAccess?'#fffdf6':'#ffffff'};border:1px solid ${isAccess?'#e6b450':'#e6eaf0'};border-left:3px solid ${bandCol};box-shadow:0 1px 2px rgba(15,23,42,.05);cursor:grab`;
-        const badge = `<span style="position:absolute;top:5px;right:6px;font-size:7px;font-weight:800;letter-spacing:.05em;line-height:1.3;padding:1px 5px;border-radius:5px;color:${isAccess?'#b45309':'#64748b'};background:${isAccess?'#fef3c7':'#f1f5f9'};border:.5px solid ${isAccess?'#f0c659':'#e2e8f0'}">${lvLbl}</span>`;
+        row.style.cssText = `position:relative;display:flex;flex-direction:column;justify-content:center;gap:1px;min-height:32px;padding:4px 8px;border-radius:6px;background:${isAccess?'#fffdf6':'#ffffff'};border:1px solid ${isAccess?'#e6b450':'#e6eaf0'};border-left:3px solid ${bandCol};box-shadow:0 1px 2px rgba(15,23,42,.05);cursor:grab`;
+        const badge = `<span style="position:absolute;top:3px;right:5px;font-size:6.5px;font-weight:800;letter-spacing:.05em;line-height:1.3;padding:.5px 4px;border-radius:4px;color:${isAccess?'#b45309':'#64748b'};background:${isAccess?'#fef3c7':'#f1f5f9'};border:.5px solid ${isAccess?'#f0c659':'#e2e8f0'}">${lvLbl}</span>`;
         row.innerHTML =
             badge
-          + `<div style="font-size:8.5px;font-weight:600;color:#64748b;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding-right:34px;line-height:1.2">${escapeHTML(su.dealer||'—')}</div>`
-          + `<div style="font-family:var(--mono);font-size:13px;font-weight:800;color:#0f172a;letter-spacing:.02em;line-height:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHTML(su.sn||'—')}</div>`;
+          + `<div style="font-size:8px;font-weight:600;color:#64748b;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding-right:30px;line-height:1.15">${escapeHTML(su.dealer||'—')}</div>`
+          + `<div style="font-family:var(--mono);font-size:11.5px;font-weight:800;color:#0f172a;letter-spacing:.02em;line-height:1.05;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHTML(su.sn||'—')}</div>`;
         row.title = `${su.sn||''} · ${su.dealer||'—'} · ${isSwim?'swim spa':'hot tub'} · ${lvLbl}${isAccess?' · accessible (pick first)':''} · drag to move`;
         // Per-tub drag source — pick up THIS exact tub, not just the top one.
         row.setAttribute('draggable','true');
@@ -10642,8 +10795,8 @@ function drawMap(){
       } else {
         // Empty slot — dashed "+ place" box (placeable) or faint "empty".
         const canPlace = (lv === 1) || !!stack[lv-2];
-        row.style.cssText = `position:relative;display:flex;align-items:center;justify-content:center;min-height:40px;padding:4px 9px;border-radius:6px;border:1px dashed ${canPlace?'#a8c5f5':'#e2e8f0'};background:${canPlace?'#f5f9ff':'#fcfdfe'};color:${canPlace?'#3b6fd4':'#cbd5e1'};font-size:9px;font-weight:700;letter-spacing:.03em;${canPlace?'':'opacity:.55'}`;
-        row.innerHTML = `<span style="position:absolute;top:5px;right:6px;font-size:7px;font-weight:800;letter-spacing:.05em;line-height:1.3;padding:1px 5px;border-radius:5px;color:#cbd5e1;background:#f8fafc;border:.5px solid #eef2f7">${lvLbl}</span>${canPlace?'+ place':'empty'}`;
+        row.style.cssText = `position:relative;display:flex;align-items:center;justify-content:center;min-height:32px;padding:4px 8px;border-radius:6px;border:1px dashed ${canPlace?'#a8c5f5':'#e2e8f0'};background:${canPlace?'#f5f9ff':'#fcfdfe'};color:${canPlace?'#3b6fd4':'#cbd5e1'};font-size:8.5px;font-weight:700;letter-spacing:.03em;${canPlace?'':'opacity:.55'}`;
+        row.innerHTML = `<span style="position:absolute;top:3px;right:5px;font-size:6.5px;font-weight:800;letter-spacing:.05em;line-height:1.3;padding:.5px 4px;border-radius:4px;color:#cbd5e1;background:#f8fafc;border:.5px solid #eef2f7">${lvLbl}</span>${canPlace?'+ place':'empty'}`;
       }
       wireLevelDrop(row, lv);
       body.appendChild(row);
@@ -11101,7 +11254,7 @@ window.setupStagingDrop = function(cell, id){
       dragUnit = null;
       if(!u || u.pos === id) return;
       snapshot(`stage ${u.sn||u.dealer}`);
-      u.pos = id; u.stack = 1; u.level = 1;
+      u.pos = id; u.stack = 1; u.level = 1; touchUnit(u);
       if(old && !isStagingCell(old)) postMovement({type:'309', sn:u.sn, material:u.type||'', qty:1, from:LOC_WAREHOUSE(old), to:LOC_WAREHOUSE(id), stockType:'unrestricted', note:'Staged for dispatch at '+label});
       addAct(`${u.sn?'S/N '+u.sn:u.dealer} staged: ${old} \u2192 ${label}`, 'var(--accent)');
       toast(`Staged at ${label}`, 'ok');
@@ -11257,7 +11410,7 @@ function fulfillMarriage(id){
   if(!m) return;
   if(!confirm(`Mark marriage for ${m.spaSn} (${m.accessoryName}) as fulfilled?`)) return;
   snapshot('marriage-fulfill');
-  m.status = 'fulfilled';
+  m.status = 'fulfilled'; m.updatedAt = editStamp();
   m.fulfilledAt = new Date().toISOString().slice(0,10);
   try{ postMovement({type:'MAR', sn:m.spaSn||'', material:'accessory', qty:m.accessoryQty||1, from:(m.location?LOC_WAREHOUSE(m.location):null), to:null, stockType:'unrestricted', note:'Married '+(m.accessoryName||'accessory')+' \u2192 '+(m.spaSn||'?')}); }catch(e){}
   if(typeof addAct === 'function') addAct(`💍 Marriage #${id} fulfilled — ${m.accessoryName} delivered with ${m.spaSn}`, 'var(--accent)');
@@ -11349,7 +11502,7 @@ function autoMarryOnSpaCreate(sn, spaRecord){
     if(m.mountType === 'inside'){
       if(spaRecord && attachInsideAccessory(spaRecord, m.accessoryName, m.accessoryQty)){
         m.location = null;            // never on the MINV shelf — it's inside the tub
-        m.status = 'delivered';       // handled: it travels inside the spa from here
+        m.status = 'delivered'; m.updatedAt = editStamp();       // handled: it travels inside the spa from here
         m.deliveredDate = m.deliveredDate || toISO();
         addAct(`🛁 Auto-married (inside): ${m.accessoryName} packed inside new tub ${s}`, 'var(--teal)');
         n++;
@@ -11726,6 +11879,7 @@ function confirmMoveSection(fromRow){
       }
     }
     moved++;
+    touchUnit(u);
     addAct(`${u.sn||u.dealer}: ${oldPos}→${u.pos}`,'var(--accent)');
   });
   toast(`${moved} unit(s) moved to row ${specificPos||targetRow}`,'ok');
@@ -12713,7 +12867,7 @@ function confirmDispatch(id){
   const above = unitsAbove(u);
   snapshot(`dispatch ${u.sn||u.dealer}`);
   if(above.length){
-    above.forEach(b=>{ b.level = b.level - 1; });
+    above.forEach(b=>{ b.level = b.level - 1; touchUnit(b); });
     addAct(`${above.length} tub${above.length>1?'s':''} dropped down at ${u.pos} after dispatch`,'var(--amber)');
   }
   const auth=authEl.value;
@@ -12748,7 +12902,7 @@ function confirmDispatch(id){
   if(marPending.length > 0){
     marPending.forEach(m => {
       // Update the marriage status to a special state
-      m.status = 'split-pending';
+      m.status = 'split-pending'; m.updatedAt = editStamp();
       m.splitDispatchedDate = date;
       m.splitDispatchSpaDealer = u.dealer;
       // Auto-create a factory request to ship the accessory directly to the dealer
@@ -12776,7 +12930,7 @@ function confirmDispatch(id){
   // and clear their location — accessory physically left MINV with the spa.
   marriages.forEach(m=>{
     if(m.spaSn===u.sn && m.status==='delivered'){
-      m.status = 'completed';
+      m.status = 'completed'; m.updatedAt = editStamp();
       m.dispatchedDate = date;
       m.location = null;   // no longer at MINV — went out with the spa
     }
@@ -12999,6 +13153,7 @@ function saveEdit(id){
   u.type=newType;
   if(willBeStacked){ u.stack=newStack; u.level=newLevel; }
   else { delete u.stack; delete u.level; }
+  touchUnit(u);   // last-edit-wins: this edit must beat a stale remote on next sync
   // Already-in-warehouse flag
   const alreadyEl = document.getElementById('e-already');
   if(alreadyEl){
@@ -13038,12 +13193,12 @@ function doMove(id){
     const slot = findNextSlot(v.pos, null, u.type);
     if(!slot){ toast(`${v.pos} is full (max ${u.type==='swim'?MAX_LEVELS_SWIM:MAX_LEVELS_HOT})`,'err'); return; }
     snapshot(`move ${u.sn||u.dealer}`);
-    const old=u.pos; u.pos=v.pos; u.stack=slot.stack; u.level=slot.level;
+    const old=u.pos; u.pos=v.pos; u.stack=slot.stack; u.level=slot.level; touchUnit(u);
     addAct(`${u.sn||u.dealer}: ${old} → ${v.pos} (S${slot.stack}-${LEVEL_SHORT(slot.level)})`,'var(--accent)');
     toast(`Moved to ${v.pos} · S${slot.stack}-${LEVEL_SHORT(slot.level)}`,'ok');
   } else {
     snapshot(`move ${u.sn||u.dealer}`);
-    const old=u.pos;u.pos=v.pos;
+    const old=u.pos;u.pos=v.pos; touchUnit(u);
     addAct(`${u.sn||u.dealer}: ${old} → ${v.pos}`,'var(--accent)');
     toast(`Moved to ${v.pos}`,'ok');
   }
@@ -13093,7 +13248,7 @@ function rmUnit(id){
     if(!confirm(`⚠ ${above.length} tub${above.length>1?'s are':' is'} physically stacked on top of this one:\n\n${list}\n\nRemoving the bottom tub leaves the upper one${above.length>1?'s':''} in an invalid stack state. Recommended: move ${above.length>1?'them':'it'} aside first.\n\nRemove anyway?`)) return;
     // Auto-collapse: drop the upper units down to fill the gap
     const myLv = u.level||1;
-    above.forEach(b=>{ b.level = b.level - 1; });
+    above.forEach(b=>{ b.level = b.level - 1; touchUnit(b); });
   }
   if(!confirm(`Remove ${u.sn||u.dealer} from warehouse?`))return;
   snapshot(`remove ${u.sn||u.dealer}`);
@@ -13337,7 +13492,7 @@ function receiveTransitItem(factoryId){
   if(isAcc && item.marriedSn){
     const m = marriages.find(x => x.accessoryId === item.id && x.status === 'pending');
     if(m){
-      m.status = 'delivered';
+      m.status = 'delivered'; m.updatedAt = editStamp();
       m.deliveredDate = at;
       if(!m.location) m.location = 'MINV';
       addAct(`📬 Married accessory received: ${item.dealer} for S/N ${item.marriedSn} · placed at MINV`,'var(--teal)');
@@ -13845,7 +14000,7 @@ function confirmPosition(incomingId, posRaw){
     newUnit.coverPaired = {
       color: it.cover.color,
       model: it.cover.model,
-      source: it.cover.source || 'factory',
+      source: it.cover.source || 'warehouse',
       pairedAt: toISO(),
       pairedBy: ROLES[currentRole].label,
       note: it.cover.note || ''
@@ -13855,6 +14010,7 @@ function confirmPosition(incomingId, posRaw){
   // Seat the unit in its resolved stack slot so it occupies BTM/MID/TOP
   // instead of falling into overflow (S?-L0).
   if(slot){ newUnit.stack = slot.stack; newUnit.level = slot.level; }
+  touchUnit(newUnit);
   units.push(newUnit);
   // Remove from incoming + queue
   incoming = incoming.filter(x => x.id !== incomingId);
@@ -14496,7 +14652,7 @@ function adminForceReceive(factoryId){
       (x.accessoryId === item.id || String(x.spaSn) === String(item.marriedSn)) &&
       x.status !== 'delivered' && x.status !== 'completed' && x.status !== 'fulfilled');
     if(m){
-      m.status = 'delivered';
+      m.status = 'delivered'; m.updatedAt = editStamp();
       m.deliveredDate = at;
       if(!m.location) m.location = 'MINV';
       addAct(`📬 Admin force-received married accessory: ${item.dealer} for S/N ${item.marriedSn} · placed at MINV`,'var(--teal)');
@@ -15227,6 +15383,7 @@ function saveMaterialEdit(id){
     // Case 2: update existing unit (move if pos changed, refresh other fields)
     linkedUnit.pos = validatedPos;
     linkedUnit.dealer = name;
+    touchUnit(linkedUnit);
     linkedUnit.qty = qty;
     linkedUnit.notes = notes;
     linkedUnit.entry = m.date;
@@ -16088,7 +16245,7 @@ function moveUnitToStage(id, stageId){
   if(typeof canStage==='function' && !canStage()){ toast('Staging is Warehouse-Manager only','warn'); return; }
   const u=units.find(x=>x.id===id); if(!u) return;
   snapshot('stage '+(u.sn||u.dealer));
-  const old=u.pos; u.pos=stageId; delete u.stack; delete u.level;
+  const old=u.pos; u.pos=stageId; delete u.stack; delete u.level; touchUnit(u);
   const label = stageId==='STAGE1'?'Stage 1':'Stage 2';
   addAct(`${u.sn||u.dealer}: ${old} \u2192 ${label}`,'var(--amber)');
   toast(`Moved to ${label}`,'ok');
@@ -16107,7 +16264,7 @@ function stageDispatchGroup(gid, stageId){
   if(!inWh.length){ toast('No warehouse tubs to stage in this order','err'); return; }
   const label = stageId==='STAGE1'?'Stage 1':'Stage 2';
   snapshot('stage dispatch group');
-  inWh.forEach(u=>{ u.pos=stageId; delete u.stack; delete u.level; });
+  inWh.forEach(u=>{ u.pos=stageId; delete u.stack; delete u.level; touchUnit(u); });
   addAct(`\ud83d\udce5 Staged ${inWh.length} tub${inWh.length>1?'s':''} for ${grp[0].dealer} \u2192 ${label}`,'var(--amber)');
   toast(`${inWh.length} tub${inWh.length>1?'s':''} moved to ${label} \u2014 dispatch when ready`,'ok');
   flushSave(); try{ if(typeof fbCloudSync==='function'&&_fbDb&&_fbAuthorized) fbCloudSync(false); }catch(e){}
@@ -19377,7 +19534,7 @@ function addFactorySpa(){
     model, colors, acrylicColor, cabinetColor, plasticWrap, cover,
     looseAccessories,
     trackingId,
-    updatedAt: toISO(),
+    updatedAt: editStamp(),
     trackingState: 'created-at-factory',
     trackingHistory: [{state:'created-at-factory', at: toISO(), by: ROLES[currentRole].label}]
   });
@@ -19551,7 +19708,7 @@ function decrementCoverStock(color, model, source, spaSn){
   if(row.qty <= 0){
     // Add this spa to the pending queue
     row.pending.push({spaSn: spaSn||'', queuedAt: toISO(), by: ROLES[currentRole].label});
-    row.updated = toISO();
+    row.updated = editStamp();
     row.history = row.history || [];
     row.history.push({at: toISO(), action:'queued-pending', spaSn: spaSn||'', by: ROLES[currentRole].label});
     toast(`📋 Cover ${color}${model?' ('+model+')':''} OUT OF STOCK at ${srcLabel} — queued as pending for S/N ${spaSn||'—'}. Will auto-fulfill when stock arrives.`,'amber');
@@ -19585,7 +19742,7 @@ function decrementCoverStock(color, model, source, spaSn){
     toast(`⚠ ${color}${model?' ('+model+')':''} at ${srcLabel}: only ${row.qty} left after this. Consider re-ordering.`,'amber');
   }
   row.qty -= 1;
-  row.updated = toISO();
+  row.updated = editStamp();
   row.history = row.history || [];
   row.history.push({at: toISO(), action:'decrement', spaSn: spaSn||'', by: ROLES[currentRole].label});
   return true;
@@ -19651,7 +19808,7 @@ function fulfillPendingCovers(row){
     addAct(`Cover ${row.color}${row.model?' ('+row.model+')':''} fulfilled for pending S/N ${next.spaSn||'—'}`,'var(--teal)');
   }
   if(fulfilled > 0){
-    row.updated = toISO();
+    row.updated = editStamp();
     toast(`✓ ${fulfilled} pending cover${fulfilled>1?'s':''} now fulfilled`,'ok');
   }
   return fulfilled;
@@ -19686,7 +19843,7 @@ function incrementCoverStock(color, model, source, spaSn, reason){
     coverInventory.push(row);
   }
   row.qty += 1;
-  row.updated = toISO();
+  row.updated = editStamp();
   row.history = row.history || [];
   row.history.push({at: toISO(), action:'increment', spaSn: spaSn||'', by: ROLES[currentRole].label, reason: reason||''});
   // After increment, try to fulfill any pending requests for this cover
@@ -20371,7 +20528,7 @@ function handleQRPayload(raw, mode){
         setScanResult('ok', u.sn, 'already staged ✓');
       } else {
         snapshot('scan-stage '+u.sn);
-        u.pos='STAGE1'; delete u.stack; delete u.level;
+        u.pos='STAGE1'; delete u.stack; delete u.level; touchUnit(u);
         addAct(`\ud83d\udce5 Scanned + staged ${u.sn} → Stage 1`, 'var(--amber)');
         flushSave(); try{ if(typeof fbCloudSync==='function'&&_fbDb&&_fbAuthorized) fbCloudSync(false); }catch(e){}
         try{ drawMap(); }catch(e){} updBadges();
@@ -20571,7 +20728,7 @@ function handleQRPayload(raw, mode){
       snapshot('marriage receive (from QR scan)');
       factory = factory.filter(f => f.id !== acc.id);
       m.accessoryId = m.accessoryId || acc.id;
-      m.status = 'delivered';
+      m.status = 'delivered'; m.updatedAt = editStamp();
       m.deliveredDate = m.deliveredDate || toISO();
       // Auto-locate at the marriage inventory shelf (MINV) so the
       // physical accessory has a "home" tracked in the system.
@@ -20590,7 +20747,7 @@ function handleQRPayload(raw, mode){
       // Marriage exists (or we just created it), accessory not in factory,
       // but marriage isn't delivered yet. Mark it delivered.
       snapshot('marriage receive (no factory record)');
-      m.status = 'delivered';
+      m.status = 'delivered'; m.updatedAt = editStamp();
       m.deliveredDate = m.deliveredDate || toISO();
       if(!m.location) m.location = 'MINV';
       const recoveredNote = marriageWasLocallyKnown ? '' : ' (recovered from QR — was missing locally)';
@@ -20635,7 +20792,17 @@ function handleQRPayload(raw, mode){
 
   const resultEl = document.getElementById('qr-result');
 
-  if(!found && !parsedSn) {
+  // A tub that already left the floor (pulled to loading bay / shipped / received
+  // via a factory request) lives ONLY on its dispatchRequest — it's gone from
+  // units/factory/incoming, so findByTrackingId + trySnLookup both return null.
+  // If the scan still carries a usable S/N (parsed from the QR, OR a numeric value
+  // the operator typed into the manual box / an older QR that only encoded the SN),
+  // the FACTORY REQUEST FLOW below can still match it by S/N. Only declare "not
+  // found in system" when there is truly nothing left to match on — otherwise the
+  // request/loading-bay/receive-at-factory scans bail out here before ever reaching
+  // the request matcher.
+  const _snGuess = parsedSn || (/^\d+$/.test(tid) ? tid : '');
+  if(!found && !_snGuess) {
     setScanResult('err', tid, 'not found in system');
     toast(`${tid} not found in system`,'err');
     // ── DEFENSIVE: trigger force-sync in case local data is stale ──
@@ -20787,7 +20954,7 @@ function handleQRPayload(raw, mode){
         // regardless of which path the marriage took to get here.
         const m = marriages.find(x => x.accessoryId === item.id && x.status !== 'delivered' && x.status !== 'completed');
         if(m){
-          m.status = 'delivered';
+          m.status = 'delivered'; m.updatedAt = editStamp();
           m.deliveredDate = at;
           // Auto-locate at the marriage inventory shelf so the accessory
           // has a tracked "home" — Alberto's flow: married accessories
@@ -21016,7 +21183,7 @@ function holdFactoryItem(id){
   };
   f.trackingHistory = f.trackingHistory || [];
   f.trackingHistory.push({state:'on-hold', at:toISO(), by:ROLES[currentRole].label, note:f.onHold.reason});
-  f.updatedAt = toISO();   // last-edit-wins: keep the hold from being reverted by a stale remote
+  f.updatedAt = editStamp();   // last-edit-wins: keep the hold from being reverted by a stale remote
   addAct(`⏸ ${f.sn||f.dealer} put ON HOLD: ${f.onHold.reason}`,'var(--text2)');
   postMovement({type:'344', sn:f.sn, material:f.type||'', qty:f.qty||1, from:LOC_FACTORY, to:LOC_FACTORY, stockType:'blocked', note:f.onHold.reason});
   toast(`${f.sn||f.dealer} is now on hold`,'ok');
@@ -21033,7 +21200,7 @@ function resumeFactoryItem(id){
   delete f.onHold;
   f.trackingHistory = f.trackingHistory || [];
   f.trackingHistory.push({state:'created', at:toISO(), by:ROLES[currentRole].label, note:'Resumed from hold (was: '+wasReason+')'});
-  f.updatedAt = toISO();   // last-edit-wins: keep the resume from being reverted by a stale remote
+  f.updatedAt = editStamp();   // last-edit-wins: keep the resume from being reverted by a stale remote
   addAct(`▶ ${f.sn||f.dealer} resumed from hold`,'var(--teal)');
   postMovement({type:'343', sn:f.sn, material:f.type||'', qty:f.qty||1, from:LOC_FACTORY, to:LOC_FACTORY, stockType:'unrestricted', note:'Resumed from hold'});
   toast(`${f.sn||f.dealer} resumed`,'ok');
@@ -21192,7 +21359,7 @@ function undoFactoryReady(id){
   f.trackingState = 'created-at-factory';
   f.trackingHistory.push({state:'created-at-factory', at:toISO(), by:ROLES[currentRole].label, note:`Undo ${wasState}`});
   const lm = marriages.find(m => m.accessoryId === f.id && (m.status === 'ready-to-ship' || m.status === 'ready-for-pickup'));
-  if(lm){ lm.status = 'pending'; delete lm.readyAt; }
+  if(lm){ lm.status = 'pending'; lm.updatedAt = editStamp(); delete lm.readyAt; }
   addAct(`↶ Returned to factory inventory: ${f.sn||f.dealer}`,'var(--text2)');
   toast(`${f.sn||f.dealer} back in factory inventory`,'ok');
   renderFactory(); if(typeof renderMarriages==='function') renderMarriages(); if(typeof renderTruck==='function') renderTruck(); if(typeof renderInTransit==='function') renderInTransit(); updBadges();
@@ -21228,7 +21395,7 @@ function dispatchPickupFromFactory(id, viaScan){
     });
   }
   const lm = marriages.find(m => m.accessoryId === f.id && m.status !== 'delivered' && m.status !== 'completed');
-  if(lm){ lm.status = 'delivered'; lm.deliveredDate = at; lm.via = 'dealer-pickup-at-factory'; }
+  if(lm){ lm.status = 'delivered'; lm.updatedAt = editStamp(); lm.deliveredDate = at; lm.via = 'dealer-pickup-at-factory'; }
   factory = factory.filter(x => x.id !== id);
   addAct(`🤝🚚 Dealer picked up at factory: ${f.sn||f.dealer}`,'var(--accent)');
   toast(`${f.sn||f.dealer} dispatched — dealer pickup at factory`,'ok');
@@ -21435,7 +21602,7 @@ function saveFactoryEdit(id){
     f.looseAccessories = readLooseAccessories();
   }
   f.notes = document.getElementById('fe-notes').value.trim();
-  f.updatedAt = toISO();   // last-edit-wins: protects this edit (type/colors/notes) from a stale remote on sync
+  f.updatedAt = editStamp();   // last-edit-wins: protects this edit (type/colors/notes) from a stale remote on sync
   document.getElementById('factory-float-panel').innerHTML='';
   toast('Saved'+_typeMsg,'ok');
   renderFactory(); updBadges();
@@ -21998,9 +22165,9 @@ function saveMarriageEdit(mid){
       const found = (typeof findSpaRecordBySn === 'function') ? findSpaRecordBySn(sn) : null;
       if(found){
         attachInsideAccessory(found.record, name, qty);
-        m.status = 'delivered'; m.deliveredDate = m.deliveredDate || toISO();
+        m.status = 'delivered'; m.updatedAt = editStamp(); m.deliveredDate = m.deliveredDate || toISO();
       } else if(m.status !== 'delivered'){
-        m.status = 'pending';   // tub not built yet — auto-packs when it is created
+        m.status = 'pending'; m.updatedAt = editStamp();   // tub not built yet — auto-packs when it is created
       }
     } else {
       // Ships SEPARATELY again (shelf): unpack from the tub + recreate a factory accessory.
@@ -22305,7 +22472,7 @@ function syncMarriageOnAccessoryTransit(acc){
   // an accessory that's never been marked ready but Truck scanned anyway).
   const m = marriages.find(x => x.accessoryId === acc.id && (x.status === 'pending' || x.status === 'ready-to-ship'));
   if(!m) return false;
-  m.status = 'in-transit';
+  m.status = 'in-transit'; m.updatedAt = editStamp();
   m.inTransitAt = toISO();
   addAct(`✈ Marriage in transit (Truck scanned): ${acc.dealer} → S/N ${acc.marriedSn}`, 'var(--accent)');
   // Render hooks — best-effort, all guarded
@@ -22349,7 +22516,7 @@ function shipMarriageFromMarriages(mid){
   acc.trackingId = acc.trackingId || makeTrackingId('ACC');
   acc.trackingHistory = acc.trackingHistory || [];
   acc.trackingHistory.push({state:'ready-to-ship', at:toISO(), by:ROLES[currentRole].label, note:'Marked ready by Marriages crew — waiting for Truck'});
-  m.status = 'ready-to-ship';
+  m.status = 'ready-to-ship'; m.updatedAt = editStamp();
   m.readyAt = toISO();
   addAct(`📦 Marriage ready for Truck pickup: ${m.accessoryName} → S/N ${m.spaSn}`,'var(--amber)');
   toast(`Marked ready — Truck/Transit will scan to load`,'ok');
@@ -22384,7 +22551,7 @@ function markMarriageReadyForPickup(mid){
     acc.trackingHistory = acc.trackingHistory || [];
     acc.trackingHistory.push({state:'ready-for-pickup', at:toISO(), by:ROLES[currentRole].label, note:'Dealer pickup at factory (Marriages crew)'});
   }
-  m.status = 'ready-for-pickup';
+  m.status = 'ready-for-pickup'; m.updatedAt = editStamp();
   m.readyAt = toISO();
   addAct(`🤝 Marriage ready for dealer pickup: ${m.accessoryName} → S/N ${m.spaSn}`,'var(--purple)');
   toast(`Marked ready for dealer pickup — Truck can't scan it`,'ok');
@@ -22406,7 +22573,7 @@ function undoMarriageReady(mid){
     acc.trackingState = 'created-at-factory';
     acc.trackingHistory.push({state:'created-at-factory', at:toISO(), by:ROLES[currentRole].label, note:`Undo ${wasState}`});
   }
-  m.status = 'pending';
+  m.status = 'pending'; m.updatedAt = editStamp();
   delete m.readyAt;
   addAct(`↶ Marriage back to factory: ${m.accessoryName} → S/N ${m.spaSn}`,'var(--text2)');
   toast(`${m.accessoryName} back in factory inventory`,'ok');
@@ -22446,7 +22613,7 @@ function undoMarriageDelivered(mid){
     delete linkedReq.receivedAt;
     linkedReq.notes = (linkedReq.notes ? linkedReq.notes + ' \u00b7 ' : '') + 'Reopened: delivery undone';
   }
-  m.status = 'pending';
+  m.status = 'pending'; m.updatedAt = editStamp();
   delete m.deliveredDate;
   if(m.location === 'MINV') delete m.location;
   addAct(`\u21b6 Marriage delivery undone: ${m.accessoryName} \u2192 S/N ${m.spaSn}`, 'var(--text2)');
@@ -22475,7 +22642,7 @@ function dispatchMarriagePickup(mid){
   // Dealer collected the accessory AT THE FACTORY — it left with them. It never
   // touched the warehouse MINV shelf, so this is a terminal 'completed' state with
   // no shelf location (mirrors how confirmDispatch closes out married accessories).
-  m.status = 'completed';
+  m.status = 'completed'; m.updatedAt = editStamp();
   m.dispatchedDate = at;
   m.via = 'dealer-pickup-at-factory';
   m.location = null;
@@ -22739,7 +22906,7 @@ function saveCoverEdit(id){
   c.qty = qty;
   c.lowThreshold = lowThreshold;
   c.source = source;
-  c.updated = toISO();
+  c.updated = editStamp();
   c.history = c.history || [];
   if(oldQty !== qty){
     c.history.push({at: toISO(), action:'manual-edit', qtyBefore: oldQty, qty, by: ROLES[currentRole].label});
@@ -22763,7 +22930,7 @@ function adjustCoverQty(id, delta){
   }
   snapshot('adjust cover qty');
   c.qty += delta;
-  c.updated = toISO();
+  c.updated = editStamp();
   c.history = c.history || [];
   c.history.push({at: toISO(), action: delta>0 ? 'manual-increment' : 'manual-decrement', qty: c.qty, by: ROLES[currentRole].label});
   // If we just added stock and there are pending entries, fulfill them
@@ -22858,7 +23025,7 @@ function saveCoverTransfer(fromId){
   snapshot('manual cover transfer');
   // Decrement source
   fromRow.qty -= qty;
-  fromRow.updated = toISO();
+  fromRow.updated = editStamp();
   fromRow.history = fromRow.history || [];
   fromRow.history.push({
     at: toISO(),
@@ -22889,7 +23056,7 @@ function saveCoverTransfer(fromId){
     coverInventory.push(toRow);
   }
   toRow.qty += qty;
-  toRow.updated = toISO();
+  toRow.updated = editStamp();
   toRow.history = toRow.history || [];
   toRow.history.push({
     at: toISO(),
@@ -23347,7 +23514,7 @@ function markRequestShipped(rid){
     );
     if(invRow){
       invRow.qty -= r.qty;
-      invRow.updated = toISO();
+      invRow.updated = editStamp();
       invRow.history = invRow.history || [];
       invRow.history.push({at: toISO(), action:'shipped-to-factory', requestId: rid, qty: r.qty, by: ROLES[currentRole].label});
       invDeducted = r.qty;
@@ -23437,7 +23604,7 @@ function markRequestReceived(rid){
       coverInventory.push(invRow);
     }
     invRow.qty += r.qty;
-    invRow.updated = toISO();
+    invRow.updated = editStamp();
     invRow.history = invRow.history || [];
     invRow.history.push({at: toISO(), action:'received-from-warehouse', requestId: rid, qty: r.qty, by: ROLES[currentRole].label});
     // Try to fulfill any pending entries with the new stock
@@ -23448,7 +23615,7 @@ function markRequestReceived(rid){
   if(r.autoCreated && r.marriageId){
     const m = marriages.find(x => x.id === r.marriageId);
     if(m && m.status === 'split-pending'){
-      m.status = 'completed';
+      m.status = 'completed'; m.updatedAt = editStamp();
       m.dispatchedDate = m.dispatchedDate || m.splitDispatchedDate || toISO();
       m.splitDispatchCompletedAt = toISO();
       extraNote += ` · Marriage for S/N ${m.spaSn} now completed`;
@@ -23529,7 +23696,7 @@ function saveRequestNotes(rid){
   snapshot('edit request notes/date');
   r.notes = ta ? ta.value.trim() : (r.notes || '');
   r.targetDate = (di && di.value) ? di.value : '';   // 'YYYY-MM-DD' or cleared
-  r.notesUpdatedAt = toISO();                         // drives last-edit-wins on sync
+  r.notesUpdatedAt = editStamp();                         // drives last-edit-wins on sync
   const panel = document.getElementById('req-float-panel'); if(panel) panel.innerHTML = '';
   toast('Notes saved','ok');
   renderRequests(); updBadges();
@@ -24392,14 +24559,17 @@ function runIntegrityChecks(){
     marriages.forEach(m => {
       if(m.status !== 'pending' || !m.accessoryId) return;
       const acc = factory.find(f => f.id === m.accessoryId);
-      if(acc && (acc.trackingState === 'in-transit' || acc.trackingState === 'received-at-wh' || acc.trackingState === 'received-at-warehouse')){
-        m.status = 'delivered';
+      if(acc && (acc.trackingState === 'received-at-wh' || acc.trackingState === 'received-at-warehouse')){
+        // PHYSICAL ARRIVAL ONLY: an accessory merely in-transit (still on the truck)
+        // must NOT auto-deliver the marriage — the spa stays blocked from dispatch
+        // until the accessory is physically received at the warehouse.
+        m.status = 'delivered'; m.updatedAt = editStamp();
         m.deliveredDate = m.deliveredDate || toISO();
         if(!m.location) m.location = 'MINV';
         fixed++;
       } else if(!acc){
         // Factory accessory gone — assume already received and update marriage
-        m.status = 'delivered';
+        m.status = 'delivered'; m.updatedAt = editStamp();
         m.deliveredDate = m.deliveredDate || toISO();
         if(!m.location) m.location = 'MINV';
         fixed++;
@@ -24542,7 +24712,7 @@ function runIntegrityChecks(){
       if(!m && it.dealer) m = marriages.find(x => norm(x.accessoryName) === norm(it.dealer));
       if(m){
         if(m.status !== 'delivered' && m.status !== 'completed' && m.status !== 'fulfilled'){
-          m.status = 'delivered';
+          m.status = 'delivered'; m.updatedAt = editStamp();
           m.deliveredDate = m.deliveredDate || ((it.arrivedAt || '').split('T')[0] || toISO());
         }
         if(!m.location) m.location = 'MINV';
@@ -24652,7 +24822,83 @@ function runIntegrityChecks(){
     }
   } catch(e){ console.warn('[check 11c]', e); }
 
-  // ─── Check 12: inside-the-tub marriages whose tub now exists but isn't packed ───
+  // ─── Check 11d: Floor / Incoming copies of spas already dispatched to a dealer ───
+  // A physical tub lives in exactly ONE place. Once dispatched to a dealer it must
+  // not also sit on the floor or in the incoming queue. This happens under stale
+  // multi-device sync: device A dispatches a tub (removes it from units), but a
+  // device B that never saw the dispatch pushes its older state to the cloud; when
+  // A pulls B's stale state, _mergeUnits re-adds the floor copy (its "elsewhere"
+  // guard is computed from the REMOTE state, which doesn't yet know about A's local
+  // dispatch). Likewise the incoming union can re-add a pre-placement entry. This is
+  // the units/incoming counterpart to Check 11c (factory vs dispatched): a dispatched
+  // (non-returned) S/N is authoritative — drop any floor/incoming duplicate of it.
+  try {
+    const dispatchedOut = new Set(
+      (Array.isArray(dispatched) ? dispatched : [])
+        .filter(d => d && d.sn != null && String(d.sn).trim() !== '' && d.deliveryStatus !== 'returned')
+        .map(d => String(d.sn).trim())
+    );
+    if(dispatchedOut.size){
+      const beforeU = units.length;
+      const removedIds = [];
+      units = units.filter(u => {
+        if(u && u.sn != null && dispatchedOut.has(String(u.sn).trim())){ removedIds.push(u.id); return false; }
+        return true;
+      });
+      const beforeI = incoming.length;
+      incoming = incoming.filter(it => !(it && it.sn != null && dispatchedOut.has(String(it.sn).trim())));
+      if(removedIds.length && typeof queue !== 'undefined' && Array.isArray(queue)){
+        const rm = new Set(removedIds);
+        queue = queue.filter(q => !rm.has(q.id));
+      }
+      const droppedU = beforeU - units.length;
+      const droppedI = beforeI - incoming.length;
+      if(droppedU > 0) findings.push(`Removed ${droppedU} floor copy(ies) of spa(s) already dispatched to a dealer`);
+      if(droppedI > 0) findings.push(`Removed ${droppedI} Incoming entry(ies) of spa(s) already dispatched to a dealer`);
+    }
+  } catch(e){ console.warn('[check 11d]', e); }
+
+  // ─── Check 11e: spa received at the warehouse (incoming) AND on a factory
+  // return-leg (in-transit to-factory / received-back-at-factory / rejected) at the
+  // same time. Only reachable after a long network partition where each side drove
+  // the SAME tub to a different terminal. A physical tub is in ONE place — keep the
+  // record touched most recently and drop the stale copy so it isn't double-counted.
+  try {
+    const facBack = new Map();   // sn -> factory return-leg row
+    factory.forEach(f => {
+      if(!f || f.sn == null) return;
+      if(f.type === 'accessory' || f.type === 'misc') return;
+      const isReturn = (f.trackingState === 'in-transit' && f.transitDir === 'to-factory') ||
+                       f.trackingState === 'received-back-at-factory' ||
+                       /reject|return/i.test(f.trackingState || '');
+      if(isReturn) facBack.set(String(f.sn).trim(), f);
+    });
+    if(facBack.size){
+      const ts = v => { const t = Date.parse(v); return isNaN(t) ? 0 : t; };
+      const histTs = o => Math.max(0, ...(((o && o.trackingHistory) || []).map(h => ts(h && h.at))));
+      const incTs = it => Math.max(ts(it.arrivedAt), ts(it.date), histTs(it));
+      const facTs = f => Math.max(ts(f.added), histTs(f));
+      const dropIncIds = [], dropFacIds = [];
+      incoming.forEach(it => {
+        if(!it || it.sn == null) return;
+        const f = facBack.get(String(it.sn).trim());
+        if(!f) return;
+        if(facTs(f) >= incTs(it)) dropIncIds.push(it.id); else dropFacIds.push(f.id);
+      });
+      if(dropIncIds.length){
+        const rm = new Set(dropIncIds);
+        incoming = incoming.filter(it => !rm.has(it.id));
+        if(typeof queue !== 'undefined' && Array.isArray(queue)) queue = queue.filter(q => !rm.has(q.id));
+        findings.push(`Reconciled ${dropIncIds.length} spa(s) received at the warehouse but also returned to the factory (kept the factory copy)`);
+      }
+      if(dropFacIds.length){
+        const rm = new Set(dropFacIds);
+        factory = factory.filter(f => !rm.has(f.id));
+        findings.push(`Reconciled ${dropFacIds.length} spa(s) returned to the factory but also received at the warehouse (kept the warehouse copy)`);
+      }
+    }
+  } catch(e){ console.warn('[check 11e]', e); }
+
   // An 'inside' marriage created before its tub existed waits as pending. Once the
   // tub shows up (created by factory, imported, etc.) we pack the accessory inside it
   // (looseAccessories) and mark the marriage delivered. Self-heals regardless of how
@@ -24668,7 +24914,7 @@ function runIntegrityChecks(){
         const added = attachInsideAccessory(found.record, m.accessoryName, m.accessoryQty);
         m.location = null;   // inside-type never sits on the MINV shelf
         if(m.status !== 'delivered'){
-          m.status = 'delivered';
+          m.status = 'delivered'; m.updatedAt = editStamp();
           m.deliveredDate = m.deliveredDate || toISO();
         }
         if(added) packed++;
