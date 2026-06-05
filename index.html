@@ -4358,9 +4358,15 @@ body.dark-mode .mar-card-track {
   <div style="background:linear-gradient(135deg,#eef2ff 0%,#fff 100%);border:1px solid #c7d2fe;border-radius:var(--r-lg);padding:13px 16px;margin-bottom:12px;display:flex;align-items:center;gap:12px">
     <div style="width:38px;height:38px;border-radius:50%;background:#eef2ff;display:flex;align-items:center;justify-content:center;flex-shrink:0;border:1px solid #c7d2fe;font-size:18px">🛌</div>
     <div style="flex:1">
-      <div style="font-size:13px;font-weight:700;color:var(--text1)">Cover Inventory — Warehouse Storage <span class="help-bubble" onclick="event.stopPropagation();showHelp('pending-cover',this)" title="What's pending?">?</span></div>
+      <div style="font-size:13px;font-weight:700;color:var(--text1)">Inventory — Covers &amp; Materials <span class="help-bubble" onclick="event.stopPropagation();showHelp('pending-cover',this)" title="What's pending?">?</span></div>
       <div style="font-size:11px;color:var(--text2);margin-top:2px">Physical covers waiting to be paired with spas. When you save a spa with a cover, stock here decrements automatically.</div>
     </div>
+    <span style="display:inline-flex;align-items:center;gap:5px;font-size:11px;color:var(--text2);font-weight:600;margin-right:4px">Max/position
+      <input type="number" min="1" id="cover-cap-in" value="30" onchange="setCoverCellCap(this.value)" style="width:54px;padding:4px 6px;border:1px solid var(--line);border-radius:6px;font-size:12px;font-weight:700">
+    </span>
+    <button class="btn btn-sm" onclick="openCoverArrival()" style="background:var(--teal);border-color:var(--teal);color:#fff">
+      📦 Log arrival
+    </button>
     <button class="btn btn-p btn-sm" onclick="openCoverAdd()">
       <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 2v12M2 8h12"/></svg>
       Add Cover Stock
@@ -4698,7 +4704,7 @@ let _fbInitAttempts = 0;
 //   /app_version/current  (in Firebase console, manually, OR call
 //   pushVersionToFirebase() from the Admin console at deploy time)
 // ══════════════════════════════════════════════════════════════════
-const APP_VERSION = 'v4.77';
+const APP_VERSION = 'v4.81';
 window.APP_VERSION = APP_VERSION;
 
 // ── DATA EPOCH (generation guard) ────────────────────────────────────
@@ -5738,6 +5744,23 @@ function mergeCfgPreservingPins(localCfg, remoteCfg){
     rolePasswords: mergedPins,
     rolePasswordsUpdatedAt: mergedTs
   });
+  // DEEP-MERGE map-style cfg objects so a remote with empty/missing entries can NOT
+  // wipe a non-empty local one (the failure mode that erased the custom floor layout).
+  // Union of keys; on a key present on BOTH sides, the remote value wins so genuine
+  // edits still propagate. This is add-wins (a deleted key can resurrect from a stale
+  // peer) — an intentional trade vs. silent data loss.
+  const _deepMergeMap = (loc, rem) => {
+    const L = (loc && typeof loc === 'object') ? loc : {};
+    const R = (rem && typeof rem === 'object') ? rem : {};
+    const out = Object.assign({}, L);
+    for(const k in R){ if(R[k] != null && R[k] !== '') out[k] = R[k]; }
+    return out;
+  };
+  ['coverModelCell','rowOverrides','cellOverrides'].forEach(key => {
+    const hasL = localCfg && localCfg[key] && typeof localCfg[key] === 'object';
+    const hasR = remoteCfg[key] && typeof remoteCfg[key] === 'object';
+    if(hasL || hasR) merged[key] = _deepMergeMap(localCfg && localCfg[key], remoteCfg[key]);
+  });
   return merged;
 }
 
@@ -6088,18 +6111,59 @@ function _mergeCovers(local, remote){
       //   3. mergedQty = max(stockLevel) − |union of decrements|  (clamped ≥ 0).
       //   4. Union history + pending (dedup) so the full ledger survives and future
       //      decrements stay idempotent; keep the newest scalar fields/updated stamp.
+      // CONSERVATION-SAFE MERGE (covers). qty is the only authoritative count, but
+      // history records the trackable mutations. We reconstruct a comparable "base"
+      // per side by stripping that side's OWN trackable mutations, then re-apply the
+      // UNION across both sides:
+      //   • decrements — idempotent per spaSn (a tub consuming the cover)
+      //   • arrivals   — receiving events, idempotent per mid, each carries its qty
+      //   • manual '+1' increments are NOT uniquely keyable, so they stay folded into
+      //     the residual and we take max(residual) (best-effort, as the old merge did).
+      //   residual  = qty − Σ(own arrival qty) + |own decrements|   (≈ base + manual +1s)
+      //   mergedQty = max(residual) + Σ(union arrival qty) − |union decrements|
+      // When there are no arrivals this reduces EXACTLY to the prior decrement-only
+      // merge, so it's backward-compatible — it only adds correct handling of
+      // concurrent arrivals (which previously lost one via max-of-level).
+      // CREDITS = positive mutations (arrivals carry qty, manual '+1' increments = 1),
+      //   each idempotent per its unique mutation id `mid`.
+      // DEBITS  = decrements, idempotent per spaSn.
       const decSet = h => new Set((Array.isArray(h)?h:[])
         .filter(e => e && e.action === 'decrement' && e.spaSn != null && String(e.spaSn) !== '')
         .map(e => String(e.spaSn)));
+      const creditList = h => (Array.isArray(h)?h:[])
+        .filter(e => e && (e.action === 'arrival' || e.action === 'increment'))
+        .map(e => ({ key: (e.mid != null ? 'm'+e.mid
+                            : 't'+(e.at||'')+'|'+(e.action||'')+'|'+(e.qty!=null?e.qty:1)+'|'+(e.spaSn||'')+'|'+(e.reason||'')),
+                     qty: (e.action === 'increment') ? 1 : (typeof e.qty === 'number' ? e.qty : (parseInt(e.qty)||0)) }));
+      const sumC = list => list.reduce((acc,a)=> acc + a.qty, 0);
       const decL = decSet(c.history), decR = decSet(rem.history);
-      const union = new Set([...decL, ...decR]);
-      const levelL = (typeof c.qty === 'number' ? c.qty : 0) + decL.size;
-      const levelR = (typeof rem.qty === 'number' ? rem.qty : 0) + decR.size;
-      const mergedQty = Math.max(0, Math.max(levelL, levelR) - union.size);
-      const histSig = e => [e&&e.at, e&&e.action, e&&e.spaSn, e&&e.reason, e&&e.queuedAt].join('~');
+      const decUnion = new Set([...decL, ...decR]);
+      const credL = creditList(c.history), credR = creditList(rem.history);
+      const credUnion = new Map();
+      [...credL, ...credR].forEach(a => { if(!credUnion.has(a.key)) credUnion.set(a.key, a.qty); });
+      const credUnionSum = Array.from(credUnion.values()).reduce((acc,q)=> acc + q, 0);
+      // BASE = stock level attributable to neither tracked credits nor tracked debits
+      // (the pre-history baseline + any legacy adjustments). It is INFERRED ONCE from
+      // an accurate (never-clamped) qty — qty = base + ownCredits − ownDecs always holds
+      // for an un-merged row because per-device decrements are guarded by qty>0 — then
+      // STORED and reused. Reusing the stored base (instead of re-deriving it from a
+      // possibly-clamped qty) is what prevents a phantom gain when an over-sold row that
+      // was clamped to 0 under split-brain later receives new stock.
+      const inferBase = (row, dec) => (typeof row.qty === 'number' ? row.qty : 0) - sumC(creditList(row.history)) + dec.size;
+      const baseL = (typeof c.base   === 'number') ? c.base   : inferBase(c, decL);
+      const baseR = (typeof rem.base === 'number') ? rem.base : inferBase(rem, decR);
+      const base = Math.max(baseL, baseR);
+      const mergedQty = Math.max(0, base + credUnionSum - decUnion.size);
+      const histSig = e => [e&&e.at, e&&e.action, e&&e.spaSn, e&&e.reason, e&&e.queuedAt, e&&e.mid].join('~');
+      // Collapse 'decrement' entries by spaSn: one spa consumes exactly one cover, so
+      // even if two devices each recorded the consumption for the same spa under
+      // split-brain, the audit should show it ONCE. (Qty already dedups by spaSn via
+      // decUnion; this keeps the history ledger consistent with that.)
+      const histKey = e => (e && e.action === 'decrement' && e.spaSn != null && String(e.spaSn) !== '')
+        ? ('dec~' + String(e.spaSn)) : histSig(e);
       const histMap = new Map();
       [...(Array.isArray(rem.history)?rem.history:[]), ...(Array.isArray(c.history)?c.history:[])]
-        .forEach(e => { if(e){ const s = histSig(e); if(!histMap.has(s)) histMap.set(s, e); } });
+        .forEach(e => { if(e){ const s = histKey(e); if(!histMap.has(s)) histMap.set(s, e); } });
       const pendMap = new Map();
       [...(Array.isArray(rem.pending)?rem.pending:[]), ...(Array.isArray(c.pending)?c.pending:[])]
         .forEach(p => { if(p){ const s = String(p.spaSn||'') + '~' + (p.queuedAt||''); if(!pendMap.has(s)) pendMap.set(s, p); } });
@@ -6107,6 +6171,7 @@ function _mergeCovers(local, remote){
       const rt = (rem && rem.updated) || '';
       const newer = (lt > rt) ? c : rem;
       merged[i] = Object.assign({}, newer, {
+        base: base,
         qty: mergedQty,
         history: Array.from(histMap.values()),
         pending: Array.from(pendMap.values()),
@@ -6653,16 +6718,31 @@ const COVER_MODEL_TO_CELL = {
 function cellTypeForCoverModel(model){
   const m = (model||'').trim().toLowerCase();
   if(!m) return null;
+  // 1) USER OVERRIDE (cfg.coverModelCell) — Alberto can assign any model to any
+  //    row-15 cell from the floor map. An empty-string override means "explicitly
+  //    unmapped" (hides a model that a default would otherwise place).
+  const ov = (typeof cfg !== 'undefined' && cfg && cfg.coverModelCell && typeof cfg.coverModelCell === 'object') ? cfg.coverModelCell : null;
+  if(ov && Object.prototype.hasOwnProperty.call(ov, m)) return ov[m] || null;
+  // 2) HARDCODED DEFAULTS
   if(COVER_MODEL_TO_CELL[m]) return COVER_MODEL_TO_CELL[m];
   for(const k in COVER_MODEL_TO_CELL){ if(m.includes(k)) return COVER_MODEL_TO_CELL[k]; }
-  return null;   // unmapped models (e.g. Avalanche Luxe, Cassian) have no floor cell yet
+  return null;   // unmapped models have no floor cell yet — assign one from the cell panel
 }
 // Warehouse cover stock that belongs to a given floor cover-cell type.
 // Returns {qty, low, lines:[{color, model, qty, low}]}.
+// Max covers per floor position (row 15). Default 30; configurable via cfg.coverCellCap
+// (editable from the Inventory page) so Alberto can raise it later.
+function coverCellCap(){
+  const v = (typeof cfg !== 'undefined' && cfg && parseInt(cfg.coverCellCap)) || 0;
+  return v > 0 ? v : 30;
+}
 function coverCellStock(cellType){
   let qty = 0, low = false; const lines = [];
   (Array.isArray(coverInventory) ? coverInventory : []).forEach(c => {
     if(!c || (c.source||'warehouse') !== 'warehouse') return;
+    // "Pallet" covers are already allocated (matched to a tub / dispatched), so they
+    // are NOT available warehouse stock — exclude them from the on-floor count.
+    if(/pallet/i.test(c.color || '')) return;
     if(cellTypeForCoverModel(c.model) !== cellType) return;
     const q = c.qty || 0;
     qty += q;
@@ -6958,7 +7038,7 @@ let calYear = new Date().getFullYear();
 let calMonth = new Date().getMonth();
 let calView = 'month';   // 'month' | 'week' | 'day'
 let selDay = null;
-let cfg = {emails:[], gcal:false, gcalEmail:'', auth:['Alberto','Jarred','Tony','Dan'], rolePasswords:{admin:'2804',warehouse:'0000',factory:'0000',marriages:'0000',transit:'0000',organizer:'0000',viewer:'0000'}};
+let cfg = {emails:[], gcal:false, gcalEmail:'', coverCellCap:30, coverModelCell:{}, auth:['Alberto','Jarred','Tony','Dan'], rolePasswords:{admin:'2804',warehouse:'0000',factory:'0000',marriages:'0000',transit:'0000',organizer:'0000',viewer:'0000'}};
 
 // ── DEALER COLOR CODING ──
 // Assigns a stable color to each dealer name via hash, so all visualizations of the same
@@ -9457,7 +9537,7 @@ const PAGES = {
   factory:['Factory Warehouse','Aspen production · Spas & accessories ready to ship'],
   marriages:['Marriages','Spa + accessory pairings — must ship together'],
   loadingbay:['Loading Bay · Warehouse','Outbound · tubs the warehouse staged for the truck back to the factory'],
-  covers:['Cover Inventory','Spa covers in warehouse storage · auto-decrements when assigned to a spa'],
+  covers:['Inventory','Covers &amp; materials in warehouse storage · log arrivals with photo + PDF'],
   incoming:['Incoming','All items arriving to warehouse · spas · accessories · marriages · materials · covers'],
   intransit:['In Transit','Spas & accessories loaded on truck · waiting at warehouse'],
   truck:['Loading Bay · Factory','At the factory · ready to load on the truck to the warehouse · scan QR to load'],
@@ -10366,8 +10446,90 @@ function setupDropExtended(el,pos){
 // Convenience: open the position-detail panel for `pos`. Wraps the older
 // showCellPanel(pos, cu) which requires the list of units already filtered.
 // All v2 drawMap call sites use this single-argument form.
+// Cover storage cells (15A-* / 15B-*) hold COVERS from the warehouse coverInventory,
+// NOT tubs — so the normal unit panel (which filters `units` by pos) comes up empty.
+// This panel shows the real cover stock for the model line that lives in that cell
+// (color · model · qty), with quick links to the Cover Inventory. Fixes "clicking a
+// cover cell shows nothing" — the covers were always there, just not surfaced here.
+function _coverTypeForCol(colLetter){
+  return (typeof COVER_TYPES_NEW !== 'undefined')
+    ? COVER_TYPES_NEW.find(c => c.a === colLetter || c.b === colLetter) || null
+    : null;
+}
+function showCoverCellPanel(pos){
+  selPos = pos; if(typeof drawMap === 'function') drawMap();
+  const colLetter = String(pos).split('-')[1] || '';
+  const ctDef = _coverTypeForCol(colLetter);
+  const cellType = ctDef ? ctDef.t : null;
+  const modelsLabel = ctDef ? ctDef.name : '';
+  const st = (cellType && typeof coverCellStock === 'function') ? coverCellStock(cellType) : {qty:0, low:false, lines:[]};
+  const sw = {black:'#111827','black pallet':'#111827',white:'#f8fafc',gray:'#9ca3af',grey:'#9ca3af',tan:'#d2b48c',blue:'#3b82f6',brown:'#92400e',silver:'#cbd5e1'};
+  const swatch = c => sw[String(c||'').toLowerCase()] || '#cbd5e1';
+  const _capP = (typeof coverCellCap === 'function') ? coverCellCap() : 30;
+  const _overP = st.qty > _capP;
+  const totalColor = st.qty<=0 ? '#dc2626' : (_overP ? '#dc2626' : (st.low ? '#b45309' : '#047857'));
+  const rows = st.lines.length
+    ? st.lines.map(l => `<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 11px;border:1px solid var(--line);border-radius:8px;margin-bottom:6px;background:${l.low?'#fef2f2':'var(--bg2)'}">
+        <div style="display:flex;align-items:center;gap:8px">
+          <span style="display:inline-block;width:12px;height:12px;border-radius:3px;border:1px solid #94a3b8;background:${swatch(l.color)}"></span>
+          <span style="font-weight:700;color:var(--text1);font-size:13px">${l.color}${l.model?` · ${l.model}`:''}</span>
+        </div>
+        <span style="font-family:var(--mono);font-weight:800;font-size:15px;color:${l.low?'#dc2626':'#047857'}">${l.qty}${l.low?' ⚠':''}</span>
+      </div>`).join('')
+    : `<div style="padding:14px;text-align:center;color:var(--text3);font-size:12px">No warehouse cover stock mapped to this cell${modelsLabel?` (models: ${modelsLabel})`:''}.</div>`;
+  const canAdd = (typeof canEdit !== 'function') || canEdit();
+  const presetModel = (st.lines[0] && st.lines[0].model) ? st.lines[0].model : '';
+  const arrivals = (typeof coverArrivalsFor === 'function' && cellType) ? coverArrivalsFor(cellType).slice(0, 6) : [];
+  const arrHtml = arrivals.length ? `<hr class="sep">
+    <div style="font-size:11px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.05em;margin:2px 2px 7px">📦 Recent arrivals</div>
+    ${arrivals.map(a => `<div style="display:flex;justify-content:space-between;align-items:center;padding:7px 10px;border:1px solid var(--line);border-radius:8px;margin-bottom:5px;background:var(--bg2)">
+      <div style="font-size:12px;color:var(--text1)"><b>+${a.qty}</b> ${a._color} ${a._model}<div style="font-size:10px;color:var(--text3)">${a.date||''}${a.by?` · ${a.by}`:''}${a.note?` · ${a.note}`:''}</div></div>
+      <div style="display:flex;gap:6px">${a.photoUrl?`<a href="${a.photoUrl}" target="_blank" rel="noopener" style="font-size:11px;color:var(--accent);font-weight:600">📷 Photo</a>`:''}${a.pdfUrl?`<a href="${a.pdfUrl}" target="_blank" rel="noopener" style="font-size:11px;color:var(--accent);font-weight:600">📄 PDF</a>`:''}</div>
+    </div>`).join('')}` : '';
+  const mappedModels = (typeof _modelsForCell === 'function' && cellType) ? _modelsForCell(cellType) : [];
+  const mapHtml = cellType ? `<hr class="sep">
+    <div style="font-size:11px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.05em;margin:2px 2px 7px">🗺 Models in this position (${cellType})</div>
+    <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px">
+      ${mappedModels.length ? mappedModels.map(m => `<span style="display:inline-flex;align-items:center;gap:6px;background:var(--bg2);border:1px solid var(--line);border-radius:14px;padding:3px 10px;font-size:11.5px;font-weight:600;text-transform:capitalize">${m}${canAdd?`<span onclick="unmapCoverModel('${String(m).replace(/'/g,"\\'")}','${cellType}')" style="cursor:pointer;color:#dc2626;font-weight:800" title="Remove from this position">×</span>`:''}</span>`).join('') : '<span style="font-size:11px;color:var(--text3)">No models assigned to this position yet.</span>'}
+    </div>
+    ${canAdd?`<div style="display:flex;gap:6px;align-items:center">
+      <input class="fi" id="map-model-in" list="dl-map-model" placeholder="Assign a model to this position…" style="flex:1;font-size:12px">
+      <datalist id="dl-map-model">${libOptions('coverModel')}</datalist>
+      <button class="btn btn-sm" onclick="assignModelToCell('${cellType}')" style="background:var(--teal);border-color:var(--teal);color:#fff">Assign</button>
+    </div>`:''}` : '';
+  document.getElementById('cell-panel').innerHTML = `<div class="det-panel">
+    <div class="dp-hd">
+      <div><div class="dp-pos">Position ${pos} · 🪣 Covers</div><div class="dp-sub">${cellType?`${cellType} — ${modelsLabel}`:'Cover storage'} · warehouse stock</div></div>
+      <button class="btn btn-sm" onclick="closePanel()">✕ Close</button>
+    </div>
+    <div style="display:flex;align-items:baseline;gap:8px;margin:4px 2px 12px">
+      <span style="font-family:var(--mono);font-weight:800;font-size:26px;line-height:1;color:${totalColor}">${st.qty}</span>
+      <span style="font-size:13px;color:var(--text3);font-weight:700">/ ${_capP}</span>
+      <span style="font-size:12px;color:var(--text2);font-weight:600">cover${st.qty===1?'':'s'} in this line${_overP?' · ⚠ over capacity':(st.low?' · low stock':'')}</span>
+    </div>
+    ${rows}
+    ${arrHtml}
+    ${mapHtml}
+    <hr class="sep">
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      ${canAdd?`<button class="btn btn-sm" onclick="openCoverArrival('${String(presetModel).replace(/'/g,"\\'")}','Black')" style="background:var(--teal);border-color:var(--teal);color:#fff">📦 Log arrival</button>`:''}
+      <button class="btn btn-p btn-sm" onclick="goV('covers')">Open Cover Inventory</button>
+      ${canAdd?`<button class="btn btn-sm" onclick="openCoverAdd('warehouse')">+ Add cover</button>`:''}
+    </div>
+  </div>`;
+  document.getElementById('float-panel').innerHTML='';
+  document.getElementById('cell-panel').scrollIntoView({behavior:'smooth',block:'nearest'});
+}
+
 function selPosPanel(pos){
   if(!pos) return;
+  // Cover storage cells (15A-* / 15B-*) hold COVERS, not tubs. Route the click to
+  // the cover-stock panel instead of the empty unit panel. Only cover/roll cells —
+  // not the elevator corner (15B-N/15B-O) — go here.
+  if(/^15[AB]-/.test(String(pos))){
+    const _ck = String(pos).split('-'); const _t = (typeof cellTypeNew === 'function') ? cellTypeNew(_ck[0], _ck[1]||'') : 'cf';
+    if((_t === 'cf' || _t === 'cb' || _t === 'pstor') && typeof showCoverCellPanel === 'function'){ showCoverCellPanel(pos); return; }
+  }
   const cu = units.filter(u => u.pos === pos);
   // Include swim-pair partner units (right half of a pair)
   const owner = swimPairOwnerOf(pos);
@@ -10491,8 +10653,10 @@ function drawMap(){
       // a count there too would look like double the covers.
       const _ct = (rowKey === '15A' || rowKey === '15B') ? coverTypeFor(colLetter) : null;
       const _st = (t === 'cf' && _ct && _ct !== '—' && typeof coverCellStock === 'function') ? coverCellStock(_ct) : null;
+      const _cap = (typeof coverCellCap === 'function') ? coverCellCap() : 30;
+      const _over = _st && _st.qty > _cap;
       const _stockHtml = _st
-        ? `<div style="margin-top:4px;font-family:var(--mono);font-weight:800;font-size:15px;line-height:1;color:${_st.qty<=0?'#dc2626':(_st.low?'#b45309':'#047857')}">${_st.qty}<span style="font-size:8px;font-weight:600;opacity:.7"> cover${_st.qty===1?'':'s'}</span></div>`
+        ? `<div style="margin-top:4px;font-family:var(--mono);font-weight:800;font-size:15px;line-height:1;color:${_st.qty<=0?'#dc2626':(_over?'#dc2626':(_st.low?'#b45309':'#047857'))}">${_st.qty}<span style="font-size:8px;font-weight:600;opacity:.7">/${_cap}</span></div>${_over?`<div style="font-size:7px;font-weight:800;color:#dc2626;letter-spacing:.03em">OVER CAP</div>`:''}`
         : '';
       cell.innerHTML = `<div style="font-size:11px;font-weight:700;color:${isBack?'#1e3a8a':(t==='pstor'?'#78350f':'#1e3a8a')};letter-spacing:.04em;text-align:center;line-height:1.1">${label}</div>${_stockHtml}<div style="font-size:9px;font-family:var(--mono);color:${isBack?'#3b82f6':(t==='pstor'?'#b45309':'#60a5fa')};margin-top:3px">${pos}</div>
         <div style="position:absolute;top:3px;right:4px;font-size:9px;color:${isBack?'#3b82f6':(t==='pstor'?'#b45309':'#60a5fa')};opacity:.6;cursor:pointer" onclick="event.stopPropagation();openCellEditor('${pos}')" title="Edit cell type">⚙</div>`;
@@ -19845,7 +20009,7 @@ function incrementCoverStock(color, model, source, spaSn, reason){
   row.qty += 1;
   row.updated = editStamp();
   row.history = row.history || [];
-  row.history.push({at: toISO(), action:'increment', spaSn: spaSn||'', by: ROLES[currentRole].label, reason: reason||''});
+  row.history.push({at: toISO(), mid: (Date.now().toString(36) + Math.random().toString(36).slice(2,8)), action:'increment', spaSn: spaSn||'', by: ROLES[currentRole].label, reason: reason||''});
   // After increment, try to fulfill any pending requests for this cover
   fulfillPendingCovers(row);
 }
@@ -22665,6 +22829,8 @@ function setCovTab(tab){
 }
 
 function renderCoverInventory(){
+  // Keep the "Max/position" header input in sync with the configured cap
+  try { const _ci = document.getElementById('cover-cap-in'); if(_ci && typeof coverCellCap === 'function') _ci.value = coverCellCap(); } catch(e){}
   // Per-source stats — separate totals so user sees what's where at a glance
   const wh = coverInventory.filter(c => (c.source||'warehouse') === 'warehouse');
   const fc = coverInventory.filter(c => (c.source||'warehouse') === 'factory');
@@ -22756,6 +22922,202 @@ function renderCoverInventory(){
   </table></div>`;
   // Keep Factory Requests in sync: close any auto-created cover request now back in stock.
   try{ reconcileCoverRequests(); }catch(e){}
+}
+
+// ───────────────────────────────────────────────────────────────────
+// COVER ARRIVALS — log a shipment of covers arriving at the warehouse.
+// Increments the live Cover Inventory for that model (so the Floor Map cover
+// cell updates) AND records the arrival inside the cover row's history (which
+// is synced + merge-unioned by _mergeCovers), with an optional photo + PDF
+// uploaded to Firebase Storage (only the download URL is kept in state, so the
+// blob-stripper / sync stay lean). This is the receiving counterpart to the
+// manual +/- adjustments — "30 Monarch arrived today" in one record.
+// ───────────────────────────────────────────────────────────────────
+let _arrPhotoFile = null, _arrPdfFile = null;
+function _arrCellHint(model){
+  const t = (typeof cellTypeForCoverModel === 'function') ? cellTypeForCoverModel(model) : null;
+  const def = (typeof COVER_TYPES_NEW !== 'undefined' && t) ? COVER_TYPES_NEW.find(c => c.t === t) : null;
+  return t ? `${t}${def ? ' · ' + def.name : ''} (row 15)` : 'no floor cell mapped for this model yet';
+}
+function arrPrevPhoto(ev){
+  const f = ev.target.files && ev.target.files[0]; if(!f) return;
+  _arrPhotoFile = f;
+  const r = new FileReader();
+  r.onload = () => { const img = document.getElementById('arr-photo-prev'); if(img){ img.src = r.result; img.style.display = 'block'; } };
+  r.readAsDataURL(f);
+}
+function arrPickPdf(ev){
+  const f = ev.target.files && ev.target.files[0]; if(!f) return;
+  _arrPdfFile = f;
+  const lbl = document.getElementById('arr-pdf-name'); if(lbl) lbl.textContent = '📄 ' + f.name;
+}
+function arrModelChange(){
+  const m = (document.getElementById('arr-model')?.value || '').trim();
+  const h = document.getElementById('arr-cell-hint'); if(h) h.textContent = m ? _arrCellHint(m) : '—';
+}
+function setCoverCellCap(v){
+  const n = parseInt(v) || 0;
+  if(n < 1){ toast('Max per position must be at least 1','err'); return; }
+  cfg = cfg || {}; cfg.coverCellCap = n;
+  saveState();
+  if(typeof renderCoverInventory === 'function') renderCoverInventory();
+  const _fl = document.getElementById('floor'); if(_fl && typeof drawMap === 'function'){ try { drawMap(); } catch(e){} }
+  toast(`Max per position set to ${n} covers`,'ok');
+}
+function openCoverArrival(presetModel, presetColor){
+  _arrPhotoFile = null; _arrPdfFile = null;
+  const color = presetColor || 'Black';
+  const model = presetModel || '';
+  const host = document.getElementById('cover-float-panel') || document.getElementById('cell-panel');
+  if(!host) return;
+  host.innerHTML = `<div class="det-panel">
+    <div class="dp-hd">
+      <div><div class="dp-pos">📦 Log Cover Arrival</div><div class="dp-sub">Adds to warehouse stock + keeps a dated record with photo + PDF</div></div>
+      <button class="btn btn-sm" onclick="document.getElementById('cover-float-panel')&&(document.getElementById('cover-float-panel').innerHTML='');closePanel&&closePanel()">✕</button>
+    </div>
+    <div class="fgrid fgrid3" style="margin-bottom:8px">
+      <div class="fg"><label class="fl">Color *</label>
+        <input class="fi" id="arr-color" list="dl-arr-color" value="${String(color).replace(/"/g,'&quot;')}" placeholder="Black">
+        <datalist id="dl-arr-color">${libOptions('cover')}</datalist>
+      </div>
+      <div class="fg"><label class="fl">Model *</label>
+        <input class="fi" id="arr-model" list="dl-arr-model" value="${String(model).replace(/"/g,'&quot;')}" placeholder="e.g. Monarch" oninput="arrModelChange()">
+        <datalist id="dl-arr-model">${libOptions('coverModel')}</datalist>
+      </div>
+      <div class="fg"><label class="fl">Quantity *</label><input class="fi" type="number" id="arr-qty" value="1" min="1"></div>
+    </div>
+    <div style="font-size:11px;color:var(--text2);margin:-2px 2px 10px">Floor position: <b id="arr-cell-hint">${model ? _arrCellHint(model) : '—'}</b></div>
+    <div class="fgrid fgrid2" style="margin-bottom:10px">
+      <div class="fg"><label class="fl">Arrival date</label><input class="fi" type="date" id="arr-date"></div>
+      <div class="fg"><label class="fl">Note (optional)</label><input class="fi" id="arr-note" placeholder="e.g. PO #, supplier"></div>
+    </div>
+    <div class="fgrid fgrid2" style="margin-bottom:12px">
+      <div class="fg"><label class="fl">Photo (any image)</label>
+        <label class="btn btn-sm" style="cursor:pointer;display:inline-block">⬆ Choose photo<input type="file" accept="image/*" style="display:none" onchange="arrPrevPhoto(event)"></label>
+        <img id="arr-photo-prev" style="display:none;max-width:100%;max-height:120px;border-radius:8px;margin-top:6px;border:1px solid var(--line)">
+      </div>
+      <div class="fg"><label class="fl">PDF (packing list / invoice)</label>
+        <label class="btn btn-sm" style="cursor:pointer;display:inline-block">⬆ Choose PDF<input type="file" accept="application/pdf,.pdf" style="display:none" onchange="arrPickPdf(event)"></label>
+        <div id="arr-pdf-name" style="font-size:11px;color:var(--text2);margin-top:6px"></div>
+      </div>
+    </div>
+    <div style="display:flex;gap:8px;justify-content:flex-end">
+      <button class="btn" onclick="document.getElementById('cover-float-panel')&&(document.getElementById('cover-float-panel').innerHTML='')">Cancel</button>
+      <button class="btn btn-p" id="arr-save-btn" onclick="submitCoverArrival()">✓ Log arrival</button>
+    </div>
+  </div>`;
+  host.scrollIntoView({behavior:'smooth',block:'nearest'});
+}
+async function _uploadArrivalFile(file, kind){
+  if(!file) return '';
+  try{
+    if(typeof firebase === 'undefined' || !firebase.storage) return '';
+    const ext = (String(file.name||'').split('.').pop() || (kind === 'pdf' ? 'pdf' : 'jpg')).toLowerCase();
+    const path = `arrivals/cover-${Date.now()}-${Math.random().toString(36).slice(2,7)}-${kind}.${ext}`;
+    const ref = firebase.storage().ref(path);
+    await ref.put(file);
+    return await ref.getDownloadURL();
+  }catch(e){ console.warn('[arrival upload]', kind, e.message); return ''; }
+}
+async function submitCoverArrival(){
+  const color = (document.getElementById('arr-color')?.value || '').trim();
+  const model = (document.getElementById('arr-model')?.value || '').trim();
+  const qty   = parseInt(document.getElementById('arr-qty')?.value) || 0;
+  const date  = document.getElementById('arr-date')?.value || toISO();
+  const note  = (document.getElementById('arr-note')?.value || '').trim();
+  if(!color){ toast('Enter a color','err'); return; }
+  if(!model){ toast('Enter a model','err'); return; }
+  if(qty <= 0){ toast('Quantity must be at least 1','err'); return; }
+  const btn = document.getElementById('arr-save-btn'); if(btn){ btn.disabled = true; btn.textContent = 'Uploading…'; }
+  const photoUrl = await _uploadArrivalFile(_arrPhotoFile, 'photo');
+  const pdfUrl   = await _uploadArrivalFile(_arrPdfFile, 'pdf');
+  if((_arrPhotoFile && !photoUrl) || (_arrPdfFile && !pdfUrl)){
+    toast('⚠ Attachment upload needs you signed in — logging arrival without the file','amber');
+  }
+  let row = coverInventory.find(c =>
+    (c.source||'warehouse') === 'warehouse' &&
+    (c.color||'').toLowerCase() === color.toLowerCase() &&
+    (c.model||'').toLowerCase() === model.toLowerCase());
+  if(!row){
+    row = {id:++nid, color, model, qty:0, lowThreshold:1, location:'', source:'warehouse', updated:editStamp(), history:[], pending:[]};
+    coverInventory.push(row);
+  }
+  row.qty = (row.qty||0) + qty;
+  // Soft capacity check per floor position (default 30, configurable). Warn but never block.
+  try {
+    const _ct = (typeof cellTypeForCoverModel === 'function') ? cellTypeForCoverModel(model) : null;
+    const _cap = (typeof coverCellCap === 'function') ? coverCellCap() : 30;
+    const _cellQty = (_ct && typeof coverCellStock === 'function') ? (coverCellStock(_ct).qty + qty) : (row.qty);
+    if(_ct && _cellQty > _cap){ toast(`⚠ Position now ${_cellQty}/${_cap} — over capacity for ${_ct}. Raise the max on the Inventory page if needed.`,'amber'); }
+  } catch(e){}
+  row.history = row.history || [];
+  row.history.push({ at: editStamp(), mid: (Date.now().toString(36) + Math.random().toString(36).slice(2,8)), action:'arrival', qty, date, note, photoUrl, pdfUrl,
+                     by:(typeof ROLES !== 'undefined' && ROLES[currentRole]) ? ROLES[currentRole].label : '' });
+  row.updated = editStamp();
+  if(typeof fulfillPendingCovers === 'function') fulfillPendingCovers(row);
+  if(typeof reconcileCoverRequests === 'function'){ try { reconcileCoverRequests(); } catch(e){} }
+  addAct(`Cover arrival: ${qty}× ${color} ${model}${note ? ' · ' + note : ''}`, 'var(--teal)');
+  saveState();
+  if(typeof renderCoverInventory === 'function') renderCoverInventory();
+  const _fl = document.getElementById('floor'); if(_fl && typeof drawMap === 'function'){ try { drawMap(); } catch(e){} }
+  updBadges?.();
+  toast(`Logged ${qty}× ${color} ${model} arrival`,'ok');
+  const host = document.getElementById('cover-float-panel'); if(host) host.innerHTML = '';
+}
+// Which cover models currently resolve to a given floor cell type (defaults +
+// user overrides + any model actually present in inventory for that cell).
+function _modelsForCell(cellType){
+  const out = new Set();
+  if(typeof COVER_MODEL_TO_CELL !== 'undefined'){
+    for(const k in COVER_MODEL_TO_CELL){ if(cellTypeForCoverModel(k) === cellType) out.add(k); }
+  }
+  const ov = (typeof cfg !== 'undefined' && cfg && cfg.coverModelCell) || {};
+  for(const k in ov){ if(ov[k] === cellType) out.add(k); }
+  (Array.isArray(coverInventory) ? coverInventory : []).forEach(c => {
+    if(c && c.model && cellTypeForCoverModel(c.model) === cellType) out.add(String(c.model).toLowerCase());
+  });
+  return Array.from(out).sort();
+}
+function assignModelToCell(cellType){
+  const inp = document.getElementById('map-model-in');
+  const model = (inp && inp.value || '').trim();
+  if(!model){ toast('Pick or type a model to assign','err'); return; }
+  if(!cellType){ toast('No cell selected','err'); return; }
+  cfg = cfg || {}; cfg.coverModelCell = cfg.coverModelCell || {};
+  cfg.coverModelCell[model.toLowerCase()] = cellType;
+  if(typeof addAct === 'function') addAct(`Mapped cover model "${model}" → position ${cellType}`,'var(--teal)');
+  saveState();
+  const _fl = document.getElementById('floor'); if(_fl && typeof drawMap === 'function'){ try { drawMap(); } catch(e){} }
+  if(typeof renderCoverInventory === 'function') renderCoverInventory();
+  toast(`"${model}" assigned to ${cellType}`,'ok');
+  if(typeof selPos !== 'undefined' && selPos) showCoverCellPanel(selPos);
+}
+function unmapCoverModel(modelLower, cellType){
+  cfg = cfg || {}; cfg.coverModelCell = cfg.coverModelCell || {};
+  // If this is a HARDCODED default for this cell, set '' to explicitly hide it;
+  // otherwise just drop the override key (reverts to default / unmapped).
+  const isDefault = (typeof COVER_MODEL_TO_CELL !== 'undefined') && COVER_MODEL_TO_CELL[modelLower] === cellType;
+  if(isDefault) cfg.coverModelCell[modelLower] = '';
+  else delete cfg.coverModelCell[modelLower];
+  if(typeof addAct === 'function') addAct(`Unmapped cover model "${modelLower}" from ${cellType}`,'var(--orange)');
+  saveState();
+  const _fl = document.getElementById('floor'); if(_fl && typeof drawMap === 'function'){ try { drawMap(); } catch(e){} }
+  if(typeof renderCoverInventory === 'function') renderCoverInventory();
+  toast(`"${modelLower}" removed from ${cellType}`,'ok');
+  if(typeof selPos !== 'undefined' && selPos) showCoverCellPanel(selPos);
+}
+
+// Recent arrivals (from cover-row history) for a floor cell type — used by the
+// cover-cell panel. Pass null to get all warehouse arrivals.
+function coverArrivalsFor(cellType){
+  const out = [];
+  (Array.isArray(coverInventory) ? coverInventory : []).forEach(c => {
+    if((c.source||'warehouse') !== 'warehouse') return;
+    if(cellType && cellTypeForCoverModel(c.model) !== cellType) return;
+    (c.history||[]).forEach(h => { if(h && h.action === 'arrival') out.push(Object.assign({ _color:c.color, _model:c.model }, h)); });
+  });
+  out.sort((a,b) => String(b.date||b.at||'').localeCompare(String(a.date||a.at||'')));
+  return out;
 }
 
 function openCoverAdd(presetSource){
