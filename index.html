@@ -3425,7 +3425,7 @@ body.dark-mode .mar-card-track {
     </div>
     <div class="ni" data-page="covers" data-section="factory" onclick="goV('covers')">
       <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><ellipse cx="8" cy="8" rx="6.5" ry="3"/><path d="M1.5 8v3a6.5 3 0 0013 0V8"/><path d="M5 8l1 1.5M11 8l-1 1.5M8 8v1.7"/></svg>
-      Cover Inventory
+      Inventory
       <span class="nb" style="background:#e0e7ff;color:#3730a3" id="nb-cov">0</span>
     </div>
     <div class="nav-sec sb-sec" data-section="inventory">Inventory</div>
@@ -4704,7 +4704,7 @@ let _fbInitAttempts = 0;
 //   /app_version/current  (in Firebase console, manually, OR call
 //   pushVersionToFirebase() from the Admin console at deploy time)
 // ══════════════════════════════════════════════════════════════════
-const APP_VERSION = 'v4.81';
+const APP_VERSION = 'v4.82';
 window.APP_VERSION = APP_VERSION;
 
 // ── DATA EPOCH (generation guard) ────────────────────────────────────
@@ -10513,7 +10513,7 @@ function showCoverCellPanel(pos){
     <hr class="sep">
     <div style="display:flex;gap:8px;flex-wrap:wrap">
       ${canAdd?`<button class="btn btn-sm" onclick="openCoverArrival('${String(presetModel).replace(/'/g,"\\'")}','Black')" style="background:var(--teal);border-color:var(--teal);color:#fff">📦 Log arrival</button>`:''}
-      <button class="btn btn-p btn-sm" onclick="goV('covers')">Open Cover Inventory</button>
+      <button class="btn btn-p btn-sm" onclick="goV('covers')">Open Inventory</button>
       ${canAdd?`<button class="btn btn-sm" onclick="openCoverAdd('warehouse')">+ Add cover</button>`:''}
     </div>
   </div>`;
@@ -22907,7 +22907,7 @@ function renderCoverInventory(){
         <td style="font-size:11px;color:var(--text2)">${escapeHTML(c.model||'—')}</td>
         <td style="font-weight:700;font-size:14px;color:${out?'#dc2626':low?'#92400e':'var(--text1)'}">${c.qty}</td>
         <td data-hide-mobile style="font-size:11px;color:var(--text2)">${c.lowThreshold||0}</td>
-        <td data-hide-mobile style="font-size:11px">${escapeHTML(c.location||'—')}</td>
+        <td data-hide-mobile style="font-size:11px">${coverLocCellHTML(c)}</td>
         <td data-hide-mobile style="font-size:10px;color:var(--text3)">${fmtD(c.updated)}</td>
         <td style="text-align:right;white-space:nowrap">
           <button class="btn btn-sm" onclick="adjustCoverQty(${c.id}, 1)" title="+1 (auto-fulfills pending if any)">+1</button>
@@ -23105,6 +23105,66 @@ function unmapCoverModel(modelLower, cellType){
   if(typeof renderCoverInventory === 'function') renderCoverInventory();
   toast(`"${modelLower}" removed from ${cellType}`,'ok');
   if(typeof selPos !== 'undefined' && selPos) showCoverCellPanel(selPos);
+}
+
+// ───────────────────────────────────────────────────────────────────
+// COVER LOCATION (Inventory list) — shows WHERE each cover sits on the
+// Floor Map. A cover's position is derived from its MODEL → cover-cell
+// mapping (row 15A/15B), the same source the map uses, so the list and
+// the map can never disagree. Three cases:
+//   • Factory-source covers   → not on the warehouse floor ("🏭 Factory").
+//   • Warehouse + mapped model → real cell id (e.g. "15A-A · Col").
+//   • Warehouse + unmapped     → "UNASSIGNED" + inline picker to assign a
+//                                cell right here, so it appears on the map.
+// ───────────────────────────────────────────────────────────────────
+function coverLocCellHTML(c){
+  if(!c) return '<span style="color:var(--text3)">—</span>';
+  // Factory covers live in factory storage, not on the warehouse floor map.
+  if((c.source||'warehouse') === 'factory'){
+    return '<span style="display:inline-flex;align-items:center;gap:4px;color:#92400e;font-weight:600">🏭 Factory</span>';
+  }
+  const model = String(c.model == null ? '' : c.model).trim();
+  if(!model){
+    return '<span style="color:var(--text3)" title="A cover needs a model to get a Floor Map cell">— no model —</span>';
+  }
+  const t = (typeof cellTypeForCoverModel === 'function') ? cellTypeForCoverModel(model) : null;
+  if(t){
+    const def = (typeof COVER_TYPES_NEW !== 'undefined') ? COVER_TYPES_NEW.find(x => x.t === t) : null;
+    const pos = def ? ('15A-' + def.a) : t;
+    return `<span style="display:inline-flex;align-items:center;gap:6px" title="On the Floor Map at position ${pos} (${t})">`
+      + `<span style="font-weight:700;color:var(--text1)">📍 ${pos}</span>`
+      + `<span style="font-size:10px;color:var(--text3)">${t}</span></span>`;
+  }
+  // Unmapped warehouse model → not drawn on the map yet. Offer an inline assign.
+  const canMap = (typeof canEdit === 'function') ? canEdit() : true;
+  const badge = '<span style="display:inline-block;background:#fffbeb;color:#92400e;border:1px solid #fde68a;font-size:9px;font-weight:700;padding:2px 6px;border-radius:6px" title="No Floor Map cell yet — assign one so it shows on the map">⚠ UNASSIGNED</span>';
+  if(!canMap) return badge;
+  // The model goes into an HTML attribute (fully entity-escaped) and is read
+  // back with getAttribute — never interpolated into a JS string — so any
+  // character (quotes, <, >, backslash) is injection-safe.
+  const mlEsc = String(model.toLowerCase())
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+  const opts = (typeof COVER_TYPES_NEW !== 'undefined' ? COVER_TYPES_NEW : [])
+    .map(x => `<option value="${x.t}">${x.t} · ${x.name}</option>`).join('');
+  return `<span style="display:inline-flex;align-items:center;gap:6px">${badge}`
+    + `<select data-model="${mlEsc}" onchange="assignCoverModelFromList(this.getAttribute('data-model'), this.value)" style="font-size:10.5px;padding:2px 5px;border:1px solid var(--line);border-radius:6px;background:var(--bg1);color:var(--text1)">`
+    + `<option value="">Assign cell…</option>${opts}</select></span>`;
+}
+
+// Map an (unmapped) cover model to a floor cover-cell straight from the
+// Inventory list. Writes the same cfg.coverModelCell override the cell panel
+// uses, then refreshes the map + list so the cover appears in its cell.
+function assignCoverModelFromList(modelLower, cellType){
+  modelLower = (modelLower||'').trim();
+  if(!modelLower || !cellType) return;   // placeholder re-picked or empty
+  cfg = cfg || {}; cfg.coverModelCell = cfg.coverModelCell || {};
+  cfg.coverModelCell[modelLower] = cellType;
+  if(typeof addAct === 'function') addAct(`Mapped cover model "${modelLower}" → position ${cellType} (from Inventory list)`,'var(--teal)');
+  try { saveState(); } catch(e){}
+  const _fl = document.getElementById('floor'); if(_fl && typeof drawMap === 'function'){ try { drawMap(); } catch(e){} }
+  if(typeof renderCoverInventory === 'function') renderCoverInventory();
+  toast(`"${modelLower}" → ${cellType} · now on the Floor Map`,'ok');
 }
 
 // Recent arrivals (from cover-row history) for a floor cell type — used by the
