@@ -4709,7 +4709,7 @@ let _fbInitAttempts = 0;
 //   /app_version/current  (in Firebase console, manually, OR call
 //   pushVersionToFirebase() from the Admin console at deploy time)
 // ══════════════════════════════════════════════════════════════════
-const APP_VERSION = 'v4.90';
+const APP_VERSION = 'v4.91';
 window.APP_VERSION = APP_VERSION;
 
 // ── DATA EPOCH (generation guard) ────────────────────────────────────
@@ -5767,6 +5767,17 @@ function mergeCfgPreservingPins(localCfg, remoteCfg){
     const hasR = remoteCfg[key] && typeof remoteCfg[key] === 'object';
     if(hasL || hasR) merged[key] = _deepMergeMap(localCfg && localCfg[key], remoteCfg[key]);
   });
+  // Delete tombstones (v4.91): union by LATEST timestamp so neither side's
+  // intentional deletes are lost on a shallow cfg overwrite.
+  {
+    const L = (localCfg && typeof localCfg._deletedUnits === 'object') ? localCfg._deletedUnits : null;
+    const R = (typeof remoteCfg._deletedUnits === 'object') ? remoteCfg._deletedUnits : null;
+    if(L || R){
+      const out = {};
+      [L, R].forEach(src => { if(src) for(const k in src){ const t = src[k]; if(typeof t === 'string' && (!out[k] || t > out[k])) out[k] = t; } });
+      merged._deletedUnits = out;
+    }
+  }
   return merged;
 }
 
@@ -5844,6 +5855,24 @@ function _mergeUnits(local, remote, restored){
     if(elsewhere.has(k)) return;    // local-only but incoming knows it elsewhere (dispatched/etc) → respect
     merged.push(u); kept++;         // local-only & unknown to incoming → KEEP (the fix)
   });
+  // ── HONOR DELETE TOMBSTONES (v4.91) ──────────────────────────────────────
+  // Union the tombstone maps from BOTH sides (cfg is merged AFTER units, so the
+  // remote's tombstones aren't in cfg yet at this point) and drop any merged
+  // unit whose key was tombstoned at/after its last edit. A re-added unit has a
+  // newer updatedAt than its old tombstone, so it correctly survives.
+  try {
+    const _tomb = {};
+    const _absorb = src => { if(src && typeof src === 'object'){ for(const k in src){ const t = src[k]; if(typeof t === 'string' && (!_tomb[k] || t > _tomb[k])) _tomb[k] = t; } } };
+    _absorb(typeof cfg === 'object' && cfg ? cfg._deletedUnits : null);
+    _absorb(restored && restored.cfg ? restored.cfg._deletedUnits : null);
+    if(Object.keys(_tomb).length){
+      for(let i = merged.length - 1; i >= 0; i--){
+        const k = keyOf(merged[i]); if(!k) continue;
+        const t = _tomb[k];
+        if(t && (merged[i].updatedAt || '') < t) merged.splice(i, 1);
+      }
+    }
+  } catch(e){ console.warn('[tombstone merge]', e); }
   _lastMergeKept = kept;
   return merged;
 }
@@ -7104,7 +7133,7 @@ const MAX_LEVELS_HOT  = 3;              // 3 hot tubs high per stack
 const MAX_LEVELS_SWIM = 2;              // 2 swim spas high per pair
 const MAX_LEVELS = MAX_LEVELS_HOT;      // legacy default — defaults to the hot-tub rule
 const MAX_PER_CELL = MAX_LEVELS_HOT;    // 3 (was 6 with 2 stacks)
-const STACK_TYPES = ['hot','swim'];
+const STACK_TYPES = ['hot','swim','extra'];   // v4.91: Extra/Stock now stacks T/M/B (max 3 per cell) like hot tubs
 const isStackedType = t => STACK_TYPES.includes(t);
 const LEVEL_LABEL = lv => lv===1?'Bottom' : lv===2?'Middle' : lv===3?'Top' : `L${lv}`;
 const LEVEL_SHORT = lv => lv===1?'BTM' : lv===2?'MID' : lv===3?'TOP' : `L${lv}`;
@@ -9016,9 +9045,9 @@ function findNextSlot(pos, preferStack=null, type='hot'){
     if(!partner || !isSpaStorageCell(parsePos(pos).rowKey, parsePos(pos).colLetter)) return null;
     const pPos = parsePos(partner);
     if(!pPos.valid || !isSpaStorageCell(pPos.rowKey, pPos.colLetter)) return null;
-    // No hot tubs in either cell
+    // No hot tubs OR extras (any non-swim stacked unit) in either cell
     const blockers = units.filter(u =>
-      (u.pos === pos || u.pos === partner) && u.type === 'hot'
+      (u.pos === pos || u.pos === partner) && isStackedType(u.type) && u.type !== 'swim'
     );
     if(blockers.length) return null;
     // Count existing swims in the pair
@@ -9057,11 +9086,11 @@ function validateSlot(pos, stack, level, excludeId=null, type='hot'){
     if(!pPos.valid || !isSpaStorageCell(pPos.rowKey, pPos.colLetter)){
       return {ok:false, reason:`Partner cell ${partner} is not a storage cell`};
     }
-    // No hot tubs in either cell
-    const hotInPair = units.find(u =>
-      (u.pos === pos || u.pos === partner) && u.type === 'hot' && u.id !== excludeId
+    // No hot tubs OR extras (any non-swim stacked unit) in either cell
+    const blockInPair = units.find(u =>
+      (u.pos === pos || u.pos === partner) && isStackedType(u.type) && u.type !== 'swim' && u.id !== excludeId
     );
-    if(hotInPair) return {ok:false, reason:`Hot tub ${hotInPair.sn||hotInPair.dealer} blocks the swim pair — move it first`};
+    if(blockInPair) return {ok:false, reason:`${blockInPair.sn||blockInPair.dealer} (${blockInPair.type}) blocks the swim pair — move it first`};
     // Slot occupancy check
     const occ = units.find(u =>
       (u.pos === pos || u.pos === partner) && u.type === 'swim' &&
@@ -12533,6 +12562,13 @@ function quickAddSpa(pos){
   const newU = {id:nid++,pos,sn,dealer,type,entry};
   if(slot){ newU.stack=slot.stack; newU.level=slot.level; }
   if(alreadyInWh) newU.alreadyInWh = true;
+  touchUnit(newU);   // stamp updatedAt so a fresh add always beats an old tombstone (v4.91)
+  try {
+    if(cfg && cfg._deletedUnits){
+      const _tk = (sn != null && String(sn).trim() !== '') ? ('sn:' + String(sn).trim()) : ('id:' + newU.id);
+      delete cfg._deletedUnits[_tk];
+    }
+  } catch(e){}
   units.push(newU);
   try{ postMovement({type: alreadyInWh?'561':'101', sn, material:type||'', qty:1, from: alreadyInWh?null:LOC_TRANSIT, to:LOC_WAREHOUSE(pos), stockType:'unrestricted', note: alreadyInWh?'Initial stock entry (already in WH)':'Goods receipt (quick-add)'}); }catch(e){}
   _slotHint = null;
@@ -13510,6 +13546,20 @@ function rmUnit(id){
   // Cleanup: credit back paired cover + remove from pending queue
   const cleaned = cleanupPendingCoversForSn(u.sn);
   const credited = creditBackCoverIfPaired(u, 'unit removed from warehouse');
+  // ── DELETE TOMBSTONE (v4.91) ──────────────────────────────────────────────
+  // _mergeUnits is keep-local ("never lose a tub") and rebuilds from the remote
+  // copy, so a plain local delete gets resurrected on the next sync. Record an
+  // intentional-delete tombstone (keyed exactly like _mergeUnits.keyOf) inside
+  // cfg — cfg already rides every push/pull — so the deletion wins over a stale
+  // remote. A later legit re-add of the same key clears it (see quickAddSpa).
+  try {
+    cfg._deletedUnits = cfg._deletedUnits || {};
+    const _tk = (u.sn != null && String(u.sn).trim() !== '') ? ('sn:' + String(u.sn).trim()) : ('id:' + u.id);
+    cfg._deletedUnits[_tk] = editStamp();
+    // Prune tombstones older than 60 days so cfg can't grow without bound.
+    const _cut = new Date(Date.now() - 60*864e5).toISOString();
+    for(const k in cfg._deletedUnits){ if(cfg._deletedUnits[k] < _cut) delete cfg._deletedUnits[k]; }
+  } catch(e){ console.warn('[tombstone write]', e); }
   units=units.filter(x=>x.id!==id);
   if(u.linkedMatId){
     materials = materials.filter(m=>m.id !== u.linkedMatId);
