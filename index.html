@@ -3333,6 +3333,7 @@ body.dark-mode .mar-card-track {
 }
 
 </style>
+<style id="inv-hub-css">.ni[data-page="materials"],.ni[data-page="receiving"],.ni[data-page="movements"],.ni[data-page="incoming"]{display:none!important}</style>
 </head>
 <body>
 
@@ -4354,6 +4355,8 @@ body.dark-mode .mar-card-track {
      will be migrated to read from the same Firebase path).
 ════════════════════════════════════════════════ -->
 <div id="view-covers" class="view">
+  <div id="inv-catbar"></div>
+  <div id="inv-covers-wrap">
   <!-- Banner: explanation -->
   <div style="background:linear-gradient(135deg,#eef2ff 0%,#fff 100%);border:1px solid #c7d2fe;border-radius:var(--r-lg);padding:13px 16px;margin-bottom:12px;display:flex;align-items:center;gap:12px">
     <div style="width:38px;height:38px;border-radius:50%;background:#eef2ff;display:flex;align-items:center;justify-content:center;flex-shrink:0;border:1px solid #c7d2fe;font-size:18px">🛌</div>
@@ -4387,6 +4390,8 @@ body.dark-mode .mar-card-track {
     </div>
   </div>
   <div id="cover-float-panel"></div>
+  </div>
+  <div id="inv-cat-wrap" style="display:none"></div>
 </div>
 
 <!-- ════════════════════════════════════════════════
@@ -4704,7 +4709,7 @@ let _fbInitAttempts = 0;
 //   /app_version/current  (in Firebase console, manually, OR call
 //   pushVersionToFirebase() from the Admin console at deploy time)
 // ══════════════════════════════════════════════════════════════════
-const APP_VERSION = 'v4.82';
+const APP_VERSION = 'v4.90';
 window.APP_VERSION = APP_VERSION;
 
 // ── DATA EPOCH (generation guard) ────────────────────────────────────
@@ -5304,7 +5309,7 @@ async function fbCloudSync(showToast){
     } catch(e){ console.warn('[safe-push] check failed:', e); }
   }
   try {
-    const state = {nid, units, dispatched, incoming, materials, events, activity, queue, cfg, factory, marriages, dispatchRequests, coverInventory, colorLibrary, coverModelMapping, movements, _epoch: (window.ASPEN_DATA_EPOCH || 1)};
+    const state = {nid, units, dispatched, incoming, materials, events, activity, queue, cfg, factory, marriages, dispatchRequests, coverInventory, colorLibrary, coverModelMapping, movements, matTransfers, _epoch: (window.ASPEN_DATA_EPOCH || 1)};
     const ts = fbServerNow();   // server-consistent clock (immune to local skew)
     // For anonymous users, _fbUser.email is null. Use the current user pill
     // name (from in-app Welcome screen) + deviceId for traceable diagnostics.
@@ -5419,6 +5424,7 @@ async function fbRestoreFromCloud(){
     if(Array.isArray(restored.dispatched)) dispatched = restored.dispatched;
     if(Array.isArray(restored.incoming)) incoming = restored.incoming;
     if(Array.isArray(restored.materials)) materials = restored.materials;
+    if(Array.isArray(restored.matTransfers)) matTransfers = restored.matTransfers;
     if(Array.isArray(restored.events)) events = restored.events;
     if(Array.isArray(restored.activity)) activity = restored.activity;
     if(Array.isArray(restored.queue)) queue = restored.queue;
@@ -5847,6 +5853,88 @@ function _mergeUnits(local, remote, restored){
 // request that exists ONLY locally — e.g. one a factory just created that a stale
 // device/tab hasn't seen yet — is KEPT so it can never be auto-deleted by a stale
 // push. Keyed by request id. Mirrors _mergeUnits; safe direction = keep, never drop.
+function _mergeMatTransfers(local, remote){
+  // Conservation-safe union of staged transfers across devices (last-write-wins
+  // would silently drop a transfer that one device created while another synced).
+  // Union by id; keep the MORE ADVANCED status (requested < in-transit < arrived
+  // / cancelled), tie-broken by the latest stage timestamp — so an in-flight
+  // transfer is never lost and its lifecycle converges.
+  local  = Array.isArray(local)  ? local  : [];
+  remote = Array.isArray(remote) ? remote : [];
+  const rank = { 'requested':1, 'in-transit':2, 'arrived':3, 'cancelled':3 };
+  const byId = new Map();
+  const consider = t => {
+    if(!t || t.id == null) return;
+    const k = String(t.id), cur = byId.get(k);
+    if(!cur){ byId.set(k, t); return; }
+    const a = rank[cur.status]||0, b = rank[t.status]||0;
+    if(b > a){ byId.set(k, t); return; }
+    if(b === a){
+      const ta = String(cur.arrivedAt||cur.shippedAt||cur.requestedAt||'');
+      const tb = String(t.arrivedAt||t.shippedAt||t.requestedAt||'');
+      if(tb > ta) byId.set(k, t);
+    }
+  };
+  remote.forEach(consider);
+  local.forEach(consider);
+  return Array.from(byId.values());
+}
+
+function _mergeMaterials(local, remote){
+  // Conservation-safe, per-ITEM union of warehouse/factory materials across devices.
+  // The OLD behavior replaced the whole array with the remote copy (last-write-wins),
+  // which could DROP an entire item one device created while another was syncing, and
+  // could clobber a qty edit wholesale. This merges by LOGICAL identity
+  // (cat | source | name) — the same key _invFindMat() matches on — so:
+  //   - an item created/edited on only ONE device is never lost,
+  //   - two devices that independently created the SAME logical item collapse into a
+  //     single record (no phantom duplicate, no double-count),
+  //   - the receive/issue history from BOTH devices is preserved (audit trail intact).
+  // HONEST LIMITATION: qty is a snapshot, not an event-delta, so when the SAME item was
+  // edited on both devices the more-recently-touched value wins (per-item last-writer-
+  // wins). True numeric conservation of concurrent qty edits would require event-sourced
+  // deltas; this is strictly safer than the whole-array replace it supersedes.
+  local  = Array.isArray(local)  ? local  : [];
+  remote = Array.isArray(remote) ? remote : [];
+  const norm  = s => String(s == null ? '' : s).trim().toLowerCase();
+  const keyOf = m => norm(m.cat || 'other') + '\u0000' + norm(m.source || 'warehouse') + '\u0000' + norm(m.name);
+  const stamp = m => {
+    let t = String(m.updated || m.date || '');
+    if(Array.isArray(m.history) && m.history.length){
+      const last = m.history[m.history.length - 1];
+      const ht = last && String(last.t || last.date || last.at || '');
+      if(ht && ht > t) t = ht;
+    }
+    return t;
+  };
+  const mergeHist = (a, b) => {
+    const out = [], seen = new Set();
+    const all = (Array.isArray(a) ? a : []).concat(Array.isArray(b) ? b : []);
+    for(const h of all){
+      if(!h) continue;
+      const k = JSON.stringify([h.t || h.date || h.at || '', h.type || h.kind || '', (h.qty != null ? h.qty : ''), h.who || h.by || '']);
+      if(seen.has(k)) continue;
+      seen.add(k); out.push(h);
+    }
+    return out;
+  };
+  const byKey = new Map();
+  const consider = m => {
+    if(!m || typeof m !== 'object') return;
+    const k = keyOf(m), cur = byKey.get(k);
+    if(!cur){ byKey.set(k, m); return; }
+    // Same logical item on both sides: keep the more-recently-touched snapshot, but
+    // union the histories so no movement record from either device is lost.
+    const winner = stamp(m) >= stamp(cur) ? m : cur;
+    const merged = Object.assign({}, winner);
+    merged.history = mergeHist(cur.history, m.history);
+    byKey.set(k, merged);
+  };
+  remote.forEach(consider);   // remote first; local wins ties (it is the active session)
+  local.forEach(consider);
+  return Array.from(byKey.values());
+}
+
 function _mergeRequests(local, remote){
   remote = Array.isArray(remote) ? remote : [];
   local  = Array.isArray(local)  ? local  : [];
@@ -6239,7 +6327,8 @@ function fbApplyRemoteState(restored, sourceTimestamp){
     if(Array.isArray(restored.units)) units = _mergeUnits(units, restored.units, restored);
     if(Array.isArray(restored.dispatched)) dispatched = _mergeDispatched(dispatched, restored.dispatched);
     if(Array.isArray(restored.incoming)) incoming = _mergeIncoming(incoming, restored.incoming);
-    if(Array.isArray(restored.materials)) materials = restored.materials;
+    if(Array.isArray(restored.materials)) materials = _mergeMaterials(materials, restored.materials);
+    if(Array.isArray(restored.matTransfers)) matTransfers = _mergeMatTransfers(matTransfers, restored.matTransfers);
     if(Array.isArray(restored.events)) events = restored.events;
     if(Array.isArray(restored.activity)) activity = restored.activity;
     if(Array.isArray(restored.queue)) queue = restored.queue;
@@ -6716,7 +6805,7 @@ const COVER_MODEL_TO_CELL = {
   'eternal':'Etn', 'roll':'Rol'
 };
 function cellTypeForCoverModel(model){
-  const m = (model||'').trim().toLowerCase();
+  const m = String(model == null ? '' : model).trim().toLowerCase();
   if(!m) return null;
   // 1) USER OVERRIDE (cfg.coverModelCell) — Alberto can assign any model to any
   //    row-15 cell from the floor map. An empty-string override means "explicitly
@@ -8374,6 +8463,7 @@ let materials = [];
 let events = [];
 let activity = [];
 let movements = [];   // SAP-style stock movements ledger (immutable material documents)
+let matTransfers = [];   // staged Warehouse<->Factory material transfers
 
 // ═══════════════════════════════════════════════════════
 // FACTORY WAREHOUSE — items at the Aspen factory waiting to ship
@@ -9581,7 +9671,7 @@ function goV(v){
   if(v==='config')renderConfig();
   if(v==='factory')renderFactory();
   if(v==='marriages')renderMarriages();
-  if(v==='covers')renderCoverInventory();
+  if(v==='covers')renderInventoryHub();
   if(v==='requests')renderRequests();
   if(v==='receiving')renderReceiving();
   if(v==='loadingbay')renderLoadingBay();
@@ -18880,6 +18970,126 @@ function update3D(){
     });
   }
 
+  // ── COVER / TINA RACKS (row 15) — REAL warehouse stock via coverCellStock() ──
+  // Each row-15 cover cell becomes a clickable rack whose visible tub count + label
+  // reflect LIVE inventory. Tapping a rack opens the real cover panel.
+  let _coverTotal = 0;
+  if(typeof COVER_TYPES_NEW !== 'undefined' && typeof coverCellStock === 'function'){
+    const tubGeo = new THREE.CylinderGeometry(0.42, 0.34, 0.30, 18);
+    COVER_TYPES_NEW.forEach((ct, ctIdx)=>{
+      const pos = '15A-' + ct.a;
+      const w3 = pos2World(pos, 0);
+      if(!w3) return;
+      const st  = coverCellStock(ct.t) || {qty:0, low:false};
+      const qty = st.qty | 0, low = !!st.low && qty > 0;
+      _coverTotal += qty;
+
+      const rack = new THREE.Group();
+      rack.position.set(w3.x, 0, w3.z);
+
+      // copper rack frame (uprights + 2 shelves)
+      const frameMat = new THREE.MeshStandardMaterial({color:0xB5733A, roughness:0.6, metalness:0.1});
+      const postGeo  = new THREE.BoxGeometry(0.1, 3.0, 0.1);
+      [[-0.6,-0.6],[0.6,-0.6],[-0.6,0.6],[0.6,0.6]].forEach(([px,pz])=>{
+        const p = new THREE.Mesh(postGeo, frameMat); p.position.set(px,1.5,pz); p.castShadow=true; rack.add(p);
+      });
+      [0.5,1.6].forEach(sy=>{
+        const sh = new THREE.Mesh(new THREE.BoxGeometry(1.4,0.08,1.4), frameMat); sh.position.set(0,sy,0); sh.receiveShadow=true; rack.add(sh);
+      });
+
+      // tubs — visual count up to 8, brand-colored; height reads stock at a glance
+      const shown    = Math.min(qty, 8);
+      const shellCol = [0x1C8FA8,0x134A63,0x4FC3D9,0xB5733A][ctIdx % 4];
+      const rackUD   = {coverRack:true, pos, cellType:ct.t, name:ct.name, qty};
+      for(let i=0;i<shown;i++){
+        const col = (i % 2) ? 0.32 : -0.32, lvl = Math.floor(i/2);
+        const tub = new THREE.Mesh(tubGeo.clone(), new THREE.MeshStandardMaterial({color:shellCol, roughness:0.45, metalness:0.08}));
+        tub.position.set(col, 0.62 + lvl*0.42, 0); tub.castShadow = true;
+        tub.userData = rackUD; rack.add(tub); W3D.state.unitMeshes.push(tub);
+        const water = new THREE.Mesh(new THREE.CylinderGeometry(0.34,0.34,0.03,18),
+          new THREE.MeshStandardMaterial({color:0x4FC3D9, roughness:0.2, emissive:0x4FC3D9, emissiveIntensity:0.18}));
+        water.position.set(col, 0.78 + lvl*0.42, 0); rack.add(water);
+      }
+
+      // invisible hit box so even an EMPTY rack is tappable
+      const hit = new THREE.Mesh(new THREE.BoxGeometry(1.6,3.0,1.6),
+        new THREE.MeshBasicMaterial({transparent:true, opacity:0}));
+      hit.position.set(0,1.5,0); hit.userData = rackUD; rack.add(hit); W3D.state.unitMeshes.push(hit);
+
+      // floating count label (billboard) — amber when low, gray when empty
+      const cv = document.createElement('canvas'); cv.width=256; cv.height=140;
+      const g = cv.getContext('2d');
+      g.fillStyle = low ? 'rgba(217,154,43,.96)' : (qty===0 ? 'rgba(90,106,114,.92)' : 'rgba(19,74,99,.96)');
+      g.fillRect(14,22,228,96);
+      g.fillStyle='#fff'; g.textAlign='center';
+      g.font='700 48px Poppins, system-ui, sans-serif'; g.fillText(String(qty),128,80);
+      g.font='600 19px Poppins, system-ui, sans-serif'; g.fillStyle='#d6ecf2';
+      g.fillText(String(ct.name).toUpperCase().slice(0,12),128,110);
+      const tex = new THREE.CanvasTexture(cv); tex.encoding = THREE.sRGBEncoding;
+      const lab = new THREE.Sprite(new THREE.SpriteMaterial({map:tex, transparent:true, depthTest:false}));
+      lab.scale.set(2.4,1.32,1); lab.position.set(0,3.4,0); rack.add(lab);
+
+      W3D.state.unitMeshGroup.add(rack);
+    });
+  }
+
+  // ── MATERIAL BINS (row 15B) — REAL stock from the `materials` array ──
+  // One clickable bin per category (Parts/Chemicals/Equipment/Packing/Materials),
+  // counting WAREHOUSE-source items. Tapping opens the real Inventory hub category.
+  let _matTotal = 0;
+  if(Array.isArray(materials)){
+    const BINS = [
+      {cat:'parts',     name:'Parts',     col:0x5A6A72, letter:'C'},
+      {cat:'chemicals', name:'Chemicals', col:0x1C8FA8, letter:'F'},
+      {cat:'equipment', name:'Equipment', col:0xB5733A, letter:'I'},
+      {cat:'packing',   name:'Packing',   col:0xC9A877, letter:'L'},
+      {cat:'other',     name:'Materials', col:0x134A63, letter:'O'},
+    ];
+    BINS.forEach(bin=>{
+      const w3 = pos2World('15B-' + bin.letter, 0);
+      if(!w3) return;
+      const list = materials.filter(m => m && (m.cat||'other') === bin.cat && (m.source||'warehouse') === 'warehouse');
+      const total = list.reduce((a,m)=> a + (parseInt(m.qty)||0), 0);
+      const distinct = list.length;
+      _matTotal += total;
+
+      const g3 = new THREE.Group(); g3.position.set(w3.x, 0, w3.z);
+      const binUD = {matBin:true, cat:bin.cat, name:bin.name, total, distinct};
+
+      // crate body + darker rim
+      const body = new THREE.Mesh(new THREE.BoxGeometry(1.5,0.9,1.05),
+        new THREE.MeshStandardMaterial({color:bin.col, roughness:0.7, metalness:0.05}));
+      body.position.y = 0.55; body.castShadow = true; body.receiveShadow = true;
+      body.userData = binUD; g3.add(body); W3D.state.unitMeshes.push(body);
+      const rim = new THREE.Mesh(new THREE.BoxGeometry(1.56,0.14,1.11),
+        new THREE.MeshStandardMaterial({color:0x1F2A30, roughness:0.6}));
+      rim.position.y = 1.0; g3.add(rim);
+
+      // content cubes on top (count ∝ distinct items, capped)
+      const cubes = Math.min(distinct, 6);
+      for(let i=0;i<cubes;i++){
+        const cx = -0.4 + (i%3)*0.4, cz = (i<3 ? -0.22 : 0.22);
+        const cube = new THREE.Mesh(new THREE.BoxGeometry(0.32,0.32,0.32),
+          new THREE.MeshStandardMaterial({color: i%2 ? 0xC9A877 : 0xB5905E, roughness:0.9}));
+        cube.position.set(cx, 1.25, cz); cube.castShadow = true; g3.add(cube);
+      }
+
+      // floating label: category + total qty (gray when empty)
+      const cv = document.createElement('canvas'); cv.width=256; cv.height=140;
+      const gx = cv.getContext('2d');
+      gx.fillStyle = total===0 ? 'rgba(90,106,114,.92)' : 'rgba(19,74,99,.96)';
+      gx.fillRect(8,18,240,104);
+      gx.fillStyle='#fff'; gx.textAlign='center';
+      gx.font='600 22px Poppins, system-ui, sans-serif'; gx.fillText(bin.name.toUpperCase(),128,52);
+      gx.font='700 44px Poppins, system-ui, sans-serif'; gx.fillText(String(total),128,100);
+      const tex = new THREE.CanvasTexture(cv); tex.encoding = THREE.sRGBEncoding;
+      const lab = new THREE.Sprite(new THREE.SpriteMaterial({map:tex, transparent:true, depthTest:false}));
+      lab.scale.set(2.5,1.37,1); lab.position.set(0,2.4,0); g3.add(lab);
+
+      W3D.state.unitMeshGroup.add(g3);
+    });
+  }
+
   // Update stats overlay
   const stats = document.getElementById('w3d-stats');
   if(stats){
@@ -18890,6 +19100,8 @@ function update3D(){
       <div class="w3d-stat"><strong>${totalUnits}</strong><span>Units</span></div>
       <div class="w3d-stat"><strong>${occPos}</strong><span>Positions</span></div>
       <div class="w3d-stat"><strong>${stacks}</strong><span>Stacks</span></div>
+      <div class="w3d-stat"><strong>${_coverTotal}</strong><span>Covers</span></div>
+      <div class="w3d-stat"><strong>${_matTotal}</strong><span>Materials</span></div>
     `;
   }
 }
@@ -18903,6 +19115,20 @@ function on3DClick(e){
   const hits = W3D.state.raycaster.intersectObjects(W3D.state.unitMeshes, false);
   if(hits.length > 0){
     const data = hits[0].object.userData;
+    if(data.matBin){
+      if(typeof goV === 'function') goV('covers');
+      setTimeout(()=>{ try{
+        if(typeof setInvSrc === 'function') setInvSrc('warehouse');
+        if(typeof setInvCat === 'function') setInvCat(data.cat);
+      }catch(_){} }, 60);
+      return;
+    }
+    if(data.coverRack){
+      const btn2Dc = document.querySelectorAll('#map-view-toggle .vt-btn')[0];
+      if(btn2Dc) btn2Dc.click();
+      setTimeout(()=>{ if(typeof showCoverCellPanel === 'function') showCoverCellPanel(data.pos); }, 200);
+      return;
+    }
     const cu = units.filter(u=>u.pos === data.pos);
     // Switch to 2D and show panel for this position
     const btn2D = document.querySelectorAll('#map-view-toggle .vt-btn')[0];
@@ -18928,6 +19154,30 @@ function on3DHover(e){
   if(hits.length > 0){
     const obj = hits[0].object;
     const data = obj.userData;
+    if(data.matBin){
+      if(obj.material && obj.material.emissive){ obj.material.emissive.setHex(0xffffff); obj.material.emissiveIntensity=0.13; W3D.state.hoverMesh=obj; }
+      tt.style.display='block';
+      tt.style.left=(e.clientX-rect.left+14)+'px';
+      tt.style.top=(e.clientY-rect.top+14)+'px';
+      tt.innerHTML=`<div class="w3d-tt-title">${data.name}</div>`+
+        `<div class="w3d-tt-row"><strong>In stock:</strong> ${data.total}</div>`+
+        `<div class="w3d-tt-row"><strong>Line items:</strong> ${data.distinct}</div>`+
+        `<div class="w3d-tt-row" style="margin-top:4px;opacity:.6;font-size:9px">Click to open inventory</div>`;
+      e.target.style.cursor='pointer';
+      return;
+    }
+    if(data.coverRack){
+      if(obj.material && obj.material.emissive){ obj.material.emissive.setHex(0xffffff); obj.material.emissiveIntensity=0.15; W3D.state.hoverMesh=obj; }
+      tt.style.display='block';
+      tt.style.left=(e.clientX-rect.left+14)+'px';
+      tt.style.top=(e.clientY-rect.top+14)+'px';
+      tt.innerHTML=`<div class="w3d-tt-title">${data.name}</div>`+
+        `<div class="w3d-tt-row"><strong>Cell:</strong> ${data.pos}</div>`+
+        `<div class="w3d-tt-row"><strong>Covers:</strong> ${data.qty}</div>`+
+        `<div class="w3d-tt-row" style="margin-top:4px;opacity:.6;font-size:9px">Click to open cover stock</div>`;
+      e.target.style.cursor='pointer';
+      return;
+    }
     const u = data.unit;
     // Highlight (mutate existing Color)
     obj.material.emissive.setHex(0xffffff);
@@ -23167,6 +23417,428 @@ function assignCoverModelFromList(modelLower, cellType){
   toast(`"${modelLower}" → ${cellType} · now on the Floor Map`,'ok');
 }
 
+// ════════════════════════════════════════════════════════════════════
+// INVENTORY HUB (v4.83) — one place for all Warehouse/Factory stock by
+// category, with a receiving ledger (what / qty / where / when / who).
+// Covers keep their mature page (rendered as the "Covers" category);
+// material categories render in #inv-cat-wrap. Extensible: add a row to
+// INV_CATEGORIES and the tab + list + receiving + log appear automatically.
+// ════════════════════════════════════════════════════════════════════
+const INV_CATEGORIES = [
+  {key:'covers',    label:'Covers',    icon:'🛏️', cover:true},
+  {key:'other',     label:'Materials', icon:'📦'},
+  {key:'parts',     label:'Parts',     icon:'🔧'},
+  {key:'chemicals', label:'Chemicals', icon:'🧪'},
+  {key:'equipment', label:'Equipment', icon:'⚙️'},
+  {key:'packing',   label:'Packing',   icon:'📦'},
+];
+let _invSrc = 'warehouse';   // TOP level: warehouse | factory
+let _invCat = 'covers';      // inside the selected source
+
+function setInvSrc(s){ _invSrc = s; renderInventoryHub(); }
+function setInvCat(k){ _invCat = k; renderInventoryHub(); }
+
+function _invMatRows(cat, src){
+  return (Array.isArray(materials) ? materials : []).filter(m =>
+    m && (m.cat||'other') === cat && (m.source||'warehouse') === src);
+}
+function _invCatCount(cat, src){
+  if(cat === 'covers') return (Array.isArray(coverInventory) ? coverInventory : []).filter(c => !src || (c.source||'warehouse') === src).length;
+  return (Array.isArray(materials) ? materials : []).filter(m => m && (m.cat||'other') === cat && (!src || (m.source||'warehouse') === src)).length;
+}
+function _invLastRecv(m){
+  const hs = (Array.isArray(m && m.history) ? m.history : []).filter(h => h && (h.action === 'arrival'));
+  if(!hs.length) return m && m.date ? ('set ' + m.date) : '—';
+  const last = hs[hs.length - 1];
+  return '+' + (last.qty != null ? last.qty : '?') + ' on ' + (last.when || last.at || '?') + (last.by ? ' · ' + last.by : '');
+}
+// All receiving events across stores (for the per-item "last received" + log)
+function _invAllReceipts(){
+  const out = [];
+  (Array.isArray(materials) ? materials : []).forEach(m => {
+    (Array.isArray(m && m.history) ? m.history : []).forEach(h => {
+      if(h && h.action === 'arrival')
+        out.push({cat:m.cat||'other', src:m.source||'warehouse', item:m.name||'—', qty:h.qty, where:h.where||m.pos||'—', when:h.when||h.at||m.date||'', by:h.by||''});
+    });
+  });
+  (Array.isArray(coverInventory) ? coverInventory : []).forEach(c => {
+    (Array.isArray(c && c.history) ? c.history : []).forEach(h => {
+      if(h && h.action === 'arrival')
+        out.push({cat:'covers', src:c.source||'warehouse', item:((c.color||'')+' '+(c.model||'')).trim()||'Cover', qty:h.qty, where:h.where||h.location||'—', when:h.when||h.at||'', by:h.by||''});
+    });
+  });
+  out.sort((a,b) => String(b.when||'').localeCompare(String(a.when||'')));
+  return out;
+}
+
+function renderInvCatBar(){
+  const bar = document.getElementById('inv-catbar'); if(!bar) return;
+  const srcTab = (s,label,icon) => `<button onclick="setInvSrc('${s}')" class="btn btn-sm" style="${_invSrc===s?('background:'+(s==='factory'?'#92400e':'var(--accent)')+';border-color:'+(s==='factory'?'#92400e':'var(--accent)')+';color:#fff'):''};font-weight:700">${icon} ${label}</button>`;
+  const catTab = (c) => `<button onclick="setInvCat('${c.key}')" class="btn btn-sm" style="${_invCat===c.key?'background:var(--text1);border-color:var(--text1);color:#fff':''}">${c.icon} ${c.label}<span style="opacity:.6;font-size:10px;margin-left:5px">${_invCatCount(c.key,_invSrc)}</span></button>`;
+  bar.innerHTML = `<div style="padding:8px;background:var(--bg2);border:1px solid var(--line);border-radius:var(--r-lg);margin-bottom:12px">
+    <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap">
+      <span style="font-size:11px;font-weight:800;color:var(--text3);text-transform:uppercase;letter-spacing:.5px;padding:0 4px">Inventory</span>
+      ${srcTab('warehouse','Warehouse','🏬')} ${srcTab('factory','Factory','🏭')}
+      <span style="flex:1"></span>
+    </div>
+    <div style="display:flex;gap:6px;flex-wrap:wrap;border-top:1px solid var(--line);padding-top:8px">
+      ${INV_CATEGORIES.map(catTab).join('')}
+      <button onclick="setInvCat('__transfers')" class="btn btn-sm" style="${_invCat==='__transfers'?'background:var(--text1);border-color:var(--text1);color:#fff':''}">🔄 Transfers<span style="opacity:.6;font-size:10px;margin-left:5px">${_matTxOpenCount()}</span></button>
+      <button onclick="setInvCat('__moves')" class="btn btn-sm" style="${_invCat==='__moves'?'background:var(--text1);border-color:var(--text1);color:#fff':''}">📋 Movements</button>
+      <button onclick="setInvCat('__pallets')" class="btn btn-sm" style="${_invCat==='__pallets'?'background:var(--text1);border-color:var(--text1);color:#fff':''}">📦 Pallets</button>
+      <button onclick="setInvCat('__incoming')" class="btn btn-sm" style="${_invCat==='__incoming'?'background:var(--text1);border-color:var(--text1);color:#fff':''}">📥 Incoming</button>
+    </div></div>`;
+}
+
+function renderInventoryHub(){
+  renderInvCatBar();
+  const cw = document.getElementById('inv-covers-wrap');
+  const mw = document.getElementById('inv-cat-wrap');
+  if(_invCat === 'covers'){
+    if(cw) cw.style.display = '';
+    if(mw) mw.style.display = 'none';
+    try { _covTab = _invSrc; } catch(e){}            // keep the cover page on the same side
+    if(typeof renderCoverInventory === 'function') renderCoverInventory();
+  } else {
+    if(cw) cw.style.display = 'none';
+    if(mw){
+      mw.style.display = '';
+      if(_invCat === '__moves') renderInvMovements(mw);
+      else if(_invCat === '__transfers') renderInvTransfers(mw);
+      else if(_invCat === '__pallets') renderInvPallets(mw);
+      else if(_invCat === '__incoming') renderInvIncoming(mw);
+      else renderMatCategory(mw, _invCat);
+    }
+  }
+  if(typeof updBadges === 'function') updBadges();
+}
+
+function renderMatCategory(host, cat){
+  const def = INV_CATEGORIES.find(c => c.key === cat) || {label:cat, icon:'📦'};
+  const src = _invSrc;
+  const rows = _invMatRows(cat, src);
+  const totalQty = rows.reduce((s,m) => s + (+m.qty||0), 0);
+  const body = rows.length
+    ? `<table class="tbl" style="width:100%"><thead><tr><th>Item</th><th>Qty</th><th>Location</th><th>Last received</th><th style="text-align:right">Movement</th></tr></thead><tbody>${rows.map(m => `<tr>
+        <td style="font-weight:600">${escapeHTML(m.name||'—')}${m.coverModel?` <span style="font-size:10px;color:var(--text3)">${escapeHTML(m.coverModel)} ${escapeHTML(m.coverColor||'')}</span>`:''}</td>
+        <td style="font-weight:700">${(+m.qty||0)}</td>
+        <td style="font-size:11px">${m.pos ? ('📍 ' + escapeHTML(m.pos)) : '<span style="color:var(--text3)">—</span>'}</td>
+        <td style="font-size:11px;color:var(--text2)">${escapeHTML(_invLastRecv(m))}</td>
+        <td style="text-align:right;white-space:nowrap">
+          <button class="btn btn-sm" title="Receive (in)" onclick="invOpenMove('receive','${cat}','${src}','${m.id}')">+ In</button>
+          <button class="btn btn-sm" title="Issue / remove (out)" onclick="invOpenMove('issue','${cat}','${src}','${m.id}')">− Out</button>
+          <button class="btn btn-sm" title="Transfer to the other side" onclick="invOpenMove('transfer','${cat}','${src}','${m.id}')">⇄</button>
+        </td>
+      </tr>`).join('')}</tbody></table>`
+    : `<div style="padding:30px;text-align:center;color:var(--text3);font-size:12px">No ${def.label.toLowerCase()} in ${src==='factory'?'Factory':'Warehouse'} yet. <a href="#" onclick="event.preventDefault();invOpenMove('receive','${cat}','${src}','')" style="color:var(--accent);font-weight:600">📦 Receive the first one</a></div>`;
+  host.innerHTML = `
+    <div class="card">
+      <div class="card-hd" style="padding:13px 16px;display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+        <div style="flex:1;min-width:180px">
+          <div class="card-title">${src==='factory'?'🏭 Factory':'🏬 Warehouse'} → ${def.icon} ${def.label}</div>
+          <div class="card-sub">${rows.length} item${rows.length===1?'':'s'} · ${totalQty} units · in / out / transfer all post to the ledger</div>
+        </div>
+        <button class="btn btn-p btn-sm" onclick="invOpenMove('receive','${cat}','${src}','')">📦 Receive stock</button>
+      </div>
+      <div class="card-body" style="padding:0">${body}</div>
+    </div>
+    <div id="inv-move-panel"></div>
+    ${renderInvLogHTML(cat, src)}`;
+}
+
+function invOpenMove(kind, cat, src, matId){
+  const host = document.getElementById('inv-move-panel'); if(!host) return;
+  const m = matId ? (Array.isArray(materials)?materials:[]).find(x => String(x.id) === String(matId)) : null;
+  const def = INV_CATEGORIES.find(c => c.key === cat) || {label:cat};
+  const today = (new Date()).toISOString().slice(0,10);
+  const sideLabel = src==='factory'?'Factory':'Warehouse';
+  const other = src==='factory'?'Warehouse':'Factory';
+  let title, fields;
+  if(kind === 'issue'){
+    title = `− Issue / remove ${def.label} — ${sideLabel}`;
+    fields = `
+      <div class="fg"><label class="fl">Item</label><input class="fi" id="inv-r-name" value="${m?escapeHTML(m.name||''):''}" readonly></div>
+      <div class="fg"><label class="fl">Qty out (have ${m?(+m.qty||0):0})</label><input class="fi" id="inv-r-qty" type="number" min="1" max="${m?(+m.qty||0):0}" value="1"></div>
+      <div class="fg" style="grid-column:1/3"><label class="fl">Reason / note</label><input class="fi" id="inv-r-notes" placeholder="e.g. used on job, damaged, sold"></div>`;
+  } else if(kind === 'transfer'){
+    title = `⇄ Transfer ${def.label}: ${sideLabel} → ${other}`;
+    fields = `
+      <div class="fg"><label class="fl">Item</label><input class="fi" id="inv-r-name" value="${m?escapeHTML(m.name||''):''}" readonly></div>
+      <div class="fg"><label class="fl">Qty to move (have ${m?(+m.qty||0):0})</label><input class="fi" id="inv-r-qty" type="number" min="1" max="${m?(+m.qty||0):0}" value="1"></div>
+      <div class="fg" style="grid-column:1/3"><label class="fl">Note</label><input class="fi" id="inv-r-notes" placeholder="optional"></div>`;
+  } else {
+    title = `📦 Receive ${def.label} — ${sideLabel}`;
+    fields = `
+      <div class="fg"><label class="fl">Item / description</label><input class="fi" id="inv-r-name" value="${m?escapeHTML(m.name||''):''}" ${m?'readonly':''} placeholder="e.g. Pump 2HP"></div>
+      <div class="fg"><label class="fl">Qty received</label><input class="fi" id="inv-r-qty" type="number" min="1" value="1"></div>
+      <div class="fg"><label class="fl">Location (where)</label><input class="fi" id="inv-r-loc" value="${m?escapeHTML(m.pos||''):''}" placeholder="optional — shelf / zone / position"></div>
+      <div class="fg"><label class="fl">Date received (when)</label><input class="fi" id="inv-r-date" type="date" value="${today}"></div>
+      <div class="fg" style="grid-column:1/3"><label class="fl">Notes</label><input class="fi" id="inv-r-notes" placeholder="optional"></div>`;
+  }
+  host.innerHTML = `<div class="card" style="margin-top:12px;border:1.5px solid var(--accent)">
+    <div class="card-hd" style="padding:12px 16px"><div class="card-title">${title}</div></div>
+    <div class="card-body" style="padding:14px 16px;display:grid;grid-template-columns:1fr 1fr;gap:10px">
+      ${fields}
+      <div style="grid-column:1/3;display:flex;gap:8px;justify-content:flex-end">
+        <button class="btn btn-sm" onclick="document.getElementById('inv-move-panel').innerHTML=''">Cancel</button>
+        <button class="btn btn-p btn-sm" onclick="invDoMove('${kind}','${cat}','${src}',${m?("'"+m.id+"'"):'null'})">✓ Confirm</button>
+      </div>
+    </div></div>`;
+}
+
+function _invFindMat(cat, src, name){
+  return (Array.isArray(materials)?materials:[]).find(x =>
+    (x.cat||'other') === cat && (x.source||'warehouse') === src &&
+    (x.name||'').trim().toLowerCase() === String(name||'').trim().toLowerCase());
+}
+function _invWho(){ return (typeof ROLES !== 'undefined' && ROLES[currentRole]) ? ROLES[currentRole].label : 'User'; }
+function _invNow(){ return (typeof toISO === 'function') ? toISO() : new Date().toISOString(); }
+function _invPost(o){ if(typeof postMovement === 'function'){ try { postMovement(o); } catch(e){} } }
+
+function invDoMove(kind, cat, src, matId){
+  const gv = id => (document.getElementById(id)?.value||'').trim();
+  const name = gv('inv-r-name');
+  const qty  = parseInt(gv('inv-r-qty')||'0', 10);
+  const notes= gv('inv-r-notes');
+  if(!name){ toast('Missing item','err'); return; }
+  if(!qty || !(qty >= 1)){ toast('Enter a quantity (min 1)','err'); return; }
+  let m = matId ? (Array.isArray(materials)?materials:[]).find(x => String(x.id) === String(matId)) : null;
+  const sideOrg = src==='factory'?'Factory':'Warehouse';
+
+  if(kind === 'issue'){
+    if(!m){ toast('Item not found','err'); return; }
+    const out = Math.min(qty, (+m.qty||0));
+    if(out <= 0){ toast('Nothing to remove (qty 0)','err'); return; }
+    m.qty = (+m.qty||0) - out;
+    m.history = Array.isArray(m.history) ? m.history : [];
+    m.history.push({action:'issue', qty:out, at:_invNow(), when:(new Date()).toISOString().slice(0,10), by:_invWho(), notes});
+    _invPost({type:'601', material:name, qty:out, from:{org:sideOrg, bin:m.pos||''}, note:'Hub issue'+(notes?': '+notes:'')});
+    if(typeof addAct === 'function') addAct(`− Issued ${out} × ${name} (${cat} · ${src})`, 'var(--red)');
+  } else if(kind === 'transfer'){
+    // Staged transfer: create a REQUEST (request -> in transit -> arrived).
+    matTransferRequest(cat, src, name, qty, notes);
+    const host0 = document.getElementById('inv-move-panel'); if(host0) host0.innerHTML = '';
+    renderInventoryHub();
+    toast('Transfer requested — ship it from the 🔄 Transfers tab','ok');
+    return;
+  } else { // receive
+    const loc  = gv('inv-r-loc');
+    const date = gv('inv-r-date') || (new Date()).toISOString().slice(0,10);
+    if(!m) m = _invFindMat(cat, src, name);
+    if(m){
+      m.qty = (+m.qty||0) + qty;
+      if(loc) m.pos = loc;
+      m.source = m.source || src;
+      m.date = date;
+      m.history = Array.isArray(m.history) ? m.history : [];
+    } else {
+      m = {id:(typeof nid!=='undefined'?nid++:Date.now()), name, qty, cat, source:src, pos:loc, date, notes, history:[]};
+      if(Array.isArray(materials)) materials.unshift(m);
+    }
+    m.history.push({action:'arrival', qty, at:_invNow(), when:date, where:loc||'—', by:_invWho(), notes});
+    _invPost({type:'101', material:name, qty, to:{org:sideOrg, bin:loc||''}, note:'Hub receive'+(notes?': '+notes:'')});
+    if(typeof addAct === 'function') addAct(`📦 Received ${qty} × ${name} (${cat} · ${src})${loc?' @ '+loc:''}`, 'var(--teal)');
+  }
+  if(typeof saveState === 'function') saveState();
+  const host = document.getElementById('inv-move-panel'); if(host) host.innerHTML = '';
+  renderInventoryHub();
+  toast('Movement logged','ok');
+}
+
+function _invLogRowsHTML(list){
+  if(!list.length) return `<div style="padding:24px;text-align:center;color:var(--text3);font-size:12px">No receiving records yet.</div>`;
+  const catLabel = k => (INV_CATEGORIES.find(c => c.key === k) || {label:k}).label;
+  return `<table class="tbl" style="width:100%"><thead><tr><th>When</th><th>Item</th><th>Qty</th><th>Where</th><th>Category</th><th>By</th></tr></thead><tbody>${list.map(r => `<tr>
+      <td style="font-size:11px;color:var(--text2)">${escapeHTML(String(r.when||'—'))}</td>
+      <td style="font-weight:600">${escapeHTML(r.item||'—')}</td>
+      <td style="font-weight:700">+${(+r.qty||0)}</td>
+      <td style="font-size:11px">${r.where && r.where!=='—' ? ('📍 '+escapeHTML(String(r.where))) : '<span style="color:var(--text3)">—</span>'}</td>
+      <td style="font-size:11px">${escapeHTML(catLabel(r.cat))}</td>
+      <td style="font-size:11px;color:var(--text3)">${escapeHTML(r.by||'')}</td>
+    </tr>`).join('')}</tbody></table>`;
+}
+function renderInvLogHTML(cat, src){
+  const list = _invAllReceipts().filter(r => r.cat === cat && r.src === src);
+  return `<div class="card" style="margin-top:12px">
+    <div class="card-hd" style="padding:12px 16px"><div><div class="card-title">📋 Receiving log — this category</div><div class="card-sub">${list.length} record${list.length===1?'':'s'} · what arrived, where &amp; when</div></div></div>
+    <div class="card-body" style="padding:0">${_invLogRowsHTML(list.slice(0,200))}</div></div>`;
+}
+
+// Full SAP-style movements ledger, folded into the hub (reads the same `movements`).
+function renderInvMovements(host){
+  const T = (typeof MOVEMENT_TYPES !== 'undefined') ? MOVEMENT_TYPES : {};
+  const list = (Array.isArray(movements) ? movements : []).slice(0, 300);
+  const loc = x => x ? [x.org, x.area, x.bin].filter(Boolean).join(' · ') : '';
+  const rows = list.map(d => {
+    const t = T[d.type] || {label:d.type, dir:''};
+    const when = d.atISO ? String(d.atISO).slice(0,10) : (d.at ? new Date(d.at).toISOString().slice(0,10) : '—');
+    const ft = t.dir==='in' ? ('→ '+(loc(d.to)||'—')) : t.dir==='out' ? ('← '+(loc(d.from)||'—')) : ((loc(d.from)||'—')+' → '+(loc(d.to)||'—'));
+    const dir = t.dir==='in' ? '<span style="color:#16a34a;font-weight:800">IN</span>' : t.dir==='out' ? '<span style="color:#dc2626;font-weight:800">OUT</span>' : '<span style="color:#2563eb;font-weight:800">MOVE</span>';
+    return `<tr><td style="font-size:11px;color:var(--text2)">${escapeHTML(when)}</td><td>${dir}</td><td style="font-size:11px">${escapeHTML(t.label||String(d.type))}</td><td style="font-weight:600">${escapeHTML(d.material||d.sn||'—')}</td><td style="font-weight:700">${(+d.qty||0)}</td><td style="font-size:11px">${escapeHTML(ft)}</td><td style="font-size:11px;color:var(--text3)">${escapeHTML(d.by||'')}</td></tr>`;
+  }).join('');
+  host.innerHTML = `<div class="card">
+    <div class="card-hd" style="padding:13px 16px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+      <div style="flex:1"><div class="card-title">📋 Stock Movements — full ledger</div><div class="card-sub">${list.length} document${list.length===1?'':'s'} · receipts, issues &amp; transfers · newest first</div></div>
+      <button class="btn btn-sm" onclick="goV('movements')">⚙ Advanced · reconciliation / CSV</button>
+    </div>
+    <div class="card-body" style="padding:0">${list.length ? `<table class="tbl" style="width:100%"><thead><tr><th>When</th><th>Dir</th><th>Type</th><th>Item</th><th>Qty</th><th>From → To</th><th>By</th></tr></thead><tbody>${rows}</tbody></table>` : '<div style="padding:24px;text-align:center;color:var(--text3);font-size:12px">No movements yet.</div>'}</div></div>`;
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// MATERIAL TRANSFERS — staged Warehouse ↔ Factory flow, mirroring the
+// spa/cover logistics: REQUEST → IN TRANSIT → ARRIVED (both directions).
+// Stock is conserved at every stage:
+//   request : intent only — no stock moves
+//   ship    : source qty −= n   (n is now "in transit")
+//   receive : destination qty += n   (n leaves transit)
+//   cancel  : if in-transit, n returns to source
+// Each stage posts a document to the SAP movements ledger.
+// Global invariant:  Σ material.qty + Σ(in-transit tx.qty)  is conserved.
+// ──────────────────────────────────────────────────────────────────────
+function _invTransferOther(src){ return src === 'factory' ? 'warehouse' : 'factory'; }
+function _invOrg(s){ return s === 'factory' ? 'Factory' : 'Warehouse'; }
+function _matTxFind(id){ return (Array.isArray(matTransfers) ? matTransfers : []).find(t => String(t.id) === String(id)); }
+function _matTxOpenCount(){ return (Array.isArray(matTransfers) ? matTransfers : []).filter(t => t.status === 'requested' || t.status === 'in-transit').length; }
+
+function matTransferRequest(cat, from, name, qty, note){
+  qty = parseInt(qty, 10);
+  if(!name){ toast('Missing item','err'); return null; }
+  if(!qty || !(qty >= 1)){ toast('Enter a quantity (min 1)','err'); return null; }
+  if(!Array.isArray(matTransfers)) matTransfers = [];
+  const tx = { id:(typeof nid!=='undefined'?nid++:Date.now()), cat, item:name, qty:qty,
+    from:from, to:_invTransferOther(from), status:'requested',
+    requestedAt:_invNow(), requestedBy:_invWho(), shippedAt:null, arrivedAt:null, note:note||'' };
+  matTransfers.unshift(tx);
+  if(typeof addAct === 'function') addAct(`🔄 Transfer requested: ${qty} × ${name} (${cat}) ${_invOrg(from)}→${_invOrg(tx.to)}`,'var(--accent)');
+  if(typeof saveState === 'function') saveState();
+  return tx;
+}
+
+function matTransferShip(id){
+  const tx = _matTxFind(id); if(!tx){ toast('Transfer not found','err'); return; }
+  if(tx.status !== 'requested'){ toast('Only requested transfers can be shipped','err'); return; }
+  const m = _invFindMat(tx.cat, tx.from, tx.item);
+  const have = m ? (+m.qty||0) : 0;
+  if(have < tx.qty){ toast(`Not enough stock at ${_invOrg(tx.from)} (have ${have}, need ${tx.qty})`,'err'); return; }
+  m.qty = have - tx.qty;
+  m.history = Array.isArray(m.history) ? m.history : [];
+  m.history.push({action:'issue', qty:tx.qty, at:_invNow(), when:(new Date()).toISOString().slice(0,10), by:_invWho(), notes:'transfer ship → '+tx.to});
+  tx.status = 'in-transit'; tx.shippedAt = _invNow(); tx.shippedBy = _invWho();
+  _invPost({type:'601', material:tx.item, qty:tx.qty, from:{org:_invOrg(tx.from), bin:m.pos||''}, note:'Transfer ship → '+_invOrg(tx.to)});
+  if(typeof addAct === 'function') addAct(`🚚 In transit: ${tx.qty} × ${tx.item} ${_invOrg(tx.from)}→${_invOrg(tx.to)}`,'var(--orange)');
+  if(typeof saveState === 'function') saveState();
+  if(document.getElementById('inv-cat-wrap')) renderInventoryHub();
+  toast('Shipped — now in transit','ok');
+}
+
+function matTransferReceive(id){
+  const tx = _matTxFind(id); if(!tx){ toast('Transfer not found','err'); return; }
+  if(tx.status !== 'in-transit'){ toast('Only in-transit transfers can be received','err'); return; }
+  let m = _invFindMat(tx.cat, tx.to, tx.item);
+  if(!m){ m = {id:(typeof nid!=='undefined'?nid++:Date.now()), name:tx.item, qty:0, cat:tx.cat, source:tx.to, pos:'', date:(new Date()).toISOString().slice(0,10), notes:'', history:[]}; if(Array.isArray(materials)) materials.unshift(m); }
+  m.qty = (+m.qty||0) + tx.qty;
+  m.history = Array.isArray(m.history) ? m.history : [];
+  m.history.push({action:'arrival', qty:tx.qty, at:_invNow(), when:(new Date()).toISOString().slice(0,10), where:'transfer from '+_invOrg(tx.from), by:_invWho(), notes:tx.note});
+  tx.status = 'arrived'; tx.arrivedAt = _invNow(); tx.arrivedBy = _invWho();
+  _invPost({type:'101', material:tx.item, qty:tx.qty, to:{org:_invOrg(tx.to), bin:m.pos||''}, note:'Transfer arrived from '+_invOrg(tx.from)});
+  if(typeof addAct === 'function') addAct(`📥 Transfer arrived: ${tx.qty} × ${tx.item} at ${_invOrg(tx.to)}`,'var(--teal)');
+  if(typeof saveState === 'function') saveState();
+  if(document.getElementById('inv-cat-wrap')) renderInventoryHub();
+  toast('Received — stock added at destination','ok');
+}
+
+function matTransferCancel(id){
+  const tx = _matTxFind(id); if(!tx){ return; }
+  if(tx.status === 'arrived' || tx.status === 'cancelled'){ toast('Cannot cancel a closed transfer','err'); return; }
+  if(tx.status === 'in-transit'){
+    let m = _invFindMat(tx.cat, tx.from, tx.item);
+    if(!m){ m = {id:(typeof nid!=='undefined'?nid++:Date.now()), name:tx.item, qty:0, cat:tx.cat, source:tx.from, pos:'', date:(new Date()).toISOString().slice(0,10), notes:'', history:[]}; if(Array.isArray(materials)) materials.unshift(m); }
+    m.qty = (+m.qty||0) + tx.qty;
+    m.history = Array.isArray(m.history) ? m.history : [];
+    m.history.push({action:'arrival', qty:tx.qty, at:_invNow(), when:(new Date()).toISOString().slice(0,10), where:'transfer cancelled (returned)', by:_invWho()});
+    _invPost({type:'101', material:tx.item, qty:tx.qty, to:{org:_invOrg(tx.from)}, note:'Transfer cancelled — returned to '+_invOrg(tx.from)});
+  }
+  tx.status = 'cancelled'; tx.cancelledAt = _invNow();
+  if(typeof addAct === 'function') addAct(`✖ Transfer cancelled: ${tx.qty} × ${tx.item}`,'var(--red)');
+  if(typeof saveState === 'function') saveState();
+  if(document.getElementById('inv-cat-wrap')) renderInventoryHub();
+  toast('Transfer cancelled','ok');
+}
+
+function renderInvTransfers(host){
+  const all = (Array.isArray(matTransfers) ? matTransfers : []);
+  const req = all.filter(t => t.status === 'requested');
+  const tr  = all.filter(t => t.status === 'in-transit');
+  const done = all.filter(t => t.status === 'arrived' || t.status === 'cancelled').slice(0, 120);
+  const dir = t => `${_invOrg(t.from)} → ${_invOrg(t.to)}`;
+  const tbl = (list, actions) => list.length
+    ? `<table class="tbl" style="width:100%"><thead><tr><th>Item</th><th>Qty</th><th>Direction</th><th>Category</th><th>When</th><th style="text-align:right">Action</th></tr></thead><tbody>${list.map(t => `<tr>
+        <td style="font-weight:600">${escapeHTML(t.item||'—')}</td>
+        <td style="font-weight:700">${(+t.qty||0)}</td>
+        <td style="font-size:11px">${escapeHTML(dir(t))}</td>
+        <td style="font-size:11px">${escapeHTML(t.cat||'')}</td>
+        <td style="font-size:11px;color:var(--text2)">${escapeHTML(String(t.arrivedAt||t.shippedAt||t.requestedAt||'').slice(0,10))}</td>
+        <td style="text-align:right;white-space:nowrap">${actions(t)}</td></tr>`).join('')}</tbody></table>`
+    : `<div style="padding:20px;text-align:center;color:var(--text3);font-size:12px">None.</div>`;
+  const card = (title, sub, inner) => `<div class="card" style="margin-bottom:12px"><div class="card-hd" style="padding:12px 16px"><div><div class="card-title">${title}</div><div class="card-sub">${sub}</div></div></div><div class="card-body" style="padding:0">${inner}</div></div>`;
+  host.innerHTML =
+      card('📝 Requested', req.length + ' awaiting shipment', tbl(req, t => `<button class="btn btn-sm btn-p" onclick="matTransferShip('${t.id}')">🚚 Ship</button> <button class="btn btn-sm" onclick="matTransferCancel('${t.id}')">✖</button>`))
+    + card('🚚 In Transit', tr.length + ' en route', tbl(tr, t => `<button class="btn btn-sm btn-p" onclick="matTransferReceive('${t.id}')">📥 Receive</button> <button class="btn btn-sm" onclick="matTransferCancel('${t.id}')">↩ Return</button>`))
+    + card('✓ Completed', done.length + ' arrived / cancelled (recent)', tbl(done, t => `<span style="font-size:11px;font-weight:700;color:${t.status==='arrived'?'#16a34a':'#dc2626'}">${t.status==='arrived'?'✓ Arrived':'✖ Cancelled'}</span>`));
+}
+
+
+// ── PALLETS view (folded into the hub) ─────────────────────────────────
+// Groups the current side's materials by palletId so multi-item pallets show
+// as a block. Reads the existing palletId / palletNote fields — no new data.
+function renderInvPallets(host){
+  const src = _invSrc;
+  const mats = (Array.isArray(materials) ? materials : []).filter(m => m && (m.source||'warehouse') === src);
+  const withP = mats.filter(m => m.palletId);
+  const loose = mats.filter(m => !m.palletId);
+  const groups = {};
+  withP.forEach(m => {
+    const id = m.palletId;
+    if(!groups[id]) groups[id] = {id, note:m.palletNote||'Pallet', date:m.date||'', items:[]};
+    groups[id].items.push(m);
+  });
+  const list = Object.values(groups);
+  const palletCard = g => {
+    const tot = g.items.reduce((s,m)=>s+(+m.qty||0),0);
+    return `<div class="card" style="margin-bottom:10px">
+      <div class="card-hd" style="padding:11px 14px"><div><div class="card-title">📦 ${escapeHTML(g.note)} <span style="font-size:10px;color:var(--text3);font-weight:600">· ${g.items.length} item${g.items.length===1?'':'s'} · ${tot} units</span></div><div class="card-sub">${escapeHTML(String(g.date||''))}${g.items[0]&&g.items[0].pos?(' · 📍 '+escapeHTML(g.items[0].pos)):''}</div></div></div>
+      <div class="card-body" style="padding:0"><table class="tbl" style="width:100%"><thead><tr><th>Item</th><th>Qty</th><th>Category</th><th>Location</th></tr></thead><tbody>${g.items.map(m=>`<tr><td style="font-weight:600">${escapeHTML(m.name||'—')}</td><td style="font-weight:700">${(+m.qty||0)}</td><td style="font-size:11px">${escapeHTML(m.cat||'other')}</td><td style="font-size:11px">${m.pos?('📍 '+escapeHTML(m.pos)):'<span style="color:var(--text3)">—</span>'}</td></tr>`).join('')}</tbody></table></div></div>`;
+  };
+  host.innerHTML = `<div class="card" style="margin-bottom:12px"><div class="card-hd" style="padding:13px 16px"><div><div class="card-title">📦 Pallets — ${src==='factory'?'Factory':'Warehouse'}</div><div class="card-sub">${list.length} pallet${list.length===1?'':'s'} · ${loose.length} loose item${loose.length===1?'':'s'} (in their category lists)</div></div></div></div>`
+    + (list.length ? list.map(palletCard).join('') : `<div style="padding:24px;text-align:center;color:var(--text3);font-size:12px">No pallets on this side. Pallets appear here when received with a pallet/shipment note.</div>`);
+}
+
+// ── INCOMING view (folded into the hub) ────────────────────────────────
+// Surfaces the spa/accessory arrival queue inside the hub. The deep
+// assign-to-floor workflow stays in the full Incoming view (one click away).
+function renderInvIncoming(host){
+  const inc = (Array.isArray(incoming) ? incoming : []);
+  const pend = inc.filter(i => i && i.status === 'pending');
+  const arr  = inc.filter(i => i && i.status === 'arrived');
+  const lbl = i => escapeHTML(i.accessoryName || i.description || (i.type ? (i.type.charAt(0).toUpperCase()+i.type.slice(1)) : 'Item'));
+  const tbl = list => list.length
+    ? `<table class="tbl" style="width:100%"><thead><tr><th>S/N</th><th>Dealer</th><th>Type</th><th>Detail</th><th>Note</th></tr></thead><tbody>${list.map(i=>`<tr>
+        <td style="font-weight:600">${escapeHTML(i.sn||i.spaSn||'—')}</td>
+        <td style="font-size:11px">${escapeHTML(i.dealer||i.spaDealer||'—')}</td>
+        <td style="font-size:11px">${escapeHTML(i.type||'—')}</td>
+        <td style="font-size:11px">${lbl(i)}</td>
+        <td style="font-size:11px;color:var(--text3)">${escapeHTML(i.notes||'')}</td></tr>`).join('')}</tbody></table>`
+    : `<div style="padding:20px;text-align:center;color:var(--text3);font-size:12px">None.</div>`;
+  host.innerHTML = `<div class="card" style="margin-bottom:12px">
+      <div class="card-hd" style="padding:13px 16px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <div style="flex:1"><div class="card-title">📥 Incoming — arrivals queue</div><div class="card-sub">${pend.length} pending · ${arr.length} arrived (awaiting placement)</div></div>
+        <button class="btn btn-sm" onclick="goV('incoming')">⚙ Open full Incoming (assign to floor)</button>
+      </div></div>`
+    + `<div class="card" style="margin-bottom:12px"><div class="card-hd" style="padding:11px 14px"><div class="card-title">🚚 Arrived · awaiting placement</div></div><div class="card-body" style="padding:0">${tbl(arr)}</div></div>`
+    + `<div class="card"><div class="card-hd" style="padding:11px 14px"><div class="card-title">⏳ Pending arrival</div></div><div class="card-body" style="padding:0">${tbl(pend)}</div></div>`;
+}
+
+
 // Recent arrivals (from cover-row history) for a floor cell type — used by the
 // cover-cell panel. Pass null to get all warehouse arrivals.
 function coverArrivalsFor(cellType){
@@ -24553,7 +25225,7 @@ async function runDiagnostics(){
 
   // ── TEST 2: state JSON serializable + within quota ──
   try {
-    const state = {nid, units, dispatched, incoming, materials, events, activity, queue, cfg, factory, marriages, dispatchRequests, coverInventory, colorLibrary, coverModelMapping, movements, _epoch: (window.ASPEN_DATA_EPOCH || 1)};
+    const state = {nid, units, dispatched, incoming, materials, events, activity, queue, cfg, factory, marriages, dispatchRequests, coverInventory, colorLibrary, coverModelMapping, movements, matTransfers, _epoch: (window.ASPEN_DATA_EPOCH || 1)};
     const json = JSON.stringify(state);
     const size = (new Blob([json]).size / 1024).toFixed(1);
     const sizeMb = (json.length / 1024 / 1024).toFixed(2);
@@ -25497,6 +26169,7 @@ window.addEventListener('storage', e => {
       if(Array.isArray(restored.dispatched)) dispatched = restored.dispatched;
       if(Array.isArray(restored.incoming)) incoming = restored.incoming;
       if(Array.isArray(restored.materials)) materials = restored.materials;
+      if(Array.isArray(restored.matTransfers)) matTransfers = restored.matTransfers;
       if(Array.isArray(restored.events)) events = restored.events;
       if(Array.isArray(restored.activity)) activity = restored.activity;
       if(Array.isArray(restored.queue)) queue = restored.queue;
@@ -26089,7 +26762,7 @@ document.addEventListener('keydown', e=>{
       } else if(kind === 'daily'){
         label = `auto_daily_${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}`;
       }
-      const state = {nid, units, dispatched, incoming, materials, events, activity, queue, cfg, factory, marriages, dispatchRequests, coverInventory, colorLibrary, coverModelMapping, movements, _epoch: (window.ASPEN_DATA_EPOCH || 1)};
+      const state = {nid, units, dispatched, incoming, materials, events, activity, queue, cfg, factory, marriages, dispatchRequests, coverInventory, colorLibrary, coverModelMapping, movements, matTransfers, _epoch: (window.ASPEN_DATA_EPOCH || 1)};
       const payload = {
         timestamp: Date.now(),
         label,
@@ -26134,7 +26807,7 @@ document.addEventListener('keydown', e=>{
       if(!label){ label = prompt('Label for this restore point:\n\nE.g.: "before-tubs-19-may", "end-of-day-19-may"'); if(!label) return; }
       const safeLabel = String(label).replace(/[.#$\[\]\/\s]+/g,'_').slice(0,100);
       if(!safeLabel){ if(typeof toast==='function') toast('Invalid label','err'); return; }
-      const state = {nid, units, dispatched, incoming, materials, events, activity, queue, cfg, factory, marriages, dispatchRequests, coverInventory, colorLibrary, coverModelMapping, movements, _epoch: (window.ASPEN_DATA_EPOCH || 1)};
+      const state = {nid, units, dispatched, incoming, materials, events, activity, queue, cfg, factory, marriages, dispatchRequests, coverInventory, colorLibrary, coverModelMapping, movements, matTransfers, _epoch: (window.ASPEN_DATA_EPOCH || 1)};
       const payload = {
         timestamp: Date.now(), label,
         uploadedBy: (typeof currentUser !== 'undefined' && currentUser?.name) ? currentUser.name : 'Admin',
