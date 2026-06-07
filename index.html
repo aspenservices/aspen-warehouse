@@ -3748,6 +3748,12 @@ body.dark-mode .mar-card-track {
               <div class="fc" onclick="setFilt('extra',this)">Extra</div>
               <div class="fc" onclick="setFilt('empty',this)">Empty</div>
             </div>
+            <div style="display:flex;align-items:center;gap:1px;border:1px solid var(--line);border-radius:8px;padding:2px;background:var(--bg1)" title="Zoom del mapa">
+              <button class="btn btn-sm" onclick="setMapZoom(-0.1)" title="Alejar" style="padding:4px 10px;font-weight:800;font-size:14px;line-height:1">−</button>
+              <span id="map-zoom-label" style="font-size:10.5px;font-weight:700;color:var(--text2);min-width:36px;text-align:center">100%</span>
+              <button class="btn btn-sm" onclick="setMapZoom(0.1)" title="Acercar" style="padding:4px 10px;font-weight:800;font-size:14px;line-height:1">+</button>
+              <button class="btn btn-sm" onclick="setMapZoom(0)" title="Restablecer (100%)" style="padding:4px 8px;font-size:12px">⤢</button>
+            </div>
             <button class="btn" onclick="openRowManager()" title="Add, edit, or lock warehouse rows" style="padding:6px 12px;font-size:11.5px;font-weight:700;background:linear-gradient(135deg,#fefce8,#fef3c7);border-color:#eab308;color:#854d0e">
               🛠 Manage rows
             </button>
@@ -3766,9 +3772,11 @@ body.dark-mode .mar-card-track {
               <div class="lg"><div class="lg-c" style="background:linear-gradient(135deg,#fdf2f8,#fce7f3);border:1.5px solid #db2777"></div>Marriage Inventory</div>
             </div>
             <div class="map-outer" style="position:relative">
-              <div class="floor" id="floor"></div>
-              <!-- Marriage lines SVG overlay -->
-              <svg id="marriage-overlay" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:10"></svg>
+              <div id="map-zoom-layer" style="position:relative">
+                <div class="floor" id="floor"></div>
+                <!-- Marriage lines SVG overlay -->
+                <svg id="marriage-overlay" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:10"></svg>
+              </div>
             </div>
           </div>
           <!-- 3D VIEW -->
@@ -4709,7 +4717,7 @@ let _fbInitAttempts = 0;
 //   /app_version/current  (in Firebase console, manually, OR call
 //   pushVersionToFirebase() from the Admin console at deploy time)
 // ══════════════════════════════════════════════════════════════════
-const APP_VERSION = 'v4.93';
+const APP_VERSION = 'v4.96';
 window.APP_VERSION = APP_VERSION;
 
 // ── DATA EPOCH (generation guard) ────────────────────────────────────
@@ -10638,6 +10646,22 @@ function showCoverCellPanel(pos){
       </div>`
     : '';
   const presetModel = (st.lines[0] && st.lines[0].model) ? st.lines[0].model : '';
+  // Inline cell TITLE editor (v4.94). The floor label can be renamed per-cell —
+  // same cfg.cellOverrides[pos].label the gear editor uses, but right here where
+  // you clicked. Default shown as placeholder; ↺ clears back to default.
+  const _ov = (typeof getCellOverride === 'function') ? (getCellOverride(pos) || {}) : {};
+  const _curTitle = _ov.label || '';
+  const _defTitle = (_rowK === '15A' || _rowK === '15B')
+    ? ((typeof coverTypeFor === 'function') ? coverTypeFor(colLetter) : pos)
+    : ((typeof P_LABELS_NEW !== 'undefined' && P_LABELS_NEW[+_rowK]) ? P_LABELS_NEW[+_rowK] : pos);
+  const titleHtml = canAdd ? `<div style="margin:0 2px 12px">
+      <div style="font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">Título de la celda</div>
+      <div style="display:flex;gap:6px;align-items:center">
+        <input class="fi" id="cover-cell-title" value="${String(_curTitle).replace(/"/g,'&quot;')}" placeholder="${String(_defTitle).replace(/"/g,'&quot;')}" maxlength="40" style="flex:1;font-size:12px" title="Custom title for this cell">
+        <button class="btn btn-sm" onclick="setCoverCellTitle('${pos}')" style="background:var(--teal);border-color:var(--teal);color:#fff">Set title</button>
+        ${_curTitle ? `<button class="btn btn-sm" onclick="setCoverCellTitle('${pos}', true)" title="Reset to default (${String(_defTitle).replace(/"/g,'&quot;')})">↺</button>` : ''}
+      </div>
+    </div>` : '';
   const arrivals = (typeof coverArrivalsFor === 'function' && cellType) ? coverArrivalsFor(cellType).slice(0, 6) : [];
   const arrHtml = arrivals.length ? `<hr class="sep">
     <div style="font-size:11px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.05em;margin:2px 2px 7px">📦 Recent arrivals</div>
@@ -10662,6 +10686,7 @@ function showCoverCellPanel(pos){
       <button class="btn btn-sm" onclick="closePanel()">✕ Close</button>
     </div>
     ${_itemsHtml}
+    ${titleHtml}
     <div style="display:flex;align-items:baseline;gap:8px;margin:4px 2px 12px">
       <span style="font-family:var(--mono);font-weight:800;font-size:26px;line-height:1;color:${totalColor}">${st.qty}</span>
       <span style="font-size:13px;color:var(--text3);font-weight:700">/ ${_capP}</span>
@@ -10679,6 +10704,21 @@ function showCoverCellPanel(pos){
   </div>`;
   document.getElementById('float-panel').innerHTML='';
   document.getElementById('cell-panel').scrollIntoView({behavior:'smooth',block:'nearest'});
+}
+
+// Set/clear a custom TITLE for a cover cell from its panel. Writes the same
+// cfg.cellOverrides[pos].label the gear editor uses (preserving any type/lock),
+// so the floor label updates immediately and syncs. (v4.94)
+function setCoverCellTitle(pos, reset){
+  const inp = document.getElementById('cover-cell-title');
+  const val = reset ? '' : ((inp && inp.value || '').trim());
+  const ov = Object.assign({}, (typeof getCellOverride === 'function' ? getCellOverride(pos) : null) || {});
+  if(val) ov.label = val; else delete ov.label;
+  if(typeof setCellOverride === 'function') setCellOverride(pos, Object.keys(ov).length ? ov : null);
+  if(typeof addAct === 'function') addAct(`⚙ Cover cell ${pos} title ${val ? `set to "${val}"` : 'reset to default'}`,'var(--teal)');
+  if(typeof drawMap === 'function') drawMap();
+  if(typeof toast === 'function') toast(val ? `Título: ${val}` : 'Título restablecido', 'ok');
+  showCoverCellPanel(pos);   // refresh the panel in place
 }
 
 function selPosPanel(pos){
@@ -10716,11 +10756,33 @@ function selPosPanel(pos){
   showCellPanel(pos, cu);
 }
 
+// ── 2D MAP ZOOM (v4.95) ──────────────────────────────────────────────────
+// Lets the floor be zoomed OUT to see more at once (the grid is ~1100px+ wide).
+// CSS `zoom` on the wrapper reflows so the scroll container's bars track it, and
+// the marriage overlay (re-measured below) stays aligned because it lives in the
+// same zoomed layer. Persisted via lsGet/lsSet (file:// safe wrappers).
+let mapZoom = (() => { try { const v = (typeof lsGet === 'function') ? parseFloat(lsGet('mapZoom')) : NaN; return (v >= 0.5 && v <= 1.4) ? v : 1; } catch(e){ return 1; } })();
+function _applyMapZoom(){
+  const layer = document.getElementById('map-zoom-layer');
+  if(layer) layer.style.zoom = mapZoom;
+  const lbl = document.getElementById('map-zoom-label');
+  if(lbl) lbl.textContent = Math.round(mapZoom * 100) + '%';
+}
+function setMapZoom(delta){
+  if(delta === 0) mapZoom = 1;                                  // reset / fit
+  else mapZoom = Math.min(1.4, Math.max(0.5, Math.round((mapZoom + delta) * 10) / 10));
+  _applyMapZoom();
+  try { if(typeof lsSet === 'function') lsSet('mapZoom', String(mapZoom)); } catch(e){}
+  if(typeof renderMarriageOverlay === 'function') setTimeout(renderMarriageOverlay, 30);
+}
+window.setMapZoom = setMapZoom;
+
 function drawMap(){
   // Safety net: re-seat any colliding/gapped stack levels before drawing so the
   // floor is ALWAYS shown consistent, no matter how the conflict arose (sync,
   // import, legacy data). Idempotent + deterministic → a no-op on healthy data.
   try { if(typeof normalizeFloorStacks === 'function') normalizeFloorStacks(); } catch(e){ console.warn('[normalize on draw]', e); }
+  try { _applyMapZoom(); } catch(e){}
   const floor = document.getElementById('floor');
   const q = (document.getElementById('map-srch')?.value||'').toLowerCase().trim();
   floor.innerHTML='';
@@ -19074,7 +19136,12 @@ function update3D(){
   // reflect LIVE inventory. Tapping a rack opens the real cover panel.
   let _coverTotal = 0;
   if(typeof COVER_TYPES_NEW !== 'undefined' && typeof coverCellStock === 'function'){
-    const tubGeo = new THREE.CylinderGeometry(0.42, 0.34, 0.30, 18);
+    // Real covers are flat grey panels stacked on a wooden pallet (not tubs).
+    const palletGeo     = new THREE.BoxGeometry(1.5, 0.18, 1.3);
+    const palletFootGeo = new THREE.BoxGeometry(1.5, 0.10, 0.18);
+    const coverGeo      = new THREE.BoxGeometry(1.32, 0.17, 1.16);
+    const palletMat     = new THREE.MeshStandardMaterial({color:0xB5905A, roughness:0.85, metalness:0.0});
+    const greyShades    = [0x9AA3AB, 0xA7AEB5, 0x939CA4, 0xB0B7BE];
     COVER_TYPES_NEW.forEach((ct, ctIdx)=>{
       const pos = '15A-' + ct.a;
       const w3 = pos2World(pos, 0);
@@ -19086,28 +19153,30 @@ function update3D(){
       const rack = new THREE.Group();
       rack.position.set(w3.x, 0, w3.z);
 
-      // copper rack frame (uprights + 2 shelves)
-      const frameMat = new THREE.MeshStandardMaterial({color:0xB5733A, roughness:0.6, metalness:0.1});
-      const postGeo  = new THREE.BoxGeometry(0.1, 3.0, 0.1);
-      [[-0.6,-0.6],[0.6,-0.6],[-0.6,0.6],[0.6,0.6]].forEach(([px,pz])=>{
-        const p = new THREE.Mesh(postGeo, frameMat); p.position.set(px,1.5,pz); p.castShadow=true; rack.add(p);
-      });
-      [0.5,1.6].forEach(sy=>{
-        const sh = new THREE.Mesh(new THREE.BoxGeometry(1.4,0.08,1.4), frameMat); sh.position.set(0,sy,0); sh.receiveShadow=true; rack.add(sh);
-      });
+      // Wooden pallet base — matches how covers really sit in the yard
+      const pallet = new THREE.Mesh(palletGeo, palletMat);
+      pallet.position.set(0, 0.09, 0); pallet.castShadow = true; pallet.receiveShadow = true; rack.add(pallet);
+      [-0.5, 0, 0.5].forEach(fz => { const foot = new THREE.Mesh(palletFootGeo, palletMat); foot.position.set(0, 0.02, fz); rack.add(foot); });
 
-      // tubs — visual count up to 8, brand-colored; height reads stock at a glance
-      const shown    = Math.min(qty, 8);
-      const shellCol = [0x1C8FA8,0x134A63,0x4FC3D9,0xB5733A][ctIdx % 4];
-      const rackUD   = {coverRack:true, pos, cellType:ct.t, name:ct.name, qty};
+      // Stacked FLAT grey covers — visual count up to 9, lightly jittered so the
+      // pile looks natural (like the real leaning stacks). Height reads stock.
+      const shown  = Math.min(qty, 9);
+      const rackUD = {coverRack:true, pos, cellType:ct.t, name:ct.name, qty};
       for(let i=0;i<shown;i++){
-        const col = (i % 2) ? 0.32 : -0.32, lvl = Math.floor(i/2);
-        const tub = new THREE.Mesh(tubGeo.clone(), new THREE.MeshStandardMaterial({color:shellCol, roughness:0.45, metalness:0.08}));
-        tub.position.set(col, 0.62 + lvl*0.42, 0); tub.castShadow = true;
-        tub.userData = rackUD; rack.add(tub); W3D.state.unitMeshes.push(tub);
-        const water = new THREE.Mesh(new THREE.CylinderGeometry(0.34,0.34,0.03,18),
-          new THREE.MeshStandardMaterial({color:0x4FC3D9, roughness:0.2, emissive:0x4FC3D9, emissiveIntensity:0.18}));
-        water.position.set(col, 0.78 + lvl*0.42, 0); rack.add(water);
+        const jx = (((i*37)%7) - 3) * 0.012;
+        const jz = (((i*53)%7) - 3) * 0.012;
+        const cover = new THREE.Mesh(coverGeo,
+          new THREE.MeshStandardMaterial({color:greyShades[i%greyShades.length], roughness:0.8, metalness:0.03}));
+        cover.position.set(jx, 0.285 + i*0.18, jz);
+        cover.rotation.y = (((i*29)%7) - 3) * 0.012;
+        cover.castShadow = true; cover.receiveShadow = true;
+        cover.userData = rackUD; rack.add(cover); W3D.state.unitMeshes.push(cover);
+        // Grey binding band around the cover's edge (the seam/strap on real covers)
+        const band = new THREE.Mesh(new THREE.BoxGeometry(1.36, 0.055, 1.20),
+          new THREE.MeshStandardMaterial({color:0x6B7280, roughness:0.7, metalness:0.04}));
+        band.position.set(jx, 0.285 + i*0.18, jz);
+        band.rotation.y = cover.rotation.y;
+        band.userData = rackUD; rack.add(band);
       }
 
       // invisible hit box so even an EMPTY rack is tappable
