@@ -4709,7 +4709,7 @@ let _fbInitAttempts = 0;
 //   /app_version/current  (in Firebase console, manually, OR call
 //   pushVersionToFirebase() from the Admin console at deploy time)
 // ══════════════════════════════════════════════════════════════════
-const APP_VERSION = 'v4.91';
+const APP_VERSION = 'v4.93';
 window.APP_VERSION = APP_VERSION;
 
 // ── DATA EPOCH (generation guard) ────────────────────────────────────
@@ -5762,11 +5762,31 @@ function mergeCfgPreservingPins(localCfg, remoteCfg){
     for(const k in R){ if(R[k] != null && R[k] !== '') out[k] = R[k]; }
     return out;
   };
-  ['coverModelCell','rowOverrides','cellOverrides'].forEach(key => {
+  ['rowOverrides','cellOverrides'].forEach(key => {
     const hasL = localCfg && localCfg[key] && typeof localCfg[key] === 'object';
     const hasR = remoteCfg[key] && typeof remoteCfg[key] === 'object';
     if(hasL || hasR) merged[key] = _deepMergeMap(localCfg && localCfg[key], remoteCfg[key]);
   });
+  // Cover model→cell mapping: LAST-WRITER-WINS by per-model timestamp (v4.93).
+  // A plain "remote wins" merge reverted a fresh reassignment whenever a stale
+  // peer still held the old cell — so reassigning an already-mapped cover never
+  // stuck across devices. Timestamps (cfg.coverModelCellUpdatedAt) fix that and
+  // let an explicit unassign ('') propagate too.
+  {
+    const Lm = (localCfg && typeof localCfg.coverModelCell === 'object') ? localCfg.coverModelCell : {};
+    const Rm = (typeof remoteCfg.coverModelCell === 'object') ? remoteCfg.coverModelCell : {};
+    const Lt = (localCfg && typeof localCfg.coverModelCellUpdatedAt === 'object') ? localCfg.coverModelCellUpdatedAt : {};
+    const Rt = (typeof remoteCfg.coverModelCellUpdatedAt === 'object') ? remoteCfg.coverModelCellUpdatedAt : {};
+    const outMap = {}, outTs = {};
+    const keys = new Set([...Object.keys(Lm), ...Object.keys(Rm)]);
+    for(const k of keys){
+      const lt = Lt[k] || '', rt = Rt[k] || '';
+      if(rt > lt){ if(k in Rm) outMap[k] = Rm[k]; outTs[k] = rt; }
+      else { if(k in Lm) outMap[k] = Lm[k]; if(lt || rt) outTs[k] = lt || rt; }
+    }
+    merged.coverModelCell = outMap;
+    merged.coverModelCellUpdatedAt = outTs;
+  }
   // Delete tombstones (v4.91): union by LATEST timestamp so neither side's
   // intentional deletes are lost on a shallow cfg overwrite.
   {
@@ -10577,10 +10597,21 @@ function _coverTypeForCol(colLetter){
 }
 function showCoverCellPanel(pos){
   selPos = pos; if(typeof drawMap === 'function') drawMap();
-  const colLetter = String(pos).split('-')[1] || '';
-  const ctDef = _coverTypeForCol(colLetter);
-  const cellType = ctDef ? ctDef.t : null;
-  const modelsLabel = ctDef ? ctDef.name : '';
+  const _parts = String(pos).split('-');
+  const _rowK = _parts[0];
+  const colLetter = _parts[1] || '';
+  let cellType, modelsLabel;
+  if(_rowK === '15A' || _rowK === '15B'){
+    const ctDef = _coverTypeForCol(colLetter);
+    cellType = ctDef ? ctDef.t : null;
+    modelsLabel = ctDef ? ctDef.name : '';
+  } else {
+    // Any other cover cell (e.g. 12P, or a cell converted to cover storage):
+    // its POSITION is its stock key, so covers map straight to it. (v4.92)
+    cellType = pos;
+    const _pl = (typeof P_LABELS_NEW !== 'undefined') ? P_LABELS_NEW[+_rowK] : '';
+    modelsLabel = _pl || 'Cover storage';
+  }
   const st = (cellType && typeof coverCellStock === 'function') ? coverCellStock(cellType) : {qty:0, low:false, lines:[]};
   const sw = {black:'#111827','black pallet':'#111827',white:'#f8fafc',gray:'#9ca3af',grey:'#9ca3af',tan:'#d2b48c',blue:'#3b82f6',brown:'#92400e',silver:'#cbd5e1'};
   const swatch = c => sw[String(c||'').toLowerCase()] || '#cbd5e1';
@@ -10597,6 +10628,15 @@ function showCoverCellPanel(pos){
       </div>`).join('')
     : `<div style="padding:14px;text-align:center;color:var(--text3);font-size:12px">No warehouse cover stock mapped to this cell${modelsLabel?` (models: ${modelsLabel})`:''}.</div>`;
   const canAdd = (typeof canEdit !== 'function') || canEdit();
+  // Safety: pstor cells used to also hold tubs/materials via the item panel.
+  // If any items are stored here, surface a link so they're never hidden. (v4.92)
+  const _itemsHere = (Array.isArray(units) ? units.filter(u => u.pos === pos) : []);
+  const _itemsHtml = _itemsHere.length
+    ? `<div style="background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:8px 11px;margin:0 0 10px;font-size:11.5px;color:#92400e;display:flex;justify-content:space-between;align-items:center;gap:8px">
+        <span>📦 ${_itemsHere.length} ítem(s) guardado(s) en esta posición.</span>
+        <button class="btn btn-sm" onclick="showCellPanel('${pos}', units.filter(u=>u.pos==='${pos}'))">Ver ítems</button>
+      </div>`
+    : '';
   const presetModel = (st.lines[0] && st.lines[0].model) ? st.lines[0].model : '';
   const arrivals = (typeof coverArrivalsFor === 'function' && cellType) ? coverArrivalsFor(cellType).slice(0, 6) : [];
   const arrHtml = arrivals.length ? `<hr class="sep">
@@ -10621,6 +10661,7 @@ function showCoverCellPanel(pos){
       <div><div class="dp-pos">Position ${pos} · 🪣 Covers</div><div class="dp-sub">${cellType?`${cellType} — ${modelsLabel}`:'Cover storage'} · warehouse stock</div></div>
       <button class="btn btn-sm" onclick="closePanel()">✕ Close</button>
     </div>
+    ${_itemsHtml}
     <div style="display:flex;align-items:baseline;gap:8px;margin:4px 2px 12px">
       <span style="font-family:var(--mono);font-weight:800;font-size:26px;line-height:1;color:${totalColor}">${st.qty}</span>
       <span style="font-size:13px;color:var(--text3);font-weight:700">/ ${_capP}</span>
@@ -10642,12 +10683,17 @@ function showCoverCellPanel(pos){
 
 function selPosPanel(pos){
   if(!pos) return;
-  // Cover storage cells (15A-* / 15B-*) hold COVERS, not tubs. Route the click to
-  // the cover-stock panel instead of the empty unit panel. Only cover/roll cells —
-  // not the elevator corner (15B-N/15B-O) — go here.
-  if(/^15[AB]-/.test(String(pos))){
-    const _ck = String(pos).split('-'); const _t = (typeof cellTypeNew === 'function') ? cellTypeNew(_ck[0], _ck[1]||'') : 'cf';
-    if((_t === 'cf' || _t === 'cb' || _t === 'pstor') && typeof showCoverCellPanel === 'function'){ showCoverCellPanel(pos); return; }
+  // Cover storage cells hold COVERS, not tubs. Route the click to the cover-stock
+  // panel. This covers the 15A/15B cover rows AND any other cover-type cell —
+  // pstor (e.g. 12P "AV/B") or a cell converted to cover storage via the cell
+  // editor — so covers can live in any cover cell. (v4.92) The elevator corner
+  // (15B-N/15B-O) is type 'elev', not a cover cell, so it is not routed here.
+  {
+    const _pp = (typeof parsePos === 'function') ? parsePos(pos) : null;
+    const _t = (_pp && _pp.valid) ? _pp.type : '';
+    if((_t === 'cf' || _t === 'cb' || _t === 'pstor') && typeof showCoverCellPanel === 'function'){
+      showCoverCellPanel(pos); return;
+    }
   }
   const cu = units.filter(u => u.pos === pos);
   // Include swim-pair partner units (right half of a pair)
@@ -10767,11 +10813,14 @@ function drawMap(){
                   : (t === 'pstor' && P_LABELS_NEW[+rowKey]) ? P_LABELS_NEW[+rowKey]
                   : (rowKey === '15A' || rowKey === '15B') ? coverTypeFor(colLetter)
                   : pos;
-      // Live warehouse cover stock for this model cell. Shown on the FRONT row
-      // (15A / cf) only — the back row (15B / cb) shares the same pool, so showing
-      // a count there too would look like double the covers.
-      const _ct = (rowKey === '15A' || rowKey === '15B') ? coverTypeFor(colLetter) : null;
-      const _st = (t === 'cf' && _ct && _ct !== '—' && typeof coverCellStock === 'function') ? coverCellStock(_ct) : null;
+      // Live warehouse cover stock for this cell. 15A/15B use their column
+      // cover-type; ANY other cover cell (pstor like 12P, or a cell converted
+      // to cover storage) uses its OWN position as the stock key, so covers can
+      // be mapped to any cover cell. (v4.92) Back row (15B/cb) shares the 15A
+      // pool, so it shows no count to avoid doubling.
+      const _ct = (rowKey === '15A' || rowKey === '15B') ? coverTypeFor(colLetter) : pos;
+      const _showStock = (t === 'cf' || t === 'pstor');
+      const _st = (_showStock && _ct && _ct !== '—' && typeof coverCellStock === 'function') ? coverCellStock(_ct) : null;
       const _cap = (typeof coverCellCap === 'function') ? coverCellCap() : 30;
       const _over = _st && _st.qty > _cap;
       const _stockHtml = _st
@@ -23378,13 +23427,27 @@ function _modelsForCell(cellType){
   });
   return Array.from(out).sort();
 }
+// Central writer for the cover model→cell mapping. Stamps a per-model timestamp
+// so the merge can resolve reassignments last-writer-wins across devices. (v4.93)
+function _setCoverCell(ml, target){
+  ml = (ml == null ? '' : String(ml)).trim().toLowerCase();
+  if(!ml) return;
+  cfg = cfg || {}; cfg.coverModelCell = cfg.coverModelCell || {}; cfg.coverModelCellUpdatedAt = cfg.coverModelCellUpdatedAt || {};
+  if(target){
+    cfg.coverModelCell[ml] = target;
+  } else {
+    const isDefault = (typeof COVER_MODEL_TO_CELL !== 'undefined') && COVER_MODEL_TO_CELL[ml];
+    if(isDefault) cfg.coverModelCell[ml] = '';   // explicitly hide a default
+    else delete cfg.coverModelCell[ml];
+  }
+  cfg.coverModelCellUpdatedAt[ml] = (typeof editStamp === 'function') ? editStamp() : new Date().toISOString();
+}
 function assignModelToCell(cellType){
   const inp = document.getElementById('map-model-in');
   const model = (inp && inp.value || '').trim();
   if(!model){ toast('Pick or type a model to assign','err'); return; }
   if(!cellType){ toast('No cell selected','err'); return; }
-  cfg = cfg || {}; cfg.coverModelCell = cfg.coverModelCell || {};
-  cfg.coverModelCell[model.toLowerCase()] = cellType;
+  _setCoverCell(model.toLowerCase(), cellType);
   if(typeof addAct === 'function') addAct(`Mapped cover model "${model}" → position ${cellType}`,'var(--teal)');
   saveState();
   const _fl = document.getElementById('floor'); if(_fl && typeof drawMap === 'function'){ try { drawMap(); } catch(e){} }
@@ -23393,12 +23456,7 @@ function assignModelToCell(cellType){
   if(typeof selPos !== 'undefined' && selPos) showCoverCellPanel(selPos);
 }
 function unmapCoverModel(modelLower, cellType){
-  cfg = cfg || {}; cfg.coverModelCell = cfg.coverModelCell || {};
-  // If this is a HARDCODED default for this cell, set '' to explicitly hide it;
-  // otherwise just drop the override key (reverts to default / unmapped).
-  const isDefault = (typeof COVER_MODEL_TO_CELL !== 'undefined') && COVER_MODEL_TO_CELL[modelLower] === cellType;
-  if(isDefault) cfg.coverModelCell[modelLower] = '';
-  else delete cfg.coverModelCell[modelLower];
+  _setCoverCell(modelLower, '');   // '' → hide default or delete override; stamps ts
   if(typeof addAct === 'function') addAct(`Unmapped cover model "${modelLower}" from ${cellType}`,'var(--orange)');
   saveState();
   const _fl = document.getElementById('floor'); if(_fl && typeof drawMap === 'function'){ try { drawMap(); } catch(e){} }
@@ -23417,6 +23475,45 @@ function unmapCoverModel(modelLower, cellType){
 //   • Warehouse + unmapped     → "UNASSIGNED" + inline picker to assign a
 //                                cell right here, so it appears on the map.
 // ───────────────────────────────────────────────────────────────────
+// All cover cells a model can be mapped to: the 8 fixed 15A cover-type cells,
+// PLUS every other cover-type cell on the floor (pstor like 12P "AV/B", or any
+// cell converted to cover storage via the cell editor), keyed by its position.
+// (v4.92) Lets covers be (re)assigned to ANY cover cell from the Inventory list.
+function allCoverCellOptions(){
+  const out = [];
+  (typeof COVER_TYPES_NEW !== 'undefined' ? COVER_TYPES_NEW : [])
+    .forEach(c => out.push({ value: c.t, label: `15A-${c.a} · ${c.name}` }));
+  const seen = new Set(out.map(o => o.value));
+  try {
+    (typeof ROW_NUMBERS_NEW !== 'undefined' ? ROW_NUMBERS_NEW : []).forEach(r => {
+      (typeof COLS_NEW !== 'undefined' ? COLS_NEW : []).forEach(col => {
+        if((typeof cellTypeNew === 'function' ? cellTypeNew(String(r), col) : '') !== 'pstor') return;
+        const pos = String(r) + col;
+        if(seen.has(pos)) return; seen.add(pos);
+        const lbl = (typeof P_LABELS_NEW !== 'undefined' && P_LABELS_NEW[r]) ? P_LABELS_NEW[r] : 'Cover / panel';
+        out.push({ value: pos, label: `${pos} · ${lbl}` });
+      });
+    });
+  } catch(e){}
+  return out;
+}
+function coverCellOptionsHTML(selected){
+  return allCoverCellOptions().map(o =>
+    `<option value="${String(o.value).replace(/"/g,'&quot;')}"${o.value === selected ? ' selected' : ''}>${o.label}</option>`
+  ).join('');
+}
+// (Re)assign a cover MODEL to a cover cell (or '' to unassign). Writes the same
+// cfg override the floor panel uses, so list + map + modal always agree. (v4.92)
+function reassignCoverModel(modelLower, target){
+  modelLower = (modelLower || '').trim().toLowerCase();
+  if(!modelLower) return;
+  _setCoverCell(modelLower, target);
+  if(typeof addAct === 'function') addAct(target ? `Cover model "${modelLower}" → position ${target}` : `Unassigned cover model "${modelLower}" from the Floor Map`, target ? 'var(--teal)' : 'var(--orange)');
+  try { saveState(); } catch(e){}
+  const _fl = document.getElementById('floor'); if(_fl && typeof drawMap === 'function'){ try { drawMap(); } catch(e){} }
+  if(typeof renderCoverInventory === 'function') renderCoverInventory();
+  toast(target ? `"${modelLower}" → ${target}` : `"${modelLower}" unassigned`, 'ok');
+}
 function coverLocCellHTML(c){
   if(!c) return '<span style="color:var(--text3)">—</span>';
   // Factory covers live in factory storage, not on the warehouse floor map.
@@ -23428,28 +23525,27 @@ function coverLocCellHTML(c){
     return '<span style="color:var(--text3)" title="A cover needs a model to get a Floor Map cell">— no model —</span>';
   }
   const t = (typeof cellTypeForCoverModel === 'function') ? cellTypeForCoverModel(model) : null;
-  if(t){
+  const canMap = (typeof canEdit === 'function') ? canEdit() : true;
+  // Read-only (no edit rights): just show where it sits.
+  if(!canMap){
+    if(!t) return '<span style="display:inline-block;background:#fffbeb;color:#92400e;border:1px solid #fde68a;font-size:9px;font-weight:700;padding:2px 6px;border-radius:6px">⚠ UNASSIGNED</span>';
     const def = (typeof COVER_TYPES_NEW !== 'undefined') ? COVER_TYPES_NEW.find(x => x.t === t) : null;
     const pos = def ? ('15A-' + def.a) : t;
-    return `<span style="display:inline-flex;align-items:center;gap:6px" title="On the Floor Map at position ${pos} (${t})">`
-      + `<span style="font-weight:700;color:var(--text1)">📍 ${pos}</span>`
-      + `<span style="font-size:10px;color:var(--text3)">${t}</span></span>`;
+    return `<span style="font-weight:700;color:var(--text1)">📍 ${pos}</span>`;
   }
-  // Unmapped warehouse model → not drawn on the map yet. Offer an inline assign.
-  const canMap = (typeof canEdit === 'function') ? canEdit() : true;
-  const badge = '<span style="display:inline-block;background:#fffbeb;color:#92400e;border:1px solid #fde68a;font-size:9px;font-weight:700;padding:2px 6px;border-radius:6px" title="No Floor Map cell yet — assign one so it shows on the map">⚠ UNASSIGNED</span>';
-  if(!canMap) return badge;
-  // The model goes into an HTML attribute (fully entity-escaped) and is read
-  // back with getAttribute — never interpolated into a JS string — so any
-  // character (quotes, <, >, backslash) is injection-safe.
+  // Editable: a dropdown that (re)assigns the cover to ANY cover cell — mapped or
+  // not. The model rides in a fully entity-escaped attribute, read via
+  // getAttribute (never interpolated into JS), so it's injection-safe. (v4.92)
   const mlEsc = String(model.toLowerCase())
     .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
     .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
-  const opts = (typeof COVER_TYPES_NEW !== 'undefined' ? COVER_TYPES_NEW : [])
-    .map(x => `<option value="${x.t}">${x.t} · ${x.name}</option>`).join('');
-  return `<span style="display:inline-flex;align-items:center;gap:6px">${badge}`
-    + `<select data-model="${mlEsc}" onchange="assignCoverModelFromList(this.getAttribute('data-model'), this.value)" style="font-size:10.5px;padding:2px 5px;border:1px solid var(--line);border-radius:6px;background:var(--bg1);color:var(--text1)">`
-    + `<option value="">Assign cell…</option>${opts}</select></span>`;
+  const unmapped = !t;
+  const pin = unmapped
+    ? '<span title="Not on the Floor Map yet — pick a cell" style="color:#b45309;font-weight:800">⚠</span>'
+    : '<span style="color:var(--text1)">📍</span>';
+  return `<span style="display:inline-flex;align-items:center;gap:6px">${pin}`
+    + `<select data-model="${mlEsc}" onchange="reassignCoverModel(this.getAttribute('data-model'), this.value)" title="Reassign this cover to another cell" style="font-size:10.5px;padding:2px 6px;border:1px solid var(--line);border-radius:6px;background:var(--bg1);color:var(--text1);max-width:190px">`
+    + `<option value=""${unmapped?' selected':''}>— Unassigned —</option>${coverCellOptionsHTML(t||'')}</select></span>`;
 }
 
 // Map an (unmapped) cover model to a floor cover-cell straight from the
@@ -23458,8 +23554,7 @@ function coverLocCellHTML(c){
 function assignCoverModelFromList(modelLower, cellType){
   modelLower = (modelLower||'').trim();
   if(!modelLower || !cellType) return;   // placeholder re-picked or empty
-  cfg = cfg || {}; cfg.coverModelCell = cfg.coverModelCell || {};
-  cfg.coverModelCell[modelLower] = cellType;
+  _setCoverCell(modelLower, cellType);
   if(typeof addAct === 'function') addAct(`Mapped cover model "${modelLower}" → position ${cellType} (from Inventory list)`,'var(--teal)');
   try { saveState(); } catch(e){}
   const _fl = document.getElementById('floor'); if(_fl && typeof drawMap === 'function'){ try { drawMap(); } catch(e){} }
@@ -24006,7 +24101,12 @@ function openCoverEdit(id){
     <div class="fgrid fgrid3" style="margin-bottom:10px">
       <div class="fg"><label class="fl">Qty (current: ${c.qty})</label><input class="fi" type="number" id="cve-qty" value="${c.qty}"></div>
       <div class="fg"><label class="fl">Low-Stock Threshold</label><input class="fi" type="number" id="cve-threshold" value="${c.lowThreshold||0}" min="0"></div>
-      <div class="fg"><label class="fl">Location</label><input class="fi" id="cve-location" value="${(c.location||'').replace(/"/g,'&quot;')}"></div>
+      <div class="fg"><label class="fl">Location (Floor Map)</label>
+        <select class="fi" id="cve-cell">
+          <option value="">— Unassigned —</option>
+          ${(typeof coverCellOptionsHTML === 'function') ? coverCellOptionsHTML((typeof cellTypeForCoverModel === 'function' ? cellTypeForCoverModel(c.model) : '') || '') : ''}
+        </select>
+      </div>
     </div>
     ${Array.isArray(c.history) && c.history.length ? `
     <div style="background:var(--bg2);border:1px solid var(--line2);border-radius:8px;padding:10px;margin-bottom:10px;max-height:140px;overflow-y:auto">
@@ -24033,7 +24133,6 @@ function saveCoverEdit(id){
   const c = coverInventory.find(x => x.id === id); if(!c) return;
   const color = (document.getElementById('cve-color').value||'').trim();
   const model = (document.getElementById('cve-model').value||'').trim();
-  const location = (document.getElementById('cve-location').value||'').trim();
   const qty = parseInt(document.getElementById('cve-qty').value);
   const lowThreshold = parseInt(document.getElementById('cve-threshold').value)||0;
   const source = document.querySelector('input[name="cve-source"]:checked')?.value || (c.source||'warehouse');
@@ -24046,7 +24145,6 @@ function saveCoverEdit(id){
   const oldSource = c.source || 'warehouse';
   c.color = color;
   c.model = model;
-  c.location = location;
   c.qty = qty;
   c.lowThreshold = lowThreshold;
   c.source = source;
@@ -24058,8 +24156,15 @@ function saveCoverEdit(id){
   if(oldSource !== source){
     c.history.push({at: toISO(), action:'source-changed', from: oldSource, to: source, by: ROLES[currentRole].label});
   }
+  // Apply the Floor Map cell chosen in the dropdown — reassign the model→cell
+  // mapping (works for warehouse covers with a model). (v4.92)
+  const _cellSel = document.getElementById('cve-cell');
+  if(_cellSel && model && source === 'warehouse'){
+    _setCoverCell(model.toLowerCase(), _cellSel.value || '');
+  }
   toast('Saved','ok');
   document.getElementById('cover-float-panel').innerHTML = '';
+  try { const _fl = document.getElementById('floor'); if(_fl && typeof drawMap === 'function') drawMap(); } catch(e){}
   renderCoverInventory(); updBadges();
 }
 
