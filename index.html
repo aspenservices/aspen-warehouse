@@ -4717,7 +4717,7 @@ let _fbInitAttempts = 0;
 //   /app_version/current  (in Firebase console, manually, OR call
 //   pushVersionToFirebase() from the Admin console at deploy time)
 // ══════════════════════════════════════════════════════════════════
-const APP_VERSION = 'v4.96';
+const APP_VERSION = 'v4.99';
 window.APP_VERSION = APP_VERSION;
 
 // ── DATA EPOCH (generation guard) ────────────────────────────────────
@@ -6122,7 +6122,7 @@ function _mergeDispatched(local, remote){
   return merged;
 }
 
-function _mergeFactory(local, remote, localIncoming){
+function _mergeFactory(local, remote, localIncoming, remoteCfg){
   remote = Array.isArray(remote) ? remote : [];
   local  = Array.isArray(local)  ? local  : [];
   localIncoming = Array.isArray(localIncoming) ? localIncoming : [];
@@ -6210,6 +6210,49 @@ function _mergeFactory(local, remote, localIncoming){
     }
     merged.push(f); kept++;            // local-only factory row -> KEEP (never vanish on id collision)
   });
+  // ── HONOR DELETE TOMBSTONES (v4.97) ───────────────────────────────────────
+  // Mirror of _mergeUnits: factory had no tombstone support, so a row deleted via
+  // rmFromFactory got resurrected from the remote on the next sync (worst for
+  // RETURNED-TO-FACTORY rows, which isReturnLeg protects from being dropped as
+  // stale). Union the tombstone maps from BOTH sides (cfg is merged AFTER factory
+  // this pass, so the remote's tombstones aren't in cfg yet) and drop any merged
+  // row whose key was tombstoned at/after its last edit. A re-added row has a
+  // newer updatedAt than its old tombstone, so it correctly survives. Same
+  // cfg._deletedUnits map rmUnit uses (one S/N == one physical tub everywhere).
+  try {
+    const _tomb = {};
+    const _absorb = src => { if(src && typeof src === 'object'){ for(const k in src){ const t = src[k]; if(typeof t === 'string' && (!_tomb[k] || t > _tomb[k])) _tomb[k] = t; } } };
+    _absorb(typeof cfg === 'object' && cfg ? cfg._deletedUnits : null);
+    _absorb(remoteCfg ? remoteCfg._deletedUnits : null);
+    if(Object.keys(_tomb).length){
+      for(let i = merged.length - 1; i >= 0; i--){
+        const k = keyOf(merged[i]); if(!k) continue;
+        const t = _tomb[k];
+        if(t && (merged[i].updatedAt || '') < t) merged.splice(i, 1);
+      }
+    }
+  } catch(e){ console.warn('[factory tombstone merge]', e); }
+  // ── DROP GHOST RETURN ROWS (v4.99) ────────────────────────────────────────
+  // A tub that is physically on the warehouse FLOOR (units) cannot also be
+  // "returned to / received back at the factory" — the legit return flow empties
+  // the floor when the tub is sent out. So a factory return-leg row whose S/N is
+  // still on the floor is a GHOST (e.g. a factory request marked received though
+  // the tub never moved). The floor is the source of truth, so drop the ghost
+  // factory row and keep the floor copy. This is the exception to isReturnLeg's
+  // "never treat a return leg as stale" rule, scoped narrowly to the duplicate.
+  try {
+    const onFloor = new Set((Array.isArray(units) ? units : [])
+      .filter(u => u && u.sn != null && String(u.sn).trim() !== '')
+      .map(u => String(u.sn).trim()));
+    if(onFloor.size){
+      for(let i = merged.length - 1; i >= 0; i--){
+        const f = merged[i]; if(!f || f.sn == null) continue;
+        const isGhostReturn = f.trackingState === 'received-back-at-factory'
+          || /reject|return/i.test(f.trackingState || '');
+        if(isGhostReturn && onFloor.has(String(f.sn).trim())) merged.splice(i, 1);
+      }
+    }
+  } catch(e){ console.warn('[factory ghost-return reconcile]', e); }
   // De-collide ids: two rows may still carry the SAME numeric id (the same nid
   // minted on two devices for different spas). Give the duplicate a fresh id so
   // per-id operations (edit / delete / find) target the right row. Only SPAS are
@@ -6389,7 +6432,7 @@ function fbApplyRemoteState(restored, sourceTimestamp){
     if(Array.isArray(restored.events)) events = restored.events;
     if(Array.isArray(restored.activity)) activity = restored.activity;
     if(Array.isArray(restored.queue)) queue = restored.queue;
-    if(Array.isArray(restored.factory)) factory = _mergeFactory(factory, restored.factory, incoming);
+    if(Array.isArray(restored.factory)) factory = _mergeFactory(factory, restored.factory, incoming, restored.cfg);
     if(Array.isArray(restored.marriages)) marriages = _mergeMarriages(marriages, restored.marriages);
     if(Array.isArray(restored.dispatchRequests)) dispatchRequests = _mergeRequests(dispatchRequests, restored.dispatchRequests);
     if(Array.isArray(restored.coverInventory)) coverInventory = _mergeCovers(coverInventory, restored.coverInventory);
@@ -8747,6 +8790,18 @@ window._moveUnitToFactoryTransit = _moveUnitToFactoryTransit;
 function _receiveTubAtFactory(r){
   if(!r || r.type !== 'tub' || !r.sn) return;
   const at = toISO(); const key = String(r.sn);
+  // GUARD (v4.99): a tub can only be "received back at the factory" if it has
+  // actually LEFT our warehouse floor. The legit return flow removes the floor
+  // copy when the tub is sent out (_moveUnitToFactoryTransit). If the S/N is
+  // STILL on the floor here, this is a spurious receive (e.g. a factory request
+  // marked received though the physical tub never moved) — creating the factory
+  // row would duplicate the same S/N on the floor AND at the factory. The floor
+  // is the source of truth, so we refuse to create the ghost factory row.
+  if(Array.isArray(units) && units.some(x => String(x.sn) === key)){
+    try{ toast(`⛔ ${key} is still in the warehouse — not received at factory (would duplicate)`, 'err'); }catch(e){}
+    try{ console.warn('[receive-at-factory] blocked duplicate: S/N', key, 'still on floor'); }catch(e){}
+    return;
+  }
   // If an in-transit (to-factory) record exists, flip it instead of duplicating.
   const transit = factory.find(x => String(x.sn) === key && x.trackingState === 'in-transit' && x.transitDir === 'to-factory');
   if(transit){
@@ -20120,6 +20175,15 @@ function addFactorySpa(){
     trackingState: 'created-at-factory',
     trackingHistory: [{state:'created-at-factory', at: toISO(), by: ROLES[currentRole].label}]
   });
+  // Clear any prior delete tombstone for this S/N so a re-add isn't dropped by the
+  // merge during the same sync window (the fresh updatedAt already beats it, but
+  // clearing is cleaner and matches quickAddSpa). v4.97
+  try {
+    if(cfg && cfg._deletedUnits){
+      const _tk = (sn != null && String(sn).trim() !== '') ? ('sn:' + String(sn).trim()) : ('id:' + newId);
+      delete cfg._deletedUnits[_tk];
+    }
+  } catch(e){}
   // ── AUTO-MARRY (R3): reconcile any marriages that were waiting for this tub ──
   // inside-type → packed into the tub's looseAccessories; shelf-type → link resolved.
   try {
@@ -21678,6 +21742,12 @@ function handleQRPayload(raw, mode){
     } else if(item.trackingState !== 'in-transit'){
       setScanResult('err', item.sn||tid, 'not in transit (state: '+(item.trackingState||'unknown')+')');
       toast(`${item.sn||tid} is not in transit — nothing to receive`,'err');
+    } else if(item.sn && Array.isArray(units) && units.some(x => String(x.sn) === String(item.sn))){
+      // GUARD (v4.99): the tub is still on our warehouse floor, so it cannot be
+      // received back at the factory — that would duplicate the same S/N in both
+      // places. The floor is the source of truth.
+      setScanResult('err', item.sn||tid, 'still in the warehouse — cannot receive at factory');
+      toast(`⛔ ${item.sn||tid} is still in the warehouse — not received at factory`,'err');
     } else {
       item.trackingState = 'received-back-at-factory';
       item.trackingHistory.push({state:'received-back-at-factory', at, by, note:'Confirmed return at factory'});
@@ -21996,6 +22066,30 @@ function rmFromFactory(id){
   // already left the factory list anyway.
   const wasMarried = marriages.some(m => m.accessoryId === id && (m.status === 'pending' || m.status === 'ready-to-ship'));
   marriages = marriages.filter(m => !(m.accessoryId === id && (m.status === 'pending' || m.status === 'ready-to-ship')));
+  // ── DELETE TOMBSTONE (v4.97) ──────────────────────────────────────────────
+  // _mergeFactory is keep-local ("never lose a tub") and rebuilds from the remote
+  // copy, so a plain local delete gets resurrected on the next sync — and a
+  // RETURNED-TO-FACTORY row is protected by isReturnLeg, so it can NEVER be
+  // dropped as stale. Record an intentional-delete tombstone (keyed exactly like
+  // _mergeFactory.keyOf) inside cfg — cfg rides every push/pull — so the deletion
+  // wins over a stale remote. A later legit re-add of the same S/N clears it
+  // (see addFactorySpa / addFactoryAccessory). Shared with rmUnit's tombstone map.
+  // GUARD (v4.99): if the SAME S/N is also on the warehouse floor, this factory
+  // row is a duplicate/ghost — do NOT tombstone by S/N, or the merge would also
+  // wipe the good floor copy (one shared sn:-keyed map). The ghost-return
+  // reconcile keeps the factory row gone; the floor copy stays.
+  try {
+    const snStr = (f.sn != null) ? String(f.sn).trim() : '';
+    const alsoOnFloor = snStr !== '' && Array.isArray(units) && units.some(u => u && String(u.sn).trim() === snStr);
+    if(!alsoOnFloor){
+      cfg._deletedUnits = cfg._deletedUnits || {};
+      const _tk = (snStr !== '') ? ('sn:' + snStr) : ('id:' + f.id);
+      cfg._deletedUnits[_tk] = editStamp();
+      // Prune tombstones older than 60 days so cfg can't grow without bound.
+      const _cut = new Date(Date.now() - 60*864e5).toISOString();
+      for(const k in cfg._deletedUnits){ if(cfg._deletedUnits[k] < _cut) delete cfg._deletedUnits[k]; }
+    }
+  } catch(e){ console.warn('[factory tombstone write]', e); }
   factory = factory.filter(x => x.id !== id);
   addAct(`🗑 Removed from factory: ${f.sn||f.dealer}${wasMarried ? ' (+ orphaned marriages)' : ''}`, 'var(--red)');
   toast('Removed','ok');
