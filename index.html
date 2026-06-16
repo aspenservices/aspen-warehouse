@@ -4717,7 +4717,7 @@ let _fbInitAttempts = 0;
 //   /app_version/current  (in Firebase console, manually, OR call
 //   pushVersionToFirebase() from the Admin console at deploy time)
 // ══════════════════════════════════════════════════════════════════
-const APP_VERSION = 'v4.99';
+const APP_VERSION = 'v5.04';
 window.APP_VERSION = APP_VERSION;
 
 // ── DATA EPOCH (generation guard) ────────────────────────────────────
@@ -5982,12 +5982,18 @@ function _mergeMaterials(local, remote){
     if(!cur){ byKey.set(k, m); return; }
     // Same logical item on both sides: keep the more-recently-touched snapshot, but
     // union the histories so no movement record from either device is lost.
-    const winner = stamp(m) >= stamp(cur) ? m : cur;
+    // TIE-BREAK = REMOTE (the shared doc), via strict '>', so two devices that edited
+    // the SAME item within the SAME millisecond converge to ONE deterministic value.
+    // (The old '>=' let the local session win ties; because merge direction differs
+    // per device — each sees the other as "remote" — that made the tie non-deterministic
+    // and the qty could DIVERGE permanently, since materials triggers no corrective
+    // re-push. Strict '>' matches every other collection's LWW rule.)
+    const winner = stamp(m) > stamp(cur) ? m : cur;
     const merged = Object.assign({}, winner);
     merged.history = mergeHist(cur.history, m.history);
     byKey.set(k, merged);
   };
-  remote.forEach(consider);   // remote first; local wins ties (it is the active session)
+  remote.forEach(consider);   // remote first → it is 'cur'; ties resolve to remote (shared doc)
   local.forEach(consider);
   return Array.from(byKey.values());
 }
@@ -6369,6 +6375,24 @@ function _mergeCovers(local, remote){
     }
     merged.push(c); idx.set(k, merged.length - 1); kept++;   // local-only cover row → KEEP
   });
+  // ── IDEMPOTENCY PASS (v5.03) ──────────────────────────────────────────────
+  // Remote-only and local-only rows never enter the shared-key branch above, so
+  // without this they gain their `base` field only on the SECOND merge of the same
+  // state — i.e. merge(merge(L,S),S) !== merge(L,S). That non-idempotency caused
+  // needless state churn (a row's shape changing on a later identical sync). `base`
+  // is the inferred pre-history stock level (qty − tracked credits + tracked debits);
+  // computing it here changes NO quantity, it only makes the field present uniformly
+  // so the merge is a true fixpoint. Uses the SAME formula as inferBase() above.
+  merged.forEach(c => {
+    if(!c || typeof c.base === 'number') return;
+    const dec = new Set((Array.isArray(c.history) ? c.history : [])
+      .filter(e => e && e.action === 'decrement' && e.spaSn != null && String(e.spaSn) !== '')
+      .map(e => String(e.spaSn)));
+    const cred = (Array.isArray(c.history) ? c.history : [])
+      .filter(e => e && (e.action === 'arrival' || e.action === 'increment'))
+      .reduce((acc, e) => acc + ((e.action === 'increment') ? 1 : (typeof e.qty === 'number' ? e.qty : (parseInt(e.qty) || 0))), 0);
+    c.base = (typeof c.qty === 'number' ? c.qty : 0) - cred + dec.size;
+  });
   _lastCoverMergeKept = kept;
   return merged;
 }
@@ -6505,7 +6529,7 @@ function fbRerenderActiveView(){
   const renderMap = {
     'view-dashboard': () => updBadges?.(),
     'view-map': () => { try{drawMap?.();}catch(e){} try{renderQueue?.();}catch(e){} try{renderMobileFloorFinder?.(document.getElementById('mob-floor-search')?.value || '');}catch(e){} },
-    'view-schedule': () => { try{renderCal?.();}catch(e){} try{renderAllEvents?.();}catch(e){} },
+    'view-schedule': () => { try{renderCal?.();}catch(e){} },
     'view-incoming': () => renderIncoming?.(),
     'view-truck': () => renderTruck?.(),
     'view-intransit': () => renderInTransit?.(),
@@ -8696,20 +8720,286 @@ function isMarriageActive(m){
 
 // Get all active marriages for a given S/N (still waiting on accessory arrival).
 // Includes pending + ready-to-ship + in-transit — anything not yet delivered.
+// NOTE: S/N is compared as a trimmed string on BOTH sides. A spa S/N can arrive
+// as a number in some code paths and as a string in others; a raw === would then
+// silently miss the match and orphan the marriage. Always normalize.
 function marriagesPendingForSn(sn){
-  if(!sn) return [];
-  return marriages.filter(m => m.spaSn===sn && isMarriageActive(m));
+  if(sn==null) return [];
+  const key = String(sn).trim(); if(!key) return [];
+  return marriages.filter(m => String(m.spaSn).trim()===key && isMarriageActive(m));
 }
 // Get all delivered (but not yet dispatched) marriages for a given S/N
 function marriagesDeliveredForSn(sn){
-  if(!sn) return [];
-  return marriages.filter(m => m.spaSn===sn && m.status==='delivered');
+  if(sn==null) return [];
+  const key = String(sn).trim(); if(!key) return [];
+  return marriages.filter(m => String(m.spaSn).trim()===key && m.status==='delivered');
 }
 // All marriage records for a given S/N (any status)
 function marriagesForSn(sn){
-  if(!sn) return [];
-  return marriages.filter(m => m.spaSn===sn);
+  if(sn==null) return [];
+  const key = String(sn).trim(); if(!key) return [];
+  return marriages.filter(m => String(m.spaSn).trim()===key);
 }
+
+// ── SHARED MARRIAGE RECONCILIATION AT DISPATCH ──────────────────────────
+// Both the Floor-Map dispatch (confirmDispatch) AND the Schedule group dispatch
+// (dispatchAndDeliverGroup) must close out a spa's marriages the same way when
+// the tub leaves the warehouse. These helpers are the single source of truth so
+// the rule can never drift between dispatch paths again.
+
+// Every DELIVERED marriage for a dispatched S/N → 'completed', shelf cleared.
+// The accessory physically left MINV with the spa. Idempotent + normalized match.
+function completeDeliveredMarriagesForSn(sn, date, meta){
+  if(sn==null) return 0;
+  const key = String(sn).trim(); if(!key) return 0;
+  let n=0;
+  marriages.forEach(m=>{
+    if(String(m.spaSn).trim()===key && m.status==='delivered'){
+      m.status='completed'; m.updatedAt=editStamp();
+      m.dispatchedDate = date || (typeof toISO==='function'?toISO():new Date().toISOString().slice(0,10));
+      m.location=null;   // no longer at MINV — went out with the spa
+      if(typeof mTrail==='function') mTrail(m, 'completed', { via:(meta&&meta.via)||'manual', station:(meta&&meta.station)||'dispatch', mode:(meta&&meta.mode)||null, note:(meta&&meta.note)||'Shipped with spa at dispatch' });
+      n++;
+    }
+  });
+  return n;
+}
+
+// Spa leaves WITHOUT a still-pending accessory (split order). Each active
+// (pending/ready-to-ship/in-transit) marriage for this spa → 'split-pending'
+// and an automatic follow-up factory request is created so the accessory is
+// shipped directly to the dealer and never forgotten.
+function splitDispatchPendingMarriagesForSn(u, date, auth, meta){
+  if(!u || u.sn==null) return 0;
+  const pend = marriagesPendingForSn(u.sn).filter(m=>m.status!=='split-pending');
+  if(!pend.length) return 0;
+  pend.forEach(m=>{
+    m.status='split-pending'; m.updatedAt=editStamp();
+    m.splitDispatchedDate=date;
+    m.splitDispatchSpaDealer=u.dealer;
+    if(typeof mTrail==='function') mTrail(m, 'split-pending', { via:(meta&&meta.via)||'manual', station:(meta&&meta.station)||'dispatch', mode:'split', note:'Spa shipped WITHOUT this accessory — follow-up factory request auto-created' });
+    dispatchRequests.unshift({
+      id: ++nid,
+      type:'accessory',
+      description:`🔴 SPLIT DISPATCH — Ship "${m.accessoryName}"${m.accessoryQty&&m.accessoryQty>1?` × ${m.accessoryQty}`:''} directly to dealer ${u.dealer}`,
+      qty: m.accessoryQty || 1,
+      requestedBy: ROLES[currentRole].label + ' (auto from split-dispatch)',
+      requestedAt: toISO(),
+      status:'pending',
+      dealer: u.dealer,
+      spaSn: u.sn,
+      marriageId: m.id,
+      notes:`Spa S/N ${u.sn} was dispatched on ${fmtD(date)} WITHOUT this accessory. Factory must ship "${m.accessoryName}" directly to dealer ${u.dealer}. Dispatch authorized by ${auth}. This request was auto-created — do NOT mark complete until accessory physically arrives at dealer.`,
+      autoCreated:true,
+      urgent:true,
+    });
+    addAct(`🔴 Auto-created follow-up request: ship "${m.accessoryName}" to ${u.dealer}`,'var(--red)');
+  });
+  if(typeof renderRequests==='function') renderRequests();
+  toast(`⚠ ${pend.length} follow-up request${pend.length>1?'s':''} auto-created — factory must ship the missing accessor${pend.length>1?'ies':'y'} to ${u.dealer}`,'amber');
+  return pend.length;
+}
+
+// On-load self-heal for marriages orphaned by a pre-v5.00 dispatch path (the
+// Schedule "Dispatch & deliver" group action used to skip marriage reconciliation
+// entirely). Finds marriages still 'delivered' at MINV whose spa has ALREADY been
+// dispatched and is gone from the active floor (units/factory/incoming), and flips
+// them to 'completed' so they leave the shelf. Forward-only + idempotent → safe to
+// run on every draw; once healed it no longer matches. Returns count healed.
+function reconcileOrphanedMarriages(){
+  if(!Array.isArray(marriages) || !Array.isArray(dispatched)) return 0;
+  const dispatchedSns = new Set(
+    dispatched.filter(d=>d && d.deliveryStatus!=='returned' && d.sn!=null)
+              .map(d=>String(d.sn).trim()).filter(Boolean)
+  );
+  if(!dispatchedSns.size) return 0;
+  const stillHere = new Set();
+  [typeof units!=='undefined'?units:null, typeof factory!=='undefined'?factory:null, typeof incoming!=='undefined'?incoming:null]
+    .forEach(arr=>{ if(Array.isArray(arr)) arr.forEach(x=>{ if(x && x.sn!=null) stillHere.add(String(x.sn).trim()); }); });
+  let n=0;
+  marriages.forEach(m=>{
+    if(m.status!=='delivered') return;
+    const key = m.spaSn!=null ? String(m.spaSn).trim() : '';
+    if(!key) return;
+    if(dispatchedSns.has(key) && !stillHere.has(key)){
+      m.status='completed'; m.updatedAt=editStamp();
+      m.dispatchedDate = m.dispatchedDate || (typeof toISO==='function'?toISO():new Date().toISOString().slice(0,10));
+      m.location=null;
+      if(typeof mTrail==='function') mTrail(m, 'completed', { via:'auto', station:'system', mode:'auto-reconcile', note:'Spa already dispatched — accessory shipped with it (legacy cleanup)' });
+      n++;
+    }
+  });
+  if(n){
+    try{ addAct(`🩹 Reconciled ${n} orphaned marriage${n>1?'s':''} (spa already dispatched — accessory shipped with it)`,'var(--amber)'); }catch(e){}
+    try{ flushSave(); }catch(e){}
+    console.log('[reconcileOrphanedMarriages] healed', n, 'orphaned delivered marriage(s)');
+  }
+  return n;
+}
+window.reconcileOrphanedMarriages = reconcileOrphanedMarriages;
+
+// ════════════════════════════════════════════════════════════════════════
+// MARRIAGE PROVENANCE TRAIL (v5.01)
+// A per-marriage timeline recording HOW the accessory moved through every
+// stage — mirroring the factory accessory's trackingHistory, but for the whole
+// marriage lifecycle. Each entry: { at, state, via, station, role, by, note, mode }.
+//   via     : 'scan' | 'manual' | 'auto'  (QR-scanned, hand-marked, or system)
+//   station : 'factory' | 'truck' | 'warehouse' | 'dispatch' | 'dealer' | 'scanner' | ...
+//   mode    : dispatch mode when the spa ships (see DISPATCH_MODE_META)
+// Answers: was it scanned at truck/warehouse & stored, and was it dispatched
+// manually or scanned out by the warehouse manager.
+// ════════════════════════════════════════════════════════════════════════
+const DISPATCH_MODE_META = {
+  'floor-checklist': { label:'Floor pickup — checklist verified',   icon:'✅', color:'#0d9e78' },
+  'schedule-scan'  : { label:'Schedule — WH manager scanned out',   icon:'📷', color:'#2563eb' },
+  'schedule-quick' : { label:'Schedule — manual quick-dispatch',    icon:'✋', color:'#b45309' },
+  'dealer-pickup'  : { label:'Dealer pickup at factory',            icon:'🤝', color:'#7c3aed' },
+  'split'          : { label:'Split dispatch — shipped separately', icon:'🔴', color:'#dc2626' },
+  'split-fulfilled': { label:'Split accessory delivered to dealer', icon:'📦', color:'#0d9e78' },
+  'auto-reconcile' : { label:'Auto-reconciled (legacy cleanup)',    icon:'🩹', color:'#b45309' },
+};
+function dispModeMeta(mode){ return DISPATCH_MODE_META[mode] || { label: mode||'—', icon:'•', color:'#64748b' }; }
+
+function _trailNow(){ try{ return new Date().toISOString(); }catch(e){ return ''+Date.now(); } }
+function _trailRoleLabel(){ try{ return (ROLES[currentRole]&&ROLES[currentRole].label)||currentRole||'—'; }catch(e){ return (typeof currentRole!=='undefined'?currentRole:'—'); } }
+
+// Append a provenance entry. If the trail is empty and this isn't the creation
+// event, synthesize a 'created' entry first from the marriage's own dates so the
+// timeline always starts at the beginning — even for records made before v5.01.
+function mTrail(m, state, opts){
+  if(!m) return;
+  opts = opts || {};
+  if(!Array.isArray(m.trail)) m.trail = [];
+  if(m.trail.length === 0 && state !== 'created'){
+    m.trail.push({ at: m.created || m.createdAt || _trailNow(), state:'created', via:'manual', station:'origin', role:'', by:'', note:'(backfilled from record)', mode:null });
+  }
+  m.trail.push({
+    at: _trailNow(),
+    state: state,
+    via: opts.via || 'manual',
+    station: opts.station || '',
+    role: (typeof currentRole!=='undefined' ? currentRole : ''),
+    by: _trailRoleLabel(),
+    note: opts.note || '',
+    mode: opts.mode || null,
+  });
+}
+window.mTrail = mTrail;
+
+// Reconstruct a trail for marriages that predate v5.01 (no trail yet) from the
+// fields we already persisted. Forward-only + idempotent. Runs on load.
+function backfillMarriageTrails(){
+  if(!Array.isArray(marriages)) return 0;
+  let n=0;
+  marriages.forEach(m=>{
+    if(Array.isArray(m.trail) && m.trail.length) return;
+    const t = [];
+    t.push({ at: m.created || m.createdAt || _trailNow(), state:'created', via:'manual', station:'origin', role:'', by:'', note:'(backfilled)', mode:null });
+    if(m.readyAt) t.push({ at:m.readyAt, state:(m.status==='ready-for-pickup'?'ready-for-pickup':'ready-to-ship'), via:'manual', station:'factory', role:'', by:'', note:'(backfilled)', mode:null });
+    if(m.inTransitAt) t.push({ at:m.inTransitAt, state:'in-transit', via:'scan', station:'truck', role:'', by:'', note:'(backfilled — truck scan)', mode:null });
+    if(m.deliveredDate) t.push({ at:m.deliveredDate, state:'delivered', via:'manual', station:'warehouse', role:'', by:'', note:'(backfilled — receive method unknown)', mode:null });
+    if(m.status==='completed' || m.status==='split-pending'){
+      const dd = m.dispatchedDate || m.splitDispatchedDate || _trailNow();
+      const dealerPickup = m.via==='dealer-pickup-at-factory';
+      const mode = m.status==='split-pending' ? 'split' : (dealerPickup ? 'dealer-pickup' : null);
+      t.push({ at:dd, state:(m.status==='split-pending'?'split-pending':'completed'), via:(dealerPickup?'manual':'auto'), station:(dealerPickup?'factory':'dispatch'), role:'', by:'', note:'(backfilled — dispatch mode unknown)', mode });
+    }
+    m.trail = t; n++;
+  });
+  if(n) console.log('[backfillMarriageTrails] reconstructed', n, 'marriage trail(s)');
+  return n;
+}
+window.backfillMarriageTrails = backfillMarriageTrails;
+
+// ── Trail viewer (timeline modal) ──
+const TRAIL_STAGE_META = {
+  'created':          { icon:'🟣', label:'Created' },
+  'ready-to-ship':    { icon:'📦', label:'Ready to ship' },
+  'ready-for-pickup': { icon:'🤝', label:'Ready for dealer pickup' },
+  'in-transit':       { icon:'✈️', label:'In transit' },
+  'delivered':        { icon:'📬', label:'Received at warehouse' },
+  'completed':        { icon:'✅', label:'Dispatched (completed)' },
+  'split-pending':    { icon:'🔴', label:'Split-dispatched' },
+  'reverted':         { icon:'↩️', label:'Reverted' },
+};
+function _trailStageMeta(s){ return TRAIL_STAGE_META[s] || { icon:'•', label:s }; }
+function _trailViaBadge(via){
+  const map = { scan:{t:'SCAN',c:'#1d4ed8',bg:'#dbeafe'}, manual:{t:'MANUAL',c:'#b45309',bg:'#fef3c7'}, auto:{t:'AUTO',c:'#475569',bg:'#e2e8f0'} };
+  const v = map[via] || { t:String(via||'').toUpperCase(), c:'#475569', bg:'#e2e8f0' };
+  return `<span style="font-size:9px;font-weight:800;letter-spacing:.06em;color:${v.c};background:${v.bg};padding:2px 6px;border-radius:5px">${v.t}</span>`;
+}
+function _fmtTrailTime(iso){
+  try{ const d=new Date(iso); if(isNaN(d.getTime())) return String(iso||'—'); return d.toLocaleString(undefined,{month:'short',day:'numeric',year:'numeric',hour:'numeric',minute:'2-digit'}); }catch(e){ return String(iso||'—'); }
+}
+function openMarriageTrail(mid){
+  const m = marriages.find(x=>x.id===mid);
+  if(!m){ toast('Marriage not found','err'); return; }
+  if(!Array.isArray(m.trail) || !m.trail.length) backfillMarriageTrails();
+  const trail = Array.isArray(m.trail) ? m.trail.slice() : [];
+  const modeEntry = [...trail].reverse().find(e=>e.mode);
+  const mode = modeEntry ? dispModeMeta(modeEntry.mode) : null;
+  let ov = document.getElementById('mtrail-overlay'); if(ov) ov.remove();
+  ov = document.createElement('div');
+  ov.id='mtrail-overlay';
+  ov.style.cssText='position:fixed;inset:0;background:rgba(15,23,42,.65);z-index:10000;display:flex;align-items:center;justify-content:center;padding:18px;backdrop-filter:blur(3px);overflow-y:auto';
+  ov.addEventListener('click',e=>{ if(e.target===ov) ov.remove(); });
+  const rows = trail.map((e,i)=>{
+    const sm=_trailStageMeta(e.state);
+    const isLast = i===trail.length-1;
+    return `<div style="display:flex;gap:11px;align-items:flex-start">
+      <div style="display:flex;flex-direction:column;align-items:center;flex-shrink:0">
+        <div style="font-size:16px;line-height:1.1">${sm.icon}</div>
+        ${isLast?'':'<div style="width:2px;flex:1;min-height:20px;background:#e2e8f0;margin:3px 0"></div>'}
+      </div>
+      <div style="flex:1;padding-bottom:${isLast?0:12}px">
+        <div style="display:flex;gap:7px;align-items:center;flex-wrap:wrap">
+          <span style="font-size:13px;font-weight:700;color:#0f172a">${sm.label}</span>
+          ${_trailViaBadge(e.via)}
+          ${e.station?`<span style="font-size:10px;color:#64748b">@ ${escapeHTML(String(e.station))}</span>`:''}
+        </div>
+        <div style="font-size:11px;color:#64748b;margin-top:2px">${_fmtTrailTime(e.at)}${e.by&&e.by!=='—'?' · '+escapeHTML(String(e.by)):''}</div>
+        ${e.note?`<div style="font-size:11px;color:#475569;margin-top:2px;font-style:italic">${escapeHTML(String(e.note))}</div>`:''}
+        ${e.mode?`<div style="font-size:11.5px;margin-top:3px;font-weight:700;color:${dispModeMeta(e.mode).color}">${dispModeMeta(e.mode).icon} ${dispModeMeta(e.mode).label}</div>`:''}
+      </div>
+    </div>`;
+  }).join('');
+  const panel=document.createElement('div');
+  panel.style.cssText='background:#fff;border-radius:16px;width:100%;max-width:480px;max-height:90vh;overflow-y:auto;box-shadow:0 24px 48px -12px rgba(0,0,0,.4)';
+  panel.innerHTML=`
+    <div style="padding:16px 20px;border-bottom:1px solid var(--line);background:linear-gradient(135deg,#7c3aed,#6d28d9);color:#fff;border-radius:16px 16px 0 0">
+      <div style="font-size:10px;font-weight:800;letter-spacing:.1em;opacity:.85;text-transform:uppercase">Provenance Trail · S/N ${escapeHTML(String(m.spaSn||'—'))}</div>
+      <div style="font-size:16px;font-weight:800;margin-top:3px">${escapeHTML(String(m.accessoryName||'—'))}${m.accessoryQty&&m.accessoryQty>1?' × '+m.accessoryQty:''}</div>
+      <div style="font-size:11px;opacity:.92;margin-top:3px">${escapeHTML(String(m.spaDealer||''))}${mode?` · ${mode.icon} ${mode.label}`:''}</div>
+    </div>
+    <div style="padding:18px 22px">
+      ${rows || '<div style="color:#64748b;font-size:12px;text-align:center">No trail recorded yet.</div>'}
+    </div>
+    <div style="padding:0 22px 18px;display:flex;justify-content:flex-end">
+      <button class="btn" onclick="document.getElementById('mtrail-overlay').remove()" style="padding:10px 18px">Close</button>
+    </div>`;
+  ov.appendChild(panel); document.body.appendChild(ov);
+}
+window.openMarriageTrail = openMarriageTrail;
+
+// Resolve a marriage's dispatch mode (from its trail, or derived from fields).
+function marriageDispatchMode(m){
+  if(m && Array.isArray(m.trail)){
+    for(let i=m.trail.length-1;i>=0;i--){ if(m.trail[i] && m.trail[i].mode) return m.trail[i].mode; }
+  }
+  if(m){
+    if(m.status==='split-pending') return 'split';
+    if(m.via==='dealer-pickup-at-factory') return 'dealer-pickup';
+  }
+  return null;
+}
+function marriageModePill(m){
+  const mode = marriageDispatchMode(m);
+  if(!mode) return '';
+  const meta = dispModeMeta(mode);
+  return `<span title="${meta.label}" style="display:inline-flex;align-items:center;gap:3px;font-size:9px;font-weight:700;color:${meta.color};background:${meta.color}1a;border:1px solid ${meta.color}33;padding:2px 6px;border-radius:8px;white-space:nowrap">${meta.icon} ${meta.label}</span>`;
+}
+window.marriageDispatchMode = marriageDispatchMode;
+
 // Look up dealer info for any spa S/N across all stores (units, factory, incoming, dispatched).
 // Used by the "Married to Spa S/N" inputs to auto-display dealer info.
 function findSpaBySn(sn){
@@ -8967,6 +9257,7 @@ function markMarriageDelivered(mid){
   snapshot(`marriage delivered ${m.spaSn}`);
   m.status = 'delivered'; m.updatedAt = editStamp();
   m.deliveredDate = toISO();
+  if(typeof mTrail==='function') mTrail(m, 'delivered', { via:'manual', station:'warehouse', note:'Marked delivered manually at warehouse · stored at MINV' });
   // Auto-locate at marriage inventory shelf — accessory has physically
   // arrived at the warehouse, so it lives at MINV until dispatch.
   if(!m.location) m.location = 'MINV';
@@ -10816,6 +11107,11 @@ function selPosPanel(pos){
 // CSS `zoom` on the wrapper reflows so the scroll container's bars track it, and
 // the marriage overlay (re-measured below) stays aligned because it lives in the
 // same zoomed layer. Persisted via lsGet/lsSet (file:// safe wrappers).
+// file://-safe localStorage wrappers: some browsers throw on storage access
+// from file:// or in private mode, so every access is guarded. (Previously
+// referenced but never defined, which silently disabled zoom persistence.)
+function lsGet(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } }
+function lsSet(k,v){ try{ localStorage.setItem(k, v); }catch(e){} }
 let mapZoom = (() => { try { const v = (typeof lsGet === 'function') ? parseFloat(lsGet('mapZoom')) : NaN; return (v >= 0.5 && v <= 1.4) ? v : 1; } catch(e){ return 1; } })();
 function _applyMapZoom(){
   const layer = document.getElementById('map-zoom-layer');
@@ -11456,6 +11752,20 @@ function drawMap(){
   // (over row labels 13 + 14). Position is 'MINV' — not 13A/14A — and
   // holds marriage accessories only.
   migrateMarriageLocations();
+  // Self-heal marriages orphaned by a pre-v5.00 dispatch path (spa already shipped
+  // but its delivered accessory is still parked at MINV). Editable clients only, so a
+  // stale read-only screen never writes. Idempotent — no-ops once everything is clean.
+  try{
+    if(typeof reconcileOrphanedMarriages==='function' && (typeof canEdit!=='function' || canEdit())){
+      reconcileOrphanedMarriages();
+    }
+  }catch(e){ console.warn('[orphan marriage heal]', e); }
+  // Backfill provenance trails for marriages created before v5.01 (idempotent).
+  try{
+    if(typeof backfillMarriageTrails==='function' && (typeof canEdit!=='function' || canEdit())){
+      backfillMarriageTrails();
+    }
+  }catch(e){ console.warn('[marriage trail backfill]', e); }
   const marriageStrip = el('div','');
   marriageStrip.style.cssText = `display:grid;gap:3px;grid-template-columns:${gridCols};margin-bottom:5px;align-items:stretch`;
   const minvLbl = el('div','');
@@ -13350,47 +13660,16 @@ function confirmDispatch(id){
   units=units.filter(x=>x.id!==id);
   addAct(`Unit ${u.sn||u.dealer} dispatched to ${u.dealer}${marPending.length?' (with '+marPending.length+' missing accessor'+(marPending.length>1?'ies':'y')+')':''}`,marPending.length?'var(--red)':'var(--teal)');
   events.push({id:Date.now(),title:`Dispatch: ${rec.sn||rec.dealer}`,date:rec.dispatchDate,time:rec.dispatchTime,type:'dispatch',dealer:rec.dealer,sn:rec.sn||''});
-  // ── SPLIT DISPATCH FOLLOW-UP ──
-  // If user overrode the warning to dispatch with pending marriages, the accessories
-  // still need to reach the dealer somehow. Create an automatic follow-up factory request
-  // for each pending accessory so they don't get forgotten. Mark the marriage as
-  // 'split-pending' (not 'completed') so it stays visible until physically delivered.
-  if(marPending.length > 0){
-    marPending.forEach(m => {
-      // Update the marriage status to a special state
-      m.status = 'split-pending'; m.updatedAt = editStamp();
-      m.splitDispatchedDate = date;
-      m.splitDispatchSpaDealer = u.dealer;
-      // Auto-create a factory request to ship the accessory directly to the dealer
-      dispatchRequests.unshift({
-        id: ++nid,
-        type: 'accessory',
-        description: `🔴 SPLIT DISPATCH — Ship "${m.accessoryName}"${m.accessoryQty&&m.accessoryQty>1?` × ${m.accessoryQty}`:''} directly to dealer ${u.dealer}`,
-        qty: m.accessoryQty || 1,
-        requestedBy: ROLES[currentRole].label + ' (auto from split-dispatch)',
-        requestedAt: toISO(),
-        status: 'pending',
-        dealer: u.dealer,
-        spaSn: u.sn,
-        marriageId: m.id,
-        notes: `Spa S/N ${u.sn} was dispatched on ${fmtD(date)} WITHOUT this accessory. Factory must ship "${m.accessoryName}" directly to dealer ${u.dealer}. Dispatch authorized by ${auth}. This request was auto-created — do NOT mark complete until accessory physically arrives at dealer.`,
-        autoCreated: true,
-        urgent: true,
-      });
-      addAct(`🔴 Auto-created follow-up request: ship "${m.accessoryName}" to ${u.dealer}`,'var(--red)');
-    });
-    if(typeof renderRequests === 'function') renderRequests();
-    toast(`⚠ ${marPending.length} follow-up request${marPending.length>1?'s':''} auto-created — factory must ship the missing accessor${marPending.length>1?'ies':'y'} to ${u.dealer}`,'amber');
-  }
-  // Mark remaining marriages (already delivered) as completed
-  // and clear their location — accessory physically left MINV with the spa.
-  marriages.forEach(m=>{
-    if(m.spaSn===u.sn && m.status==='delivered'){
-      m.status = 'completed'; m.updatedAt = editStamp();
-      m.dispatchedDate = date;
-      m.location = null;   // no longer at MINV — went out with the spa
-    }
-  });
+  // ── MARRIAGE RECONCILIATION (shared with the Schedule group-dispatch path) ──
+  // 1) Any accessory still at the factory → split-dispatch it (auto follow-up
+  //    factory request, marriage stays visible as 'split-pending').
+  // 2) Every accessory that DID ship with the spa (delivered) → 'completed' and
+  //    cleared off the MINV shelf.
+  // Both run through the shared helpers above so this rule can never drift between
+  // the two dispatch code paths again.
+  const _dmeta = { via:'manual', station:'dispatch', mode:'floor-checklist', note:'Floor Map pickup — checklist verified by warehouse manager' };
+  splitDispatchPendingMarriagesForSn(u, date, auth, _dmeta);
+  completeDeliveredMarriagesForSn(u.sn, date, _dmeta);
   closePanel();drawMap();updBadges();
   try { flushSave(); } catch(e){}   // critical op — persist immediately, don't wait for debounce
   toast(`Unit ${u.sn||u.dealer} dispatched`,'ok');
@@ -16754,6 +17033,21 @@ function dispatchAndDeliverGroup(gid){
   const dealer = grp[0].dealer || '';
   const ready = grp.map(e=>units.find(u=>String(u.sn)===String(e.sn))).filter(Boolean);
   if(!ready.length){ toast('None of these tubs are in the warehouse to dispatch','err'); return; }
+  // ── MARRIAGE GATE (mirror confirmDispatch) ──
+  // The Floor-Map dispatch blocks a spa whose accessory is still at the factory.
+  // The Schedule "Dispatch & deliver" path must enforce the SAME rule, otherwise a
+  // married spa can leave here and orphan its accessory at MINV (the 31033 case).
+  const _pendAcross = [];
+  ready.forEach(u=>{ marriagesPendingForSn(u.sn).forEach(m=>_pendAcross.push({u,m})); });
+  if(_pendAcross.length){
+    const list = _pendAcross.map(x=>`• ${x.m.accessoryName} (S/N ${x.u.sn})`).join('\n');
+    if(currentRole !== 'admin'){
+      alert(`🔒 BLOCKED — ${_pendAcross.length} married accessor${_pendAcross.length>1?'ies':'y'} still at the factory:\n\n${list}\n\nWait for them to arrive, OR ask an admin to force-dispatch (which splits the order and creates follow-up factory requests).`);
+      toast('🔒 Dispatch blocked — married accessory not yet at warehouse','err');
+      return;
+    }
+    if(!confirm(`⚠ ADMIN OVERRIDE — ${_pendAcross.length} married accessor${_pendAcross.length>1?'ies':'y'} still at factory:\n\n${list}\n\nThis SPLITS the order(s) — the dealer receives the spa(s) WITHOUT the matching accessor${_pendAcross.length>1?'ies':'y'}. Auto follow-up factory requests will be created.\n\nProceed?`)) return;
+  }
   if(!confirm(`Dispatch & deliver ${ready.length} tub${ready.length>1?'s':''} for ${dealer}?\n\nThis marks them shipped AND delivered (you already handed them off), removes them from the warehouse floor, and logs the movement.`)) return;
   snapshot('dispatch & deliver group');
   const now = (typeof toISO==='function'?toISO():new Date().toISOString().slice(0,10));
@@ -16769,10 +17063,19 @@ function dispatchAndDeliverGroup(gid){
     dispatched.unshift(rec);
     try{ postMovement({type:'601', sn:u.sn, material:u.type||'', qty:1, from:LOC_WAREHOUSE(u.pos), to:LOC_DEALER(u.dealer||dealer), stockType:'unrestricted', ref:by, note:'Dispatch+deliver from schedule'}); }catch(e){}
     units = units.filter(x=>x.id!==u.id);
+    // Close out this spa's marriages exactly like confirmDispatch: ship-with-spa
+    // accessories (delivered) → completed/cleared; anything still pending → split.
+    const _scanned = (window._schedScannedSns instanceof Set) && window._schedScannedSns.has(String(u.sn).trim());
+    const _gmeta = _scanned
+      ? { via:'scan', station:'scanner', mode:'schedule-scan', note:'WH manager scanned the tub out from Schedule' }
+      : { via:'manual', station:'dispatch', mode:'schedule-quick', note:'Quick dispatch+deliver from Schedule (manual)' };
+    try{ splitDispatchPendingMarriagesForSn(u, now, by, _gmeta); }catch(e){ console.warn('[grp split marriage]', e); }
+    try{ completeDeliveredMarriagesForSn(u.sn, now, _gmeta); }catch(e){ console.warn('[grp complete marriage]', e); }
     n++;
   });
   addAct(`\ud83d\ude9a Dispatched + delivered ${n} tub${n>1?'s':''} to ${dealer} (from Schedule)`,'var(--teal)');
   toast(`${n} tub${n>1?'s':''} dispatched & delivered \u2713`,'ok');
+  if(typeof renderMarriages==='function') renderMarriages();
   flushSave(); try{ if(typeof fbCloudSync==='function'&&_fbDb&&_fbAuthorized) fbCloudSync(false); }catch(e){}
   try{ drawMap(); }catch(e){} updBadges(); renderCal();
   if(grp[0] && grp[0].date) try{ selDayPanel(grp[0].date); }catch(e){}
@@ -21175,6 +21478,9 @@ function handleQRPayload(raw, mode){
       } else {
         snapshot('scan-stage '+u.sn);
         u.pos='STAGE1'; delete u.stack; delete u.level; touchUnit(u);
+        // Remember this tub was scanned out by the WH manager, so when it's
+        // dispatched the marriage trail records 'schedule-scan' (not manual).
+        try{ if(!(window._schedScannedSns instanceof Set)) window._schedScannedSns = new Set(); window._schedScannedSns.add(String(u.sn).trim()); }catch(e){}
         addAct(`\ud83d\udce5 Scanned + staged ${u.sn} → Stage 1`, 'var(--amber)');
         flushSave(); try{ if(typeof fbCloudSync==='function'&&_fbDb&&_fbAuthorized) fbCloudSync(false); }catch(e){}
         try{ drawMap(); }catch(e){} updBadges();
@@ -21383,6 +21689,7 @@ function handleQRPayload(raw, mode){
       // present before the spa can dispatch.
       if(!m.location) m.location = 'MINV';
       addAct(`📬 Received married accessory: ${parsedAccName || acc.dealer} for S/N ${m.spaSn}`, 'var(--teal)');
+      if(typeof mTrail==='function') mTrail(m, 'delivered', { via:'scan', station:'warehouse', note:'Received via QR scan at warehouse · stored at MINV' });
       setScanResult('ok', `for S/N ${m.spaSn}`, `received: ${parsedAccName || acc.dealer || 'accessory'} · spa ${spaLocation}`);
       toast(`✓ Received accessory for S/N ${m.spaSn}`,'ok');
     } else if(wasAlreadyDelivered){
@@ -21398,6 +21705,7 @@ function handleQRPayload(raw, mode){
       if(!m.location) m.location = 'MINV';
       const recoveredNote = marriageWasLocallyKnown ? '' : ' (recovered from QR — was missing locally)';
       addAct(`📬 Marriage delivered${recoveredNote}: ${m.accessoryName} for S/N ${m.spaSn}`, 'var(--teal)');
+      if(typeof mTrail==='function') mTrail(m, 'delivered', { via:'scan', station:'warehouse', note:'Received via QR scan at warehouse'+(recoveredNote?' (recovered from QR)':'') });
       setScanResult('ok', `for S/N ${m.spaSn}`, `marked delivered · spa ${spaLocation}${recoveredNote}`);
       toast(`✓ Marriage delivered for S/N ${m.spaSn}`,'ok');
     }
@@ -21924,6 +22232,7 @@ function shipFromFactory(id){
       linkedMarriage.status = 'ready-to-ship';
       linkedMarriage.readyAt = toISO();
       addAct(`📦 Marriage ready to ship: ${f.dealer} → S/N ${f.marriedSn}`, 'var(--amber)');
+      if(typeof mTrail==='function') mTrail(linkedMarriage, 'ready-to-ship', { via:'manual', station:'factory', note:'Factory marked ready — waiting for Truck scan' });
     }
     addAct(`📦 Ready for Truck pickup: ${f.dealer} (married to S/N ${f.marriedSn})`,'var(--amber)');
     toast(`${f.dealer} marked ready — Truck/Transit will scan to load`,'ok');
@@ -22047,7 +22356,7 @@ function dispatchPickupFromFactory(id, viaScan){
     });
   }
   const lm = marriages.find(m => m.accessoryId === f.id && m.status !== 'delivered' && m.status !== 'completed');
-  if(lm){ lm.status = 'delivered'; lm.updatedAt = editStamp(); lm.deliveredDate = at; lm.via = 'dealer-pickup-at-factory'; }
+  if(lm){ lm.status = 'delivered'; lm.updatedAt = editStamp(); lm.deliveredDate = at; lm.via = 'dealer-pickup-at-factory'; if(typeof mTrail==='function') mTrail(lm, 'delivered', { via: viaScan?'scan':'manual', station:'factory', note: viaScan?'Dealer pickup at factory (scanned)':'Dealer pickup at factory (manual)' }); }
   factory = factory.filter(x => x.id !== id);
   addAct(`🤝🚚 Dealer picked up at factory: ${f.sn||f.dealer}`,'var(--accent)');
   toast(`${f.sn||f.dealer} dispatched — dealer pickup at factory`,'ok');
@@ -22449,9 +22758,11 @@ function renderMarriages(){
           <div class="mar-card-row"><span class="mar-card-lbl">Accessory</span><span class="mar-card-val mar-card-acc">${m.accessoryName}${(m.accessoryQty||1) > 1 ? ` <small style="color:var(--text3);font-weight:600">× ${m.accessoryQty}</small>` : ''}</span></div>
           ${m.notes ? `<div class="mar-card-row"><span class="mar-card-lbl">Notes</span><span class="mar-card-val mar-card-notes">${m.notes}</span></div>` : ''}
           <div class="mar-card-row mar-card-meta"><span class="mar-card-lbl">Created</span><span>${fmtD(m.created)}${m.deliveredDate ? ` · delivered ${fmtD(m.deliveredDate)}` : ''}</span></div>
+          ${marriageDispatchMode(m) ? `<div class="mar-card-row mar-card-meta"><span class="mar-card-lbl">Dispatch</span><span>${marriageModePill(m)}</span></div>` : ''}
         </div>
         ${trackInfo}
         <div class="mar-card-acts">
+          <button class="btn btn-sm" style="background:#f5f3ff;border-color:#c4b5fd;color:#6d28d9;font-weight:600" onclick="openMarriageTrail(${m.id})" title="Full provenance trail — every scan/manual step + dispatch mode">🕘 Trail</button>
           ${isMarriageActive(m) && m.status !== 'split-pending' ? `<button class="btn btn-sm btn-g" onclick="markMarriageDelivered(${m.id})" title="Override: mark as delivered without waiting for Truck/Receiving scan">✓ Mark delivered</button>` : ''}
           ${isPending ? `<button class="btn btn-sm mar-btn-primary" onclick="shipMarriageFromMarriages(${m.id})" title="Send the accessory to the warehouse — marks marriage as Delivered">📤 Send to WH</button>` : ''}
           ${isPending ? `<button class="btn btn-sm" style="background:#ede9fe;border-color:#8b5cf6;color:#5b21b6;font-weight:600" onclick="markMarriageReadyForPickup(${m.id})" title="Dealer collects at the factory — Truck won't take it">🤝 Ready to Pick Up</button>` : ''}
@@ -22496,7 +22807,7 @@ function renderMarriages(){
       }
       const rowStyle = cfg.rowBg ? ` style="background:${cfg.rowBg};border-left:4px solid var(--red)"` : '';
       return `<tr${rowStyle}>
-        <td>${badge}${extraInfo}</td>
+        <td>${badge}${extraInfo}${marriageDispatchMode(m) ? `<div style="margin-top:4px">${marriageModePill(m)}</div>` : ''}</td>
         <td class="td-m">${m.spaSn}${inWH?' <span style="font-size:9px;color:var(--teal)" title="Spa is at receiving warehouse">●</span>':' <span style="font-size:9px;color:var(--text3)" title="Spa not yet at warehouse">○</span>'}</td>
         <td>${m.spaDealer||'—'}</td>
         <td style="font-weight:500">${m.accessoryName}${m.mountType==='inside'?' <span style="font-size:8px;background:#dbeafe;color:#1e40af;padding:1px 6px;border-radius:4px;font-weight:700;letter-spacing:.03em;white-space:nowrap" title="Packed inside the tub — never on the MINV shelf">🛁 INSIDE TUB</span>':''}</td>
@@ -22504,6 +22815,7 @@ function renderMarriages(){
         <td class="td-s" data-hide-mobile>${m.notes||'—'}</td>
         <td class="td-s" data-hide-mobile>${fmtD(m.created)}</td>
         <td style="text-align:right;white-space:nowrap">
+          <button class="btn btn-sm" style="background:#f5f3ff;border-color:#c4b5fd;color:#6d28d9;font-weight:600" onclick="openMarriageTrail(${m.id})" title="Full provenance trail — every scan/manual step + dispatch mode">🕘 Trail</button>
           ${isMarriageActive(m) && m.status !== 'split-pending' ? `<button class="btn btn-sm btn-g" onclick="markMarriageDelivered(${m.id})" title="Override: mark as delivered without waiting for Truck/Receiving scan">Mark delivered</button>`:''}
           ${m.status==='split-pending'?`<button class="btn btn-sm" style="background:#fef9c3;border-color:#f59e0b;color:#78350f" onclick="goV('requests')" title="View the auto-created Factory Request to ship this accessory">📋 Open follow-up</button>`:''}
           ${m.status!=='completed'?`<button class="btn btn-sm" onclick="printMarriageLabel(${m.id})" title="Print physical label for this pairing">🖨 Label</button>`:''}
@@ -23151,6 +23463,7 @@ function syncMarriageOnAccessoryTransit(acc){
   m.status = 'in-transit'; m.updatedAt = editStamp();
   m.inTransitAt = toISO();
   addAct(`✈ Marriage in transit (Truck scanned): ${acc.dealer} → S/N ${acc.marriedSn}`, 'var(--accent)');
+  if(typeof mTrail==='function') mTrail(m, 'in-transit', { via:'scan', station:'truck', note:'Truck scanned the accessory onto the truck' });
   // Render hooks — best-effort, all guarded
   try { if(typeof renderMarriages === 'function') renderMarriages(); } catch(e){}
   try { if(typeof updBadges === 'function') updBadges(); } catch(e){}
@@ -23195,6 +23508,7 @@ function shipMarriageFromMarriages(mid){
   m.status = 'ready-to-ship'; m.updatedAt = editStamp();
   m.readyAt = toISO();
   addAct(`📦 Marriage ready for Truck pickup: ${m.accessoryName} → S/N ${m.spaSn}`,'var(--amber)');
+  if(typeof mTrail==='function') mTrail(m, 'ready-to-ship', { via:'manual', station:'marriages-crew', note:'Marriages crew marked ready — waiting for Truck scan' });
   toast(`Marked ready — Truck/Transit will scan to load`,'ok');
   renderMarriages();
   if(typeof renderFactory === 'function') renderFactory();
@@ -23230,6 +23544,7 @@ function markMarriageReadyForPickup(mid){
   m.status = 'ready-for-pickup'; m.updatedAt = editStamp();
   m.readyAt = toISO();
   addAct(`🤝 Marriage ready for dealer pickup: ${m.accessoryName} → S/N ${m.spaSn}`,'var(--purple)');
+  if(typeof mTrail==='function') mTrail(m, 'ready-for-pickup', { via:'manual', station:'factory', note:'Marked for dealer pickup at factory — Truck cannot scan it' });
   toast(`Marked ready for dealer pickup — Truck can't scan it`,'ok');
   renderMarriages(); if(typeof renderFactory === 'function') renderFactory(); if(typeof renderTruck === 'function') renderTruck(); updBadges();
   setTimeout(() => { try { printMarriageLabel(m.id); } catch(e){} }, 80);
@@ -23252,6 +23567,7 @@ function undoMarriageReady(mid){
   m.status = 'pending'; m.updatedAt = editStamp();
   delete m.readyAt;
   addAct(`↶ Marriage back to factory: ${m.accessoryName} → S/N ${m.spaSn}`,'var(--text2)');
+  if(typeof mTrail==='function') mTrail(m, 'reverted', { via:'manual', station:'factory', note:`Undo ready (${wasState}) → back to pending` });
   toast(`${m.accessoryName} back in factory inventory`,'ok');
   renderMarriages(); if(typeof renderFactory === 'function') renderFactory(); if(typeof renderTruck === 'function') renderTruck(); if(typeof renderInTransit === 'function') renderInTransit(); updBadges();
 }
@@ -23293,6 +23609,7 @@ function undoMarriageDelivered(mid){
   delete m.deliveredDate;
   if(m.location === 'MINV') delete m.location;
   addAct(`\u21b6 Marriage delivery undone: ${m.accessoryName} \u2192 S/N ${m.spaSn}`, 'var(--text2)');
+  if(typeof mTrail==='function') mTrail(m, 'reverted', { via:'manual', station:'warehouse', note:'Delivery undone → back to pending' });
   toast(`Delivery undone for S/N ${m.spaSn} \u2014 back to pending`, 'ok');
   renderMarriages();
   if(typeof renderFactory === 'function') renderFactory();
@@ -23322,6 +23639,7 @@ function dispatchMarriagePickup(mid){
   m.dispatchedDate = at;
   m.via = 'dealer-pickup-at-factory';
   m.location = null;
+  if(typeof mTrail==='function') mTrail(m, 'completed', { via:'manual', station:'factory', mode:'dealer-pickup', note:'Dealer collected the accessory at the factory' });
   addAct(`🤝🚚 Marriage dealer pickup at factory: ${m.accessoryName} → S/N ${m.spaSn}`,'var(--accent)');
   toast(`${m.accessoryName} dispatched — dealer pickup at factory`,'ok');
   renderMarriages(); if(typeof renderFactory === 'function') renderFactory(); if(typeof renderTruck === 'function') renderTruck(); if(typeof renderInTransit === 'function') renderInTransit(); updBadges();
@@ -25030,6 +25348,7 @@ function markRequestReceived(rid){
       m.status = 'completed'; m.updatedAt = editStamp();
       m.dispatchedDate = m.dispatchedDate || m.splitDispatchedDate || toISO();
       m.splitDispatchCompletedAt = toISO();
+      if(typeof mTrail==='function') mTrail(m, 'completed', { via:'manual', station:'dealer', mode:'split-fulfilled', note:'Split accessory delivered directly to dealer' });
       extraNote += ` · Marriage for S/N ${m.spaSn} now completed`;
       addAct(`✓ Split-dispatch follow-up complete for S/N ${m.spaSn}: ${m.accessoryName}`,'var(--teal)');
       if(typeof renderMarriages === 'function') renderMarriages();
@@ -25307,6 +25626,20 @@ function _blobReplacer(k, v){
 }
 window._blobReplacer = _blobReplacer;
 
+// ── STORAGE-PRESSURE RELIEF (v5.04) ───────────────────────────────────────────
+// localStorage has a hard ~5MB browser quota. The hourly LOCAL backup keeps a full
+// SECOND copy of the state, which roughly doubles usage; once the live state grows
+// large, that duplicate can tip us over the quota and starve the PRIMARY save (the
+// "Storage full" toast). The hourly local backup is the most expendable layer —
+// Firebase cloud sync + Drive auto-backup + manual backup all still hold the full
+// data — so on quota pressure we evict it and retry the primary write. Returns true
+// if the primary state was persisted after relief.
+const HOURLY_BACKUP_LS_KEY = 'aspen_warehouse_state_hourly_backup_v1';
+function _relieveStoragePressureAndRetry(payload){
+  try { localStorage.removeItem(HOURLY_BACKUP_LS_KEY); } catch(e){}
+  try { localStorage.setItem(LS_KEY, payload); return true; } catch(e){ return false; }
+}
+
 function saveState(){
   // ── ECHO LOOP GUARD ──
   // If we're applying remote state (set by the listener around fbApplyRemoteState
@@ -25339,28 +25672,35 @@ function saveState(){
   // the on-close data-loss risk small while still avoiding 50× writes per second.
   if(_saveTimer) clearTimeout(_saveTimer);
   _saveTimer = setTimeout(()=>{
+    const now = fbServerNow();   // server-consistent clock
+    const state = {nid, units, dispatched, incoming, materials, events, activity, queue, cfg, factory, marriages, dispatchRequests, coverInventory, colorLibrary, coverModelMapping, movements, _saved: now};
+    const payload = JSON.stringify(state, _blobReplacer);
+    let saved = false;
     try{
-      const now = fbServerNow();   // server-consistent clock
-      const state = {nid, units, dispatched, incoming, materials, events, activity, queue, cfg, factory, marriages, dispatchRequests, coverInventory, colorLibrary, coverModelMapping, movements, _saved: now};
-      localStorage.setItem(LS_KEY, JSON.stringify(state, _blobReplacer));
+      localStorage.setItem(LS_KEY, payload);
+      saved = true;
+    }catch(err){
+      console.warn('saveState failed:', err.message);
+      // QuotaExceededError: the hourly LOCAL backup is a verbatim 2nd copy and the
+      // single most expendable consumer (cloud sync + Drive + manual backup all still
+      // cover us). Evict it and retry so the PRIMARY state still persists instead of
+      // going stale. Only warn if the state STILL doesn't fit after that.
+      if(err.name === 'QuotaExceededError' && _relieveStoragePressureAndRetry(payload)){
+        saved = true;
+        console.warn('[storage] quota hit — evicted hourly local backup and retried OK.');
+      } else if(err.name === 'QuotaExceededError'){
+        toast('⚠ Storage full — export backup soon', 'err');
+      }
+    }
+    if(saved){
       _lastSavedHash = stateHash();  // mark integrity watchdog "clean" — drift detection from here
       _lastSavedSig = _stateSig();   // refresh sig in case more changes came in during debounce
       // ── EDGE CASE FIX: bump local-write timestamp ──
       // If we don't update _fbLastLocalWriteAt here, an edit made BEFORE Firebase
-      // auth completes leaves _fbLastLocalWriteAt at the loadState() value (which
-      // is the OLD _saved from disk). When the realtime listener then attaches
-      // and fires with the cloud's last state (older than our new edit), the
-      // "wasInitial && local newer than cloud → push local" recovery in
-      // fbStartRealtimeSync wouldn't trigger — and our edit would sit unpushed
-      // until the next 2-minute scheduled sync. Bumping here ensures the recovery
-      // path sees the edit as newer-than-cloud and pushes immediately.
+      // auth completes leaves it at the loadState() value, so the realtime listener's
+      // "local newer than cloud → push" recovery wouldn't trigger and the edit would
+      // sit unpushed until the next scheduled sync. Bumping here pushes immediately.
       _fbLastLocalWriteAt = now;
-    }catch(err){
-      console.warn('saveState failed:', err.message);
-      // Likely QuotaExceededError — too many photos
-      if(err.name === 'QuotaExceededError'){
-        toast('⚠ Storage full — export backup soon', 'err');
-      }
     }
     // After persisting locally, propagate to other devices via Firebase (debounced inside).
     // Skipped automatically when applying a remote update (echo guard).
@@ -25377,7 +25717,14 @@ function flushSave(){
   try{
     const now = fbServerNow();   // server-consistent clock
     const state = {nid, units, dispatched, incoming, materials, events, activity, queue, cfg, factory, marriages, dispatchRequests, coverInventory, colorLibrary, coverModelMapping, movements, _saved: now};
-    localStorage.setItem(LS_KEY, JSON.stringify(state, _blobReplacer));
+    const payload = JSON.stringify(state, _blobReplacer);
+    try{
+      localStorage.setItem(LS_KEY, payload);
+    }catch(err){
+      if(err.name === 'QuotaExceededError' && _relieveStoragePressureAndRetry(payload)){
+        console.warn('[storage] quota hit on flush — evicted hourly local backup and retried OK.');
+      } else { throw err; }
+    }
     _lastSavedHash = stateHash();  // mark integrity watchdog "clean"
     _lastSavedSig = _stateSig();   // mark sig as "seen" to prevent echo in saveState
     _fbLastLocalWriteAt = now;
@@ -27189,7 +27536,18 @@ document.addEventListener('keydown', e=>{
       if(Date.now() - _hourlyBackupLast < HOURLY_BACKUP_INTERVAL) return;
       try {
         const main = localStorage.getItem('aspen_warehouse_state_v1');
-        if(main){ localStorage.setItem(HOURLY_BACKUP_KEY, main); _hourlyBackupLast = Date.now(); }
+        if(!main) return;
+        // The hourly backup is a full SECOND copy of the state. Duplicating a large
+        // state can push localStorage past the browser's ~5MB cap and starve the
+        // PRIMARY save (the "Storage full" toast). Cloud sync + Drive + manual backup
+        // already cover us, so once the live state is big we SKIP the local duplicate
+        // (and drop any stale copy to free room) — better no local hourly backup than
+        // a broken primary save. ~1.8 MB keeps headroom for the primary + small keys.
+        if(main.length <= 1800000){
+          localStorage.setItem(HOURLY_BACKUP_KEY, main); _hourlyBackupLast = Date.now();
+        } else {
+          try { localStorage.removeItem(HOURLY_BACKUP_KEY); } catch(e){}
+        }
       } catch(e){}
     }
     setInterval(maybeBackup, 60000);
