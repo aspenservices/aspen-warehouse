@@ -4717,7 +4717,7 @@ let _fbInitAttempts = 0;
 //   /app_version/current  (in Firebase console, manually, OR call
 //   pushVersionToFirebase() from the Admin console at deploy time)
 // ══════════════════════════════════════════════════════════════════
-const APP_VERSION = 'v5.04';
+const APP_VERSION = 'v5.07';
 window.APP_VERSION = APP_VERSION;
 
 // ── DATA EPOCH (generation guard) ────────────────────────────────────
@@ -4750,11 +4750,17 @@ function startVersionWatcher(){
       // Seed the pointer if it's missing so the newest device establishes it.
       if(!remoteVer || typeof remoteVer !== 'string'){ try{ _fbDb.ref('app_version/current').set(APP_VERSION); }catch(e){} return; }
       if(_verNum(remoteVer) > _verNum(APP_VERSION)){
-        // A NEWER version is live → lock THIS old screen read-only immediately so
-        // it cannot push stale data to the cloud until it updates.
-        console.log('[update] cloud version', remoteVer, '> local', APP_VERSION, '— locking read-only (cannot push until updated)');
+        // A NEWER version is live → (1) lock THIS old screen read-only immediately so
+        // it can't push stale data to the cloud, and (2) FORCE an auto-reload so the
+        // device updates itself hands-free. The Firebase listener re-fires the moment a
+        // backgrounded/asleep tab is foregrounded or its socket reconnects, so this is
+        // what actually pulls every device onto the new build without anyone touching it
+        // (the file-poller is the independent backup). _doAutoReload flushes pending
+        // edits first and has a 25s anti-loop guard, so calling it here is safe.
+        console.log('[update] cloud version', remoteVer, '> local', APP_VERSION, '— read-only + forcing auto-reload');
         try{ if(typeof _enterReadOnlyMode==='function') _enterReadOnlyMode(remoteVer); }catch(e){}
         if(!_updateBannerShown) showUpdateBanner(remoteVer);
+        try{ if(typeof _doAutoReload==='function') _doAutoReload('cloud-version ' + remoteVer); }catch(e){}
       } else if(_verNum(remoteVer) < _verNum(APP_VERSION)){
         // This client is NEWER than the cloud pointer → advance it so every older
         // device locks itself the moment its listener hears this.
@@ -4771,7 +4777,7 @@ window.startVersionWatcher = startVersionWatcher;
 function pushVersionToFirebase(){
   if(!_fbDb){ alert('Firebase not connected — cannot push version'); return; }
   _fbDb.ref('app_version/current').set(APP_VERSION).then(() => {
-    alert(`✓ Version ${APP_VERSION} announced to all devices. They'll see an update banner.`);
+    alert(`✓ Version ${APP_VERSION} announced. Every OPEN device auto-reloads to it on its next focus / reconnect — no action needed on those devices.`);
   }).catch(e => alert('Failed: ' + e.message));
 }
 window.pushVersionToFirebase = pushVersionToFirebase;
@@ -9262,7 +9268,7 @@ function markMarriageDelivered(mid){
   // arrived at the warehouse, so it lives at MINV until dispatch.
   if(!m.location) m.location = 'MINV';
   // Remove the matching accessory from factory inventory
-  if(m.accessoryId){ factory = factory.filter(f => f.id !== m.accessoryId); }
+  if(m.accessoryId){ const acc = factory.find(f => f.id === m.accessoryId); if(acc) _tombstoneFactoryRow(acc); factory = factory.filter(f => f.id !== m.accessoryId); }
   // Sync: if there is an auto-created Factory Request for this marriage (split-dispatch follow-up),
   // close it as 'received' since the accessory has now arrived.
   const linkedReq = dispatchRequests.find(r => r.autoCreated && r.marriageId === mid && r.status !== 'received' && r.status !== 'rejected');
@@ -21678,6 +21684,7 @@ function handleQRPayload(raw, mode){
     if(acc){
       // Best case: the accessory is in factory and we receive it now
       snapshot('marriage receive (from QR scan)');
+      _tombstoneFactoryRow(acc);         // v5.06: block stale-remote resurrection (accessory now at warehouse)
       factory = factory.filter(f => f.id !== acc.id);
       m.accessoryId = m.accessoryId || acc.id;
       m.status = 'delivered'; m.updatedAt = editStamp();
@@ -22204,6 +22211,7 @@ function shipFromFactory(id){
       snapshot('ship loose accessory from factory');
       materials.unshift({id:++nid, name:f.dealer, qty:f.qty||1, cat:'parts', date:toISO(), notes:f.notes||'From factory'});
       try{ postMovement({type:'101', sn:f.sn||'', material:f.type||'accessory', qty:f.qty||1, from:LOC_FACTORY, to:LOC_WAREHOUSE(''), stockType:'unrestricted', note:'Loose accessory shipped to Materials'}); }catch(e){}
+      _tombstoneFactoryRow(f);         // v5.05: block stale-remote resurrection (S/N-less accessory)
       factory = factory.filter(x => x.id !== id);
       toast('Accessory logged to Materials','ok');
       renderFactory(); renderMaterials(); updBadges(); drawMap();
@@ -22328,6 +22336,35 @@ function undoFactoryReady(id){
 
 // Dealer picked it up at the factory — dispatch it (terminal). Factory + Admin only.
 // `viaScan` skips the confirm dialog (the scan itself is the confirmation).
+// ── FACTORY-ROW REMOVAL TOMBSTONE (v5.05) ─────────────────────────────────────
+// Record an intentional-removal tombstone for a factory row so a STALE remote copy
+// (another device that hasn't seen the removal yet) can't resurrect it on the next
+// sync. CRITICAL for accessories / S/N-less rows: _mergeFactory.isStaleFactoryRow
+// only drops SERIALIZED spas — it deliberately exempts accessories and S/N-less rows
+// because those legitimately live at the factory — so WITHOUT a tombstone a dispatched
+// accessory/cover bounces right back into the Loading Bay (the dealer-pickup ghost:
+// item reappears at the factory AND stays in Dispatched). Mirrors rmFromFactory's
+// guarded tombstone exactly (same cfg._deletedUnits map, same key format, same floor
+// guard + 60-day prune). A later legit re-add survives because its updatedAt is newer
+// than the tombstone (see _mergeFactory's tombstone-drop).
+function _tombstoneFactoryRow(f){
+  if(!f) return;
+  try{
+    const snStr = (f.sn != null) ? String(f.sn).trim() : '';
+    // Don't tombstone by S/N if the same tub is on the warehouse floor (one shared
+    // sn:-keyed map — tombstoning would wipe the good floor copy). Accessories use an
+    // id: key unique to this row, so the guard never blocks them.
+    const alsoOnFloor = snStr !== '' && Array.isArray(units) && units.some(u => u && String(u.sn).trim() === snStr);
+    if(alsoOnFloor) return;
+    cfg._deletedUnits = cfg._deletedUnits || {};
+    const _tk = (snStr !== '') ? ('sn:' + snStr) : ('id:' + f.id);
+    cfg._deletedUnits[_tk] = editStamp();
+    const _cut = new Date(Date.now() - 60*864e5).toISOString();
+    for(const k in cfg._deletedUnits){ if(cfg._deletedUnits[k] < _cut) delete cfg._deletedUnits[k]; }
+  }catch(e){ console.warn('[factory tombstone write]', e); }
+}
+window._tombstoneFactoryRow = _tombstoneFactoryRow;
+
 function dispatchPickupFromFactory(id, viaScan){
   if(currentRole !== 'factory' && currentRole !== 'admin'){ toast('🔒 Only Factory can dispatch a dealer pickup','err'); return; }
   const f = factory.find(x=>x.id===id); if(!f) return;
@@ -22357,6 +22394,7 @@ function dispatchPickupFromFactory(id, viaScan){
   }
   const lm = marriages.find(m => m.accessoryId === f.id && m.status !== 'delivered' && m.status !== 'completed');
   if(lm){ lm.status = 'delivered'; lm.updatedAt = editStamp(); lm.deliveredDate = at; lm.via = 'dealer-pickup-at-factory'; if(typeof mTrail==='function') mTrail(lm, 'delivered', { via: viaScan?'scan':'manual', station:'factory', note: viaScan?'Dealer pickup at factory (scanned)':'Dealer pickup at factory (manual)' }); }
+  _tombstoneFactoryRow(f);            // v5.05: block stale-remote resurrection (S/N-less covers/accessories)
   factory = factory.filter(x => x.id !== id);
   addAct(`🤝🚚 Dealer picked up at factory: ${f.sn||f.dealer}`,'var(--accent)');
   toast(`${f.sn||f.dealer} dispatched — dealer pickup at factory`,'ok');
@@ -23148,7 +23186,7 @@ function saveMarriageEdit(mid){
   if(newMount !== oldMount && m.status !== 'completed'){
     if(newMount === 'inside'){
       // Travels INSIDE the tub now: drop the separate shelf accessory + pack it in.
-      if(m.accessoryId != null){ factory = factory.filter(f => f.id !== m.accessoryId); m.accessoryId = null; }
+      if(m.accessoryId != null){ const acc = factory.find(f => f.id === m.accessoryId); if(acc) _tombstoneFactoryRow(acc); factory = factory.filter(f => f.id !== m.accessoryId); m.accessoryId = null; }
       m.location = null;
       const found = (typeof findSpaRecordBySn === 'function') ? findSpaRecordBySn(sn) : null;
       if(found){
@@ -23630,6 +23668,7 @@ function dispatchMarriagePickup(mid){
   if(acc){
     acc.trackingHistory = acc.trackingHistory || [];
     acc.trackingHistory.push({state:'dispatched-from-factory', at, by:ROLES[currentRole].label, note:'Dealer pickup at factory'});
+    _tombstoneFactoryRow(acc);         // v5.05: block stale-remote resurrection (S/N-less covers/accessories)
     factory = factory.filter(f => f.id !== acc.id);
   }
   // Dealer collected the accessory AT THE FACTORY — it left with them. It never
