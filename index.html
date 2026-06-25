@@ -4717,7 +4717,7 @@ let _fbInitAttempts = 0;
 //   /app_version/current  (in Firebase console, manually, OR call
 //   pushVersionToFirebase() from the Admin console at deploy time)
 // ══════════════════════════════════════════════════════════════════
-const APP_VERSION = 'v5.07';
+const APP_VERSION = 'v5.10';
 window.APP_VERSION = APP_VERSION;
 
 // ── DATA EPOCH (generation guard) ────────────────────────────────────
@@ -17067,7 +17067,14 @@ function dispatchAndDeliverGroup(gid){
       coverPaired:u.coverPaired||null, bolPdf:bol,
       deliveryStatus:'delivered-to-dealer', deliveryConfirmedAt: now+'T'+new Date().toTimeString().slice(0,8), deliveryConfirmedBy: by};
     dispatched.unshift(rec);
-    try{ postMovement({type:'601', sn:u.sn, material:u.type||'', qty:1, from:LOC_WAREHOUSE(u.pos), to:LOC_DEALER(u.dealer||dealer), stockType:'unrestricted', ref:by, note:'Dispatch+deliver from schedule'}); }catch(e){}
+    // ── PULL THE WAREHOUSE COVER (v5.08) ── mirror confirmDispatch: a warehouse-sourced
+    // cover sat on the 15A/15B rack for this tub; pull it now that it ships. Factory
+    // covers were pulled at creation (skipped by the guard); idempotent per S/N.
+    const _cp = u.coverPaired || u.cover;
+    if(_cp && (_cp.source || 'warehouse') === 'warehouse' && _cp.color){
+      try { decrementCoverStock(_cp.color, _cp.model, 'warehouse', u.sn); }
+      catch(e){ console.warn('[cover pull on schedule dispatch]', e); }
+    }
     units = units.filter(x=>x.id!==u.id);
     // Close out this spa's marriages exactly like confirmDispatch: ship-with-spa
     // accessories (delivered) → completed/cleared; anything still pending → split.
@@ -20709,6 +20716,63 @@ function decrementCoverStock(color, model, source, spaSn){
 // This removes those duplicates: dedups the pending queue by S/N and dedups the
 // decrement history by S/N (restoring 1 unit of qty for each duplicate decrement
 // that wrongly reduced stock). Idempotent — safe to run repeatedly.
+// ── HISTORICAL COVER BACK-FILL (v5.09) ────────────────────────────────────────
+// Before v5.08 only confirmDispatch (warehouse-floor) pulled a tub's warehouse cover.
+// Dealer-pickup-at-factory and Schedule "dispatch & deliver" shipped the cover WITH the
+// tub but never decremented warehouse stock → cover inventory read too high. This walks
+// the dispatch log and back-fills every missed pull. IDEMPOTENT per S/N (same guard as
+// decrementCoverStock: a cover already pulled — by confirmDispatch, by the v5.08 pulls,
+// or by a previous run of this — is in the row's decrement history and is skipped). It
+// ONLY reduces stock (never below 0) and never spams pending/factory-requests (those are
+// for live orders, not a historical correction). Self-healing: safe to run on every load;
+// once every cover is reconciled it's a silent no-op.
+function reconcileDispatchedCovers(opts){
+  opts = opts || {};
+  if(!Array.isArray(dispatched) || !Array.isArray(coverInventory)) return {pulled:0, skipped:0, details:[]};
+  let pulled=0, skipped=0; const details=[];
+  for(const r of dispatched){
+    const cov = r.cover || r.coverPaired;                       // dealer-pickup stores .cover; floor/schedule store .coverPaired
+    if(!cov || (cov.source||'warehouse') !== 'warehouse' || !cov.color) continue;  // factory covers were pulled at creation
+    const sn = String(r.sn||''); if(!sn) continue;
+    let row = coverInventory.find(c =>
+      (c.source||'warehouse') === 'warehouse' &&
+      (c.color||'').toLowerCase() === (cov.color||'').toLowerCase() &&
+      (!cov.model || (c.model||'').toLowerCase() === (cov.model||'').toLowerCase())
+    );
+    // Already pulled for this S/N? (decrement history OR queued pending) → skip
+    if(row){
+      row.history = row.history || []; row.pending = row.pending || [];
+      const already = row.history.some(h => h.action==='decrement' && String(h.spaSn)===sn)
+                    || row.pending.some(p => String(p.spaSn)===sn);
+      if(already){ skipped++; continue; }
+    }
+    if(opts.dryRun){ pulled++; details.push({sn, color:cov.color, model:cov.model||'', via:r.via||'(floor)'}); continue; }
+    if(!row){
+      // No row for this cover model → the cover already shipped, so seed a 0 row and
+      // record the pull as history (it represents a real deficit, kept explicit).
+      row = {id:++nid, color:cov.color, model:cov.model||'', qty:0, lowThreshold:1, location:'', source:'warehouse', updated:editStamp(), history:[], pending:[]};
+      coverInventory.push(row);
+    }
+    row.qty = Math.max(0, (row.qty||0) - 1);                    // correction only reduces; never negative
+    row.updated = editStamp();
+    row.history = row.history || [];
+    row.history.push({at: toISO(), action:'decrement', spaSn: sn, by:'Reconcile v5.09', note:'Back-fill: cover shipped with dispatch ('+(r.via||'floor')+') but was never deducted', reconciled:true});
+    pulled++;
+    details.push({sn, color:cov.color, model:cov.model||'', qty:row.qty, via:r.via||'(floor)'});
+  }
+  if(pulled > 0 && !opts.dryRun){
+    try{ cfg._coverReconcileLog = cfg._coverReconcileLog || []; cfg._coverReconcileLog.push({at: toISO(), pulled, sample: details.slice(0,150)}); }catch(e){}
+    try{ if(typeof addAct === 'function') addAct(`🧮 Cover reconcile — pulled ${pulled} cover${pulled>1?'s':''} for past dispatches that shipped without deducting`, 'var(--amber)'); }catch(e){}
+    try{ flushSave(); }catch(e){}
+    try{ if(typeof fbCloudSync==='function' && _fbDb && _fbAuthorized){ _bypassNextSafePush = true; fbCloudSync(false); } }catch(e){}
+    try{ if(typeof renderCoverInventory==='function') renderCoverInventory(); }catch(e){}
+    try{ if(typeof updBadges==='function') updBadges(); }catch(e){}
+    if(opts.auto && typeof toast==='function') toast(`🧮 Cover inventory corrected — deducted ${pulled} cover${pulled>1?'s':''} from past dispatches that weren't recorded`, 'amber');
+  }
+  return {pulled, skipped, details};
+}
+window.reconcileDispatchedCovers = reconcileDispatchedCovers;
+
 function reconcileCovers(){
   if(typeof coverInventory === 'undefined' || !Array.isArray(coverInventory)) return false;
   let changed = false;
@@ -22394,6 +22458,17 @@ function dispatchPickupFromFactory(id, viaScan){
   }
   const lm = marriages.find(m => m.accessoryId === f.id && m.status !== 'delivered' && m.status !== 'completed');
   if(lm){ lm.status = 'delivered'; lm.updatedAt = editStamp(); lm.deliveredDate = at; lm.via = 'dealer-pickup-at-factory'; if(typeof mTrail==='function') mTrail(lm, 'delivered', { via: viaScan?'scan':'manual', station:'factory', note: viaScan?'Dealer pickup at factory (scanned)':'Dealer pickup at factory (manual)' }); }
+  // ── PULL THE WAREHOUSE COVER (v5.08) ──
+  // This factory-built tub ships with its cover straight to the dealer — it never
+  // reaches the warehouse floor (confirmDispatch), which was the ONLY place a
+  // warehouse-sourced cover got pulled. So pull it here too. Factory-source covers
+  // (Bluwater) were already pulled at creation, so the warehouse guard skips them; and
+  // decrementCoverStock is idempotent per S/N, so a tub whose cover was somehow already
+  // pulled can't double-pull. Accessory rows have no .cover field, so they're skipped.
+  if(f.cover && (f.cover.source || 'warehouse') === 'warehouse' && f.cover.color){
+    try { decrementCoverStock(f.cover.color, f.cover.model, 'warehouse', f.sn); }
+    catch(e){ console.warn('[cover pull on factory pickup]', e); }
+  }
   _tombstoneFactoryRow(f);            // v5.05: block stale-remote resurrection (S/N-less covers/accessories)
   factory = factory.filter(x => x.id !== id);
   addAct(`🤝🚚 Dealer picked up at factory: ${f.sn||f.dealer}`,'var(--accent)');
@@ -25674,9 +25749,38 @@ window._blobReplacer = _blobReplacer;
 // data — so on quota pressure we evict it and retry the primary write. Returns true
 // if the primary state was persisted after relief.
 const HOURLY_BACKUP_LS_KEY = 'aspen_warehouse_state_hourly_backup_v1';
-function _relieveStoragePressureAndRetry(payload){
+// Build the LOCAL-cache payload at a given trim level. The cloud push and the in-memory
+// state ALWAYS keep the full data — these trims affect ONLY localStorage, and movements
+// is wholesale-restored from the cloud on the next sync (movements = restored.movements),
+// so nothing is lost. Higher levels shed progressively more of the heavy, cloud-backed
+// HISTORICAL data (the SAP movements ledger + carried per-tub trackingHistory) so the
+// OPERATIONAL state (tubs, covers, marriages, dispatched) always fits under the ~5MB cap.
+function _buildLsPayload(trimLevel){
+  let mv = movements, disp = dispatched;
+  if(trimLevel >= 1 && Array.isArray(mv) && mv.length > 1200) mv = mv.slice(0, 1200);       // keep ~recent 1200 (newest-first)
+  if(trimLevel >= 2){
+    if(Array.isArray(mv)) mv = mv.slice(0, 250);
+    disp = (dispatched||[]).map(d => (d && Array.isArray(d.trackingHistory) && d.trackingHistory.length > 8)
+      ? Object.assign({}, d, {trackingHistory: d.trackingHistory.slice(-8)}) : d);          // shed carried history (cloud + dispatch log keep it)
+  }
+  if(trimLevel >= 3) mv = [];                                                                 // last resort: drop the ledger locally (cloud has it)
+  const s = {nid, units, dispatched: disp, incoming, materials, events, activity, queue, cfg, factory, marriages, dispatchRequests, coverInventory, colorLibrary, coverModelMapping, movements: mv, _saved: Date.now(), _lsTrim: trimLevel||0};
+  return JSON.stringify(s, _blobReplacer);
+}
+function _relieveStoragePressureAndRetry(){
+  // Tier 0: evict the hourly LOCAL backup (a verbatim 2nd copy, the most expendable layer)
+  // and retry the full state. Tiers 1-3: progressively trim local-only historical data.
   try { localStorage.removeItem(HOURLY_BACKUP_LS_KEY); } catch(e){}
-  try { localStorage.setItem(LS_KEY, payload); return true; } catch(e){ return false; }
+  for(let lvl=0; lvl<=3; lvl++){
+    try {
+      localStorage.setItem(LS_KEY, _buildLsPayload(lvl));
+      if(lvl>0) console.warn('[storage] saved at trim level '+lvl+' — LOCAL cache trimmed; cloud keeps the full history (restored on next sync).');
+      return true;
+    } catch(e){
+      if(e.name !== 'QuotaExceededError') return false;   // a non-quota failure won't be fixed by trimming
+    }
+  }
+  return false;
 }
 
 function saveState(){
@@ -25724,9 +25828,9 @@ function saveState(){
       // single most expendable consumer (cloud sync + Drive + manual backup all still
       // cover us). Evict it and retry so the PRIMARY state still persists instead of
       // going stale. Only warn if the state STILL doesn't fit after that.
-      if(err.name === 'QuotaExceededError' && _relieveStoragePressureAndRetry(payload)){
+      if(err.name === 'QuotaExceededError' && _relieveStoragePressureAndRetry()){
         saved = true;
-        console.warn('[storage] quota hit — evicted hourly local backup and retried OK.');
+        console.warn('[storage] quota hit — relieved pressure (evict backup / trim local cache) and retried OK.');
       } else if(err.name === 'QuotaExceededError'){
         toast('⚠ Storage full — export backup soon', 'err');
       }
@@ -25760,8 +25864,8 @@ function flushSave(){
     try{
       localStorage.setItem(LS_KEY, payload);
     }catch(err){
-      if(err.name === 'QuotaExceededError' && _relieveStoragePressureAndRetry(payload)){
-        console.warn('[storage] quota hit on flush — evicted hourly local backup and retried OK.');
+      if(err.name === 'QuotaExceededError' && _relieveStoragePressureAndRetry()){
+        console.warn('[storage] quota hit on flush — relieved pressure (evict backup / trim local cache) and retried OK.');
       } else { throw err; }
     }
     _lastSavedHash = stateHash();  // mark integrity watchdog "clean"
@@ -26937,6 +27041,10 @@ async function autoBackupToFirebase(){
 // Run once at startup (after Firebase had a chance to init), then every 12 hours.
 setTimeout(autoBackupToFirebase, 30000);
 setTimeout(()=>{ try{ reconcileCoverRequests(); }catch(e){} }, 6000);  // clear cover-requests already back in stock
+// v5.09: back-fill warehouse covers for past dealer-pickup / schedule dispatches that
+// shipped the cover but never deducted it. Runs after the initial cloud sync has settled
+// so it operates on the merged (true) inventory; idempotent + self-healing on every load.
+setTimeout(()=>{ try{ reconcileDispatchedCovers({auto:true}); }catch(e){ console.warn('[cover reconcile]', e); } }, 7500);
 setInterval(autoBackupToFirebase, 12 * 60 * 60 * 1000);
 
 // Global hotkeys
