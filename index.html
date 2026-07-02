@@ -3629,6 +3629,14 @@ body.dark-mode .mar-card-track {
     </div>
     <div id="dash-factory-aging"></div>
   </div>
+  <!-- v5.15 · Operations KPIs — computed from the movements/dispatch/cover data the app already records -->
+  <div class="card" style="margin-top:12px">
+    <div class="card-hd">
+      <div><div class="card-title">📊 Operations KPIs — Last 6 Months</div></div>
+      <div class="card-acts"><span style="font-size:10px;color:var(--text3);font-weight:500">Computed live from dispatch, cover & inventory history</span></div>
+    </div>
+    <div id="dash-kpis" style="padding:14px"></div>
+  </div>
 </div>
 
 <!-- FLOOR MAP -->
@@ -4490,6 +4498,14 @@ body.dark-mode .mar-card-track {
           <div style="display:flex;gap:7px;max-width:250px"><input class="fi" id="new-auth" placeholder="Name" style="flex:1"><button class="btn btn-p" onclick="addAuth()">Add</button></div>
         </div>
       </div>
+      <!-- v5.19 · Universal trash -->
+      <div class="card" style="margin-top:10px">
+        <div class="card-hd"><div><div class="card-title">🗑 Trash</div></div></div>
+        <div class="card-body">
+          <div style="font-size:11px;color:var(--text3);line-height:1.45;margin-bottom:9px">Deleted tubs, factory items, scheduled dispatches and cover rows can be restored for <strong>30 days</strong>. Restores clear the delete marker so the item survives sync on every device.</div>
+          <button class="btn btn-sm btn-p" onclick="openTrashModal()">Open trash</button>
+        </div>
+      </div>
     </div>
     <div>
       <div class="card">
@@ -4717,7 +4733,7 @@ let _fbInitAttempts = 0;
 //   /app_version/current  (in Firebase console, manually, OR call
 //   pushVersionToFirebase() from the Admin console at deploy time)
 // ══════════════════════════════════════════════════════════════════
-const APP_VERSION = 'v5.10';
+const APP_VERSION = 'v5.20';
 window.APP_VERSION = APP_VERSION;
 
 // ── DATA EPOCH (generation guard) ────────────────────────────────────
@@ -4951,6 +4967,14 @@ function installAutoUpdate(){
   document.addEventListener('visibilitychange', () => { if(!document.hidden) _checkForNewDeploy('focus'); });
   window.addEventListener('focus', () => _checkForNewDeploy('window-focus'));
   window.addEventListener('online', () => _checkForNewDeploy('online'));
+  // v5.17 — the pill reacts INSTANTLY to browser connectivity (the WS monitor can
+  // lag ~seconds behind); coming back online also flushes any queued edits.
+  window.addEventListener('offline', () => { try { updateAuthBadge(); } catch(e){} });
+  window.addEventListener('online', () => {
+    try { updateAuthBadge(); } catch(e){}
+    const p = _fbLocalEditCounter - _fbPushedEditCounter;
+    if(p > 0 && _fbAuthorized){ setTimeout(() => { try { fbCloudSync(false); } catch(e){} }, 1200); }
+  });
   // fallback: every 2 min while the tab is visible
   setInterval(() => { if(!document.hidden) _checkForNewDeploy('interval'); }, 120000);
   console.log('%c[auto-update] ✓ installed — deployed index wins; auto-reloads on open/focus/every 2min', 'color:#16a34a;font-weight:bold');
@@ -5342,11 +5366,36 @@ async function fbCloudSync(showToast){
     // Snapshot the counter so any edit that happens during the await won't be marked pushed
     const counterAtPushStart = _fbLocalEditCounter;
     await _fbDb.ref(`state/${_fbDeviceId}/latest`).set(payload);
-    await _fbDb.ref(`state/${_fbDeviceId}/snapshots/${ts}`).set(payload);
+    // v5.11 — the legacy per-push snapshot write was REMOVED here. It uploaded a full
+    // state copy (~MBs) to state/{device}/snapshots/{ts} on EVERY push, had no consumer
+    // (fbRestoreFromCloud reads only /latest), and its trim below downloaded ALL ~30
+    // stored snapshots (~75MB!) on every push. The auto_snapshots system (rolling hourly
+    // slots + daily + boot, with cleanup) is the real time machine and fully covers it.
     // ── SHARED canonical state for realtime cross-device sync ──
-    await _fbDb.ref('state/shared/latest').set({...payload, deviceId: _fbDeviceId});
+    if(V2_DUAL_WRITE_LEGACY){
+      await _fbDb.ref('state/shared/latest').set({...payload, deviceId: _fbDeviceId});
+    }
+    // ── v2 PER-COLLECTION PUSH (v5.20) ── only the changed collections travel.
+    try {
+      const v2 = _fbV2BuildUpdate(state, ts, writerName, _fbV2Hash);
+      if(v2.changed.length){
+        await _fbDb.ref().update(v2.upd);            // atomic multi-path commit
+        Object.assign(_fbV2Hash, v2.newHashes);      // commit hash baseline AFTER success
+        for(const n of v2.changed){ _fbV2Cache[n] = state[n]; }
+        console.log('[v2] pushed', v2.changed.length, 'collection(s):', v2.changed.join(','));
+      }
+      if(!_fbV2CollRef && !_fbSharedRef){ /* listeners not yet attached (rare) */ }
+      else if(!_fbV2CollRef && _fbSharedRef){ /* legacy session: v2 now seeded; switch happens on next reload */ }
+    } catch(e){ console.warn('[v2 push failed — legacy blob still covers sync]', e); }
     _fbLastSyncedAt = ts;
     _fbPushedEditCounter = counterAtPushStart;  // all edits before push are now persisted to cloud
+    // v2 deferred commit drained after our push (same rule as v1 below)
+    if(_fbV2DeferredMeta){
+      const m2 = _fbV2DeferredMeta; _fbV2DeferredMeta = null;
+      if(m2.timestamp > _fbLastLocalWriteAt && m2.deviceId !== _fbDeviceId){
+        try { _fbV2ApplyMeta(Object.assign({}, m2)); } catch(e){ console.warn('[v2 deferred apply]', e); }
+      }
+    }
     // If we deferred a remote update while pushing, apply it now (if still newer than our push)
     if(_fbDeferredRemote){
       const p = _fbDeferredRemote;
@@ -5360,14 +5409,16 @@ async function fbCloudSync(showToast){
         } catch(e){ console.error('[firebase] deferred apply failed:', e); }
       }
     }
-    // Trim old snapshots — keep last 30 per device
-    const snapsRef = _fbDb.ref(`state/${_fbDeviceId}/snapshots`);
-    const snaps = await snapsRef.once('value');
-    const snapsObj = snaps.val() || {};
-    const keys = Object.keys(snapsObj).sort();
-    if(keys.length > 30){
-      const toDelete = keys.slice(0, keys.length - 30);
-      for(const k of toDelete){ await snapsRef.child(k).remove(); }
+    // v5.11 ONE-TIME MIGRATION: purge this device's legacy per-push snapshot trail.
+    // It accumulated a full state copy per push (potentially hundreds of MB) with no
+    // consumer. .remove() transfers no payload down — it's a pure delete. Guarded by a
+    // local flag so it runs once per device; auto_snapshots / manual_snapshots untouched.
+    if(!localStorage.getItem('aspen_snapshots_purged_v511')){
+      try {
+        await _fbDb.ref(`state/${_fbDeviceId}/snapshots`).remove();
+        localStorage.setItem('aspen_snapshots_purged_v511','1');
+        console.log('[migration] ✓ legacy per-push snapshot trail purged for this device');
+      } catch(e){ console.warn('[migration] snapshot purge failed (will retry next push):', e.message); }
     }
     if(showToast) toast(`☁ Synced to cloud · ${new Date(ts).toLocaleTimeString()}`, 'ok');
     updateAuthBadge();
@@ -5422,15 +5473,15 @@ async function fbRestoreFromCloud(){
   if(!_fbDb || !_fbUser || !_fbAuthorized){ toast('Sign in first', 'err'); return; }
   if(!confirm('This REPLACES your local data with the latest cloud backup.\n\nMake sure you exported a CSV first if you want to keep current data.\n\nContinue?')) return;
   try {
-    // List all device snapshots, find the most recent across all devices
-    const allDevicesSnap = await _fbDb.ref('state').once('value');
-    const allDevices = allDevicesSnap.val() || {};
-    let bestPayload = null, bestTs = 0;
-    for(const devId of Object.keys(allDevices)){
-      const latest = allDevices[devId]?.latest;
-      if(latest?.timestamp > bestTs){ bestTs = latest.timestamp; bestPayload = latest; }
-    }
-    if(!bestPayload){ toast('No cloud backup found', 'err'); return; }
+    // v5.11 — read ONLY state/shared/latest. It is written on every push by every
+    // device (last write = most recent overall), so it IS "the most recent across all
+    // devices". The old code downloaded the ENTIRE /state tree — every device's latest
+    // PLUS all their accumulated snapshots (potentially hundreds of MB) — and then used
+    // only the per-device /latest fields.
+    const sharedSnap = await _fbDb.ref('state/shared/latest').once('value');
+    const bestPayload = sharedSnap.val();
+    const bestTs = bestPayload ? bestPayload.timestamp : 0;
+    if(!bestPayload || !bestPayload.state){ toast('No cloud backup found — try a manual/auto snapshot from the Admin panel', 'err'); return; }
     const restored = JSON.parse(bestPayload.state);
     // Apply
     if(restored.nid) nid = restored.nid;
@@ -5467,8 +5518,153 @@ async function fbRestoreFromCloud(){
 // still kept under state/{deviceId}/ for history.
 // ══════════════════════════════════════════════════════════════════════════════
 
+// ══════════════════════════════════════════════════════════════════════════════
+// PER-COLLECTION SYNC v2 (v5.20 · Phase 6.1)
+// ──────────────────────────────────────────────────────────────────────────────
+// Replaces the "one 2.5MB JSON blob per edit" transport with per-collection
+// nodes under state/shared/v2. A push writes ONLY the collections whose content
+// hash changed (one atomic multi-path update, meta written as the commit
+// marker); a listening device downloads ONLY the changed children
+// (child_added/child_changed) and re-uses the EXISTING, fully-validated
+// fbApplyRemoteState + merge layer by assembling a full-shaped state where
+// unchanged collections are the local values (merging identical data is a
+// no-op). DUAL-WRITE: while V2_DUAL_WRITE_LEGACY is true the v1 blob is still
+// written so not-yet-updated devices keep working (the forced-update system
+// flips everyone fast); a later version sets it false and points
+// verifyCloudWrite/fbRestoreFromCloud at v2/meta.
+const V2_DUAL_WRITE_LEGACY = true;
+const V2_COLLS = ['units','dispatched','incoming','materials','events','activity','queue','cfg','factory','marriages','dispatchRequests','coverInventory','colorLibrary','coverModelMapping','movements','matTransfers'];
+let _fbV2CollRef = null, _fbV2MetaRef = null, _fbV2DeferredMeta = null, _fbV2MetaInitial = true;
+const _fbV2Cache = {};        // name → parsed latest cloud value
+const _fbV2Dirty = {};        // name → true (received, not yet applied)
+const _fbV2Hash = {};         // name → hash of what we last pushed OR last received
+
+function _v2Hash(str){        // FNV-1a 32-bit — fast, deterministic content fingerprint
+  let h = 0x811c9dc5;
+  for(let i = 0; i < str.length; i++){ h ^= str.charCodeAt(i); h = (h + ((h<<1)+(h<<4)+(h<<7)+(h<<8)+(h<<24))) >>> 0; }
+  return h.toString(36);
+}
+
+// PURE: which collections changed vs the hash cache + the atomic update object.
+// Kept side-effect-free (returns newHashes; caller commits them AFTER the write
+// succeeds) so the CI suite can unit-test the gating.
+function _fbV2BuildUpdate(stateObj, ts, writerName, hashCache){
+  const upd = {}, changed = [], newHashes = {};
+  for(const name of V2_COLLS){
+    const v = stateObj[name];
+    if(v === undefined) continue;
+    const j = JSON.stringify(v);
+    const h = _v2Hash(j);
+    newHashes[name] = h;
+    if(hashCache[name] === h) continue;              // unchanged → not uploaded
+    changed.push(name);
+    upd['state/shared/v2/coll/' + name] = { j, h, t: ts };
+  }
+  if(changed.length){
+    upd['state/shared/v2/meta'] = {
+      timestamp: ts, deviceId: _fbDeviceId, uploadedBy: writerName,
+      nid: stateObj.nid, epoch: (stateObj._epoch || 1),
+      changed: changed.join(',')
+    };
+  }
+  return { upd, changed, newHashes };
+}
+window._fbV2BuildUpdate = _fbV2BuildUpdate;
+
+// Assemble a FULL-shaped state for fbApplyRemoteState: changed collections from
+// the cloud cache, unchanged ones from the CURRENT LOCAL values (identical-merge
+// no-op) — so every existing top guard (safe-pull, epoch, integrity) behaves
+// exactly as with a v1 blob. cfg always rides from the cache when known
+// (tombstones/trash travel there).
+function _fbV2AssembleFull(dirty, meta){
+  const local = {nid, units, dispatched, incoming, materials, events, activity, queue, cfg, factory, marriages, dispatchRequests, coverInventory, colorLibrary, coverModelMapping, movements, matTransfers};
+  const out = {};
+  for(const name of V2_COLLS){
+    out[name] = (dirty[name] && _fbV2Cache[name] !== undefined) ? _fbV2Cache[name]
+              : (_fbV2Cache[name] !== undefined && name === 'cfg') ? _fbV2Cache[name]
+              : local[name];
+  }
+  out.nid = (meta && typeof meta.nid === 'number') ? meta.nid : local.nid;
+  out._epoch = (meta && meta.epoch) || (window.ASPEN_DATA_EPOCH || 1);
+  return out;
+}
+
+function _fbV2ApplyMeta(meta){
+  if(!meta || !meta.timestamp) return;
+  const wasInitial = _fbV2MetaInitial; _fbV2MetaInitial = false;
+  if(meta.deviceId === _fbDeviceId){                 // echo of our own commit
+    for(const k in _fbV2Dirty) delete _fbV2Dirty[k];
+    return;
+  }
+  if(wasInitial){                                    // CLOUD WINS on open (v4.16 semantics)
+    const full = _fbV2AssembleFull(Object.fromEntries(V2_COLLS.map(n => [n, true])), meta);
+    for(const k in _fbV2Dirty) delete _fbV2Dirty[k];
+    try { fbApplyRemoteState(full, meta.timestamp); console.log('[v2] CLOUD WINS on open — adopted from', meta.uploadedBy); }
+    catch(e){ console.error('[v2 cloud-wins]', e); }
+    return;
+  }
+  if(meta.timestamp <= _fbLastLocalWriteAt) return;  // older than our last write
+  if(_fbLocalEditCounter > _fbPushedEditCounter){    // unpushed local edits → defer
+    _fbV2DeferredMeta = meta;
+    console.log('[v2] DEFERRED remote commit — local edits unpushed');
+    return;
+  }
+  // Event-ordering hardening: RTDB doesn't guarantee child events land before the
+  // meta value event. Use the UNION of what we saw dirty + what the commit SAYS
+  // changed (meta.changed) — for names whose cache we actually hold — and defer
+  // one micro-tick so the same-update child batch settles first.
+  const claimed = String(meta.changed||'').split(',').filter(Boolean);
+  setTimeout(() => {
+    const dirty = Object.assign({}, _fbV2Dirty);
+    for(const n of claimed){ if(_fbV2Cache[n] !== undefined) dirty[n] = true; }
+    for(const k in _fbV2Dirty) delete _fbV2Dirty[k];
+    const names = Object.keys(dirty);
+    if(!names.length) return;
+    try {
+      fbApplyRemoteState(_fbV2AssembleFull(dirty, meta), meta.timestamp);
+      console.log('[v2] applied remote update from', meta.uploadedBy, '· collections:', names.join(','));
+    } catch(e){ console.error('[v2 apply]', e); }
+  }, 60);
+}
+
+function _fbAttachV2Listeners(){
+  if(_fbV2CollRef) return;
+  _fbV2CollRef = _fbDb.ref('state/shared/v2/coll');
+  const onChild = snap => {
+    try {
+      const name = snap.key, v = snap.val();
+      if(!v || typeof v.j !== 'string') return;
+      _fbV2Cache[name] = JSON.parse(v.j);
+      _fbV2Hash[name] = v.h;                          // received = new baseline (don't re-push it)
+      _fbV2Dirty[name] = true;
+    } catch(e){ console.warn('[v2 child]', snap.key, e); }
+  };
+  _fbV2CollRef.on('child_added', onChild);
+  _fbV2CollRef.on('child_changed', onChild);
+  _fbV2MetaRef = _fbDb.ref('state/shared/v2/meta');
+  _fbV2MetaRef.on('value', snap => { try { _fbV2ApplyMeta(snap.val()); } catch(e){ console.error('[v2 meta]', e); } });
+  console.log('[v2] per-collection listeners attached');
+}
+
 // Start listening for remote state updates. Called on successful auth.
 function fbStartRealtimeSync(){
+  if(!_fbDb || _fbSharedRef || _fbV2CollRef) return;
+  // v5.20 — prefer the per-collection v2 channel when the cloud already has it:
+  // this device then NEVER downloads the legacy full blob again. If v2 doesn't
+  // exist yet (first boot after this deploy), stay on the v1 listener for THIS
+  // session; our first push seeds v2 and the next reload switches over.
+  _fbDb.ref('state/shared/v2/meta').once('value').then(snap => {
+    if(snap.val() && snap.val().timestamp){
+      _fbAttachV2Listeners();
+      console.log('[v2] cloud has v2 — legacy blob listener NOT attached (bandwidth saved)');
+    } else {
+      _fbAttachV1Listener();
+      console.log('[v2] cloud has no v2 yet — using legacy listener this session; first push seeds v2');
+    }
+  }).catch(e => { console.warn('[v2 probe failed — falling back to legacy]', e); _fbAttachV1Listener(); });
+}
+
+function _fbAttachV1Listener(){
   if(!_fbDb || _fbSharedRef) return;
   _fbSharedRef = _fbDb.ref('state/shared/latest');
   // Track whether this is the very first .on('value') callback after attaching.
@@ -5567,6 +5763,13 @@ function fbStartRealtimeSync(){
       _fbWasConnected = !!snap.val();
       if(_fbWasConnected && !wasConnected){
         console.log('[firebase] WebSocket connected');
+        // v5.17 — pending edits queued while offline: tell the user and flush NOW
+        // (don't wait for the next organic edit/watchdog cycle).
+        const _pend = _fbLocalEditCounter - _fbPushedEditCounter;
+        if(_pend > 0 && _fbAuthorized){
+          try { toast(`📡 Back online — syncing ${_pend} pending change${_pend>1?'s':''}…`, 'ok'); } catch(e){}
+          setTimeout(() => { try { if(typeof fbCloudSync === 'function') fbCloudSync(false); } catch(e){} }, 600);
+        }
         // Reconnect → force pull. The listener will replay events, but
         // an explicit once() read is more reliable.
         if(_fbAuthorized){
@@ -5801,15 +6004,29 @@ function mergeCfgPreservingPins(localCfg, remoteCfg){
     merged.coverModelCell = outMap;
     merged.coverModelCellUpdatedAt = outTs;
   }
-  // Delete tombstones (v4.91): union by LATEST timestamp so neither side's
-  // intentional deletes are lost on a shallow cfg overwrite.
+  // Trash bin (v5.19): union by entry id, newer updatedAt wins per entry — a
+  // restore/purge on one device beats a stale 'trashed' copy from another, and
+  // entries deleted on one device but unseen by another are never lost.
   {
-    const L = (localCfg && typeof localCfg._deletedUnits === 'object') ? localCfg._deletedUnits : null;
-    const R = (typeof remoteCfg._deletedUnits === 'object') ? remoteCfg._deletedUnits : null;
+    const L = (localCfg && typeof localCfg._trashBin === 'object') ? localCfg._trashBin : null;
+    const R = (typeof remoteCfg._trashBin === 'object') ? remoteCfg._trashBin : null;
+    if(L || R){
+      const out = {};
+      [R, L].forEach(src => { if(src) for(const k in src){ const e = src[k]; if(!e) continue;
+        const cur = out[k];
+        if(!cur || String(e.updatedAt||'') > String(cur.updatedAt||'')) out[k] = e; } });
+      merged._trashBin = out;
+    }
+  }
+  // Delete tombstones (v4.91, extended v5.12): union by LATEST timestamp so neither
+  // side's intentional deletes are lost on a shallow cfg overwrite.
+  for(const tk of ['_deletedUnits','_deletedEventGroups','_deletedQueueIds']){
+    const L = (localCfg && typeof localCfg[tk] === 'object') ? localCfg[tk] : null;
+    const R = (typeof remoteCfg[tk] === 'object') ? remoteCfg[tk] : null;
     if(L || R){
       const out = {};
       [L, R].forEach(src => { if(src) for(const k in src){ const t = src[k]; if(typeof t === 'string' && (!out[k] || t > out[k])) out[k] = t; } });
-      merged._deletedUnits = out;
+      merged[tk] = out;
     }
   }
   return merged;
@@ -5821,6 +6038,255 @@ let _lastIncMergeKept = 0;
 let _lastFacMergeKept = 0;
 let _lastCoverMergeKept = 0;
 let _lastMarMergeKept = 0;
+let _lastDispMergeKept = 0;
+let _lastEvMergeKept = 0;
+let _lastQMergeKept = 0;
+let _lastMvMergeKept = 0;
+let _lastMapMergeKept = 0;
+
+// ── UNION MERGES FOR THE FORMER WHOLESALE-REPLACED COLLECTIONS (v5.12) ─────────
+// events / queue / movements / colorLibrary / coverModelMapping used to be REPLACED
+// wholesale by every incoming remote state, so anything added locally-but-not-yet-
+// pushed was silently LOST whenever another device pushed first (e.g. two people
+// scheduling calendar dispatches at the same time → one dispatch vanished). These
+// merges follow the exact per-entity pattern proven for units/factory/covers:
+// union by id, tombstones for intentional deletes (so a stale peer can't resurrect
+// them), LWW by updatedAt where records carry one (remote wins ties for determinism
+// — the shared doc is the tiebreaker on every device), and a kept-local counter so
+// the orchestrator re-pushes the merged state when we contributed records the
+// incoming state lacked.
+
+// Tombstone writers — mirror _tombstoneFactoryRow: same cfg map style, 60-day prune.
+function _tombstoneEventGroup(gid){
+  if(gid == null) return;
+  try{
+    cfg._deletedEventGroups = cfg._deletedEventGroups || {};
+    cfg._deletedEventGroups[String(gid)] = editStamp();
+    const _cut = new Date(Date.now() - 60*864e5).toISOString();
+    for(const k in cfg._deletedEventGroups){ if(cfg._deletedEventGroups[k] < _cut) delete cfg._deletedEventGroups[k]; }
+  }catch(e){ console.warn('[event tombstone]', e); }
+}
+window._tombstoneEventGroup = _tombstoneEventGroup;
+
+function _tombstoneQueueItem(id){
+  if(id == null) return;
+  try{
+    cfg._deletedQueueIds = cfg._deletedQueueIds || {};
+    cfg._deletedQueueIds[String(id)] = editStamp();
+    const _cut = new Date(Date.now() - 60*864e5).toISOString();
+    for(const k in cfg._deletedQueueIds){ if(cfg._deletedQueueIds[k] < _cut) delete cfg._deletedQueueIds[k]; }
+  }catch(e){ console.warn('[queue tombstone]', e); }
+}
+window._tombstoneQueueItem = _tombstoneQueueItem;
+
+// ── UNIVERSAL TRASH / RECYCLE BIN (v5.19) ─────────────────────────────────────
+// Soft-delete with a 30-day restore window for the deletions people actually
+// regret: floor tubs, factory rows, scheduled dispatches, cover rows. Lives in
+// cfg._trashBin (keyed by entry id) so it rides EVERY existing payload/restore
+// path and syncs across devices via the cfg merge (per-entry LWW below) — zero
+// new state plumbing. Entries: {id, kind, label, payload, deletedAt, by, status,
+// updatedAt}. Lifecycle: 'trashed' → 'restored' | 'purged' (payload nulled to
+// free space); physical removal only by the deterministic 30-day age purge, so
+// no trash-of-trash tombstones are ever needed.
+function _trashAdd(kind, label, payload){
+  try{
+    cfg._trashBin = cfg._trashBin || {};
+    const id = 't' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+    cfg._trashBin[id] = {
+      id, kind, label: String(label||'').slice(0, 120),
+      payload: JSON.parse(JSON.stringify(payload)),
+      deletedAt: new Date().toISOString(),
+      by: (typeof actorName === 'function' ? actorName() : ''),
+      status: 'trashed', updatedAt: editStamp()
+    };
+    _trashHousekeep();
+  }catch(e){ console.warn('[trash add]', e); }
+}
+window._trashAdd = _trashAdd;
+
+function _trashHousekeep(){
+  try{
+    const bin = cfg._trashBin; if(!bin) return;
+    const cut = new Date(Date.now() - 30*864e5).toISOString();
+    for(const k in bin){ const e = bin[k]; if(!e || !e.deletedAt || e.deletedAt < cut) delete bin[k]; }
+    const all = Object.values(bin).sort((a,b) => String(b.deletedAt).localeCompare(String(a.deletedAt)));
+    if(all.length > 80) all.slice(80).forEach(e => { delete bin[e.id]; });
+  }catch(e){}
+}
+window._trashHousekeep = _trashHousekeep;
+
+function _trashCount(){ try{ return Object.values(cfg._trashBin||{}).filter(e => e && e.status === 'trashed').length; }catch(e){ return 0; } }
+
+function trashRestore(id){
+  if(typeof canEdit === 'function' && !canEdit()){ toast('View-only mode','err'); return; }
+  const e = (cfg._trashBin||{})[id];
+  if(!e || e.status !== 'trashed' || !e.payload){ toast('Entry not restorable','err'); return; }
+  const stampNow = () => editStamp();
+  try{
+    if(e.kind === 'unit'){
+      const u = e.payload;
+      const snStr = (u.sn != null) ? String(u.sn).trim() : '';
+      if(snStr && units.some(x => x && String(x.sn).trim() === snStr)){ toast(`S/N ${snStr} is already on the floor — restore blocked to avoid a duplicate`,'err'); return; }
+      const tk = snStr ? ('sn:'+snStr) : ('id:'+u.id);
+      try{ if(cfg._deletedUnits) delete cfg._deletedUnits[tk]; }catch(x){}   // clear tombstone (quickAddSpa pattern)
+      units.push(Object.assign({}, u, { updatedAt: stampNow() }));
+    } else if(e.kind === 'factory'){
+      const f = e.payload;
+      const snStr = (f.sn != null) ? String(f.sn).trim() : '';
+      if(factory.some(x => x && x.id === f.id) || (snStr && factory.some(x => x && String(x.sn).trim() === snStr))){ toast('Item is already back at the factory — restore blocked','err'); return; }
+      const tk = snStr ? ('sn:'+snStr) : ('id:'+f.id);
+      try{ if(cfg._deletedUnits) delete cfg._deletedUnits[tk]; }catch(x){}
+      factory.push(Object.assign({}, f, { updatedAt: stampNow() }));
+    } else if(e.kind === 'event-group'){
+      const grp = Array.isArray(e.payload) ? e.payload : [];
+      if(!grp.length){ toast('Nothing to restore','err'); return; }
+      const gid = grp[0].groupId;
+      try{ if(cfg._deletedEventGroups && gid != null) delete cfg._deletedEventGroups[String(gid)]; }catch(x){}
+      let added = 0;
+      grp.forEach(ev => { if(ev && ev.id != null && !events.some(x => x && String(x.id) === String(ev.id))){ events.push(Object.assign({}, ev, { updatedAt: stampNow() })); added++; } });
+      if(!added){ toast('That dispatch is already on the calendar','err'); return; }
+    } else if(e.kind === 'cover'){
+      const c = e.payload;
+      if(coverInventory.some(x => x && x.id === c.id)){ toast('That cover row already exists — restore blocked','err'); return; }
+      coverInventory.push(Object.assign({}, c, { updated: stampNow() }));
+    } else { toast('Unknown trash kind: '+e.kind,'err'); return; }
+  }catch(err){ console.warn('[trash restore]', err); toast('Restore failed: '+err.message,'err'); return; }
+  e.status = 'restored'; e.updatedAt = editStamp();
+  try{ addAct(`♻ Restored from trash: ${e.label}`, 'var(--teal)'); }catch(x){}
+  try{ flushSave(); }catch(x){}
+  try{ if(typeof fbAutoPush === 'function') fbAutoPush(); }catch(x){}
+  try{ updBadges(); if(typeof fbRerenderActiveView==='function') fbRerenderActiveView(); }catch(x){}
+  try{ if(typeof renderCal === 'function' && e.kind === 'event-group') renderCal(); }catch(x){}
+  try{ if(typeof renderCoverInventory === 'function' && e.kind === 'cover') renderCoverInventory(); }catch(x){}
+  toast(`♻ Restored: ${e.label}`,'ok');
+  openTrashModal();   // refresh the list
+}
+window.trashRestore = trashRestore;
+
+function trashPurgeForever(id){
+  if(typeof canEdit === 'function' && !canEdit()){ toast('View-only mode','err'); return; }
+  const e = (cfg._trashBin||{})[id];
+  if(!e){ return; }
+  if(!confirm(`Delete forever?\n\n${e.label}\n\nThis cannot be undone.`)) return;
+  e.status = 'purged'; e.payload = null; e.updatedAt = editStamp();
+  try{ flushSave(); }catch(x){}
+  toast('Deleted forever','ok');
+  openTrashModal();
+}
+window.trashPurgeForever = trashPurgeForever;
+
+function openTrashModal(){
+  document.getElementById('trash-modal')?.remove();
+  _trashHousekeep();
+  const entries = Object.values(cfg._trashBin||{}).filter(e => e && e.status === 'trashed')
+    .sort((a,b) => String(b.deletedAt).localeCompare(String(a.deletedAt)));
+  const kindIco = { unit:'🏊', factory:'🏭', 'event-group':'📅', cover:'🛏' };
+  const daysLeft = e => Math.max(0, 30 - Math.floor((Date.now() - Date.parse(e.deletedAt)) / 864e5));
+  const rows = entries.map(e => `
+    <div style="display:flex;align-items:center;gap:10px;padding:9px 4px;border-bottom:1px solid var(--line)">
+      <div style="font-size:18px">${kindIco[e.kind]||'🗑'}</div>
+      <div style="flex:1;min-width:0">
+        <div style="font-size:12px;font-weight:700;color:var(--text1);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHTML(e.label)}</div>
+        <div style="font-size:10px;color:var(--text3)">Deleted ${new Date(e.deletedAt).toLocaleString()} · by ${escapeHTML(e.by||'?')} · <strong style="color:${daysLeft(e)<7?'var(--red)':'var(--text2)'}">${daysLeft(e)}d left</strong></div>
+      </div>
+      <button class="btn btn-sm btn-p" onclick="trashRestore('${e.id}')">♻ Restore</button>
+      <button class="btn btn-sm" style="color:var(--red)" onclick="trashPurgeForever('${e.id}')">✕</button>
+    </div>`).join('');
+  const m = document.createElement('div');
+  m.id = 'trash-modal';
+  m.style.cssText = 'position:fixed;inset:0;background:rgba(15,23,42,.55);z-index:9998;display:flex;align-items:center;justify-content:center;padding:16px';
+  m.innerHTML = `
+    <div style="width:100%;max-width:560px;max-height:80vh;background:var(--bg1,#fff);border-radius:14px;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 22px 60px rgba(0,0,0,.3)">
+      <div style="padding:14px 18px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center">
+        <div>
+          <div style="font-size:14px;font-weight:800;color:var(--text1)">🗑 Trash</div>
+          <div style="font-size:10.5px;color:var(--text3)">Deleted items stay restorable for 30 days · syncs across devices</div>
+        </div>
+        <button onclick="document.getElementById('trash-modal').remove()" style="background:var(--bg2,#f1f5f9);border:0;width:30px;height:30px;border-radius:50%;cursor:pointer;font-size:14px">✕</button>
+      </div>
+      <div style="padding:6px 18px 14px;overflow-y:auto">
+        ${rows || '<div style="padding:26px;text-align:center;font-size:12px;color:var(--text3)">Trash is empty — deleted tubs, factory items, scheduled dispatches and cover rows will appear here.</div>'}
+      </div>
+    </div>`;
+  m.addEventListener('click', ev => { if(ev.target === m) m.remove(); });
+  document.body.appendChild(m);
+}
+window.openTrashModal = openTrashModal;
+
+// Shared tombstone-union helper: local map + remote map, newest stamp wins per key.
+function _unionTombs(localMap, remoteMap){
+  const out = {};
+  [localMap, remoteMap].forEach(src => { if(src && typeof src === 'object') for(const k in src){ const t = src[k]; if(typeof t === 'string' && (!out[k] || t > out[k])) out[k] = t; } });
+  return out;
+}
+
+function _mergeEvents(local, remote, remoteCfg){
+  const L = Array.isArray(local) ? local : [];
+  const R = Array.isArray(remote) ? remote : [];
+  const tombs = _unionTombs(cfg && cfg._deletedEventGroups, remoteCfg && remoteCfg._deletedEventGroups);
+  const stamp = e => (e && typeof e.updatedAt === 'string') ? e.updatedAt : '';
+  const dead = e => { if(!e || e.groupId == null) return false; const t = tombs[String(e.groupId)]; return !!t && (!stamp(e) || stamp(e) < t); };
+  const byId = new Map();
+  for(const e of R){ if(e && e.id != null && !dead(e)) byId.set(String(e.id), e); }
+  let kept = 0;
+  for(const e of L){
+    if(!e || e.id == null || dead(e)) continue;
+    const k = String(e.id);
+    const cur = byId.get(k);
+    if(!cur){ byId.set(k, e); kept++; }                       // local-only event survives
+    else if(stamp(e) > stamp(cur)){ byId.set(k, e); kept++; } // local edit is newer (ties → remote)
+  }
+  _lastEvMergeKept = kept;
+  return Array.from(byId.values());
+}
+
+function _mergeQueue(local, remote, remoteCfg){
+  const L = Array.isArray(local) ? local : [];
+  const R = Array.isArray(remote) ? remote : [];
+  const tombs = _unionTombs(cfg && cfg._deletedQueueIds, remoteCfg && remoteCfg._deletedQueueIds);
+  const stamp = q => (q && typeof q.updatedAt === 'string') ? q.updatedAt : '';
+  const dead = q => { if(!q || q.id == null) return false; const t = tombs[String(q.id)]; return !!t && (!stamp(q) || stamp(q) < t); };
+  const byId = new Map();
+  for(const q of R){ if(q && q.id != null && !dead(q)) byId.set(String(q.id), q); }
+  let kept = 0;
+  for(const q of L){
+    if(!q || q.id == null || dead(q)) continue;
+    const k = String(q.id);
+    const cur = byId.get(k);
+    if(!cur){ byId.set(k, q); kept++; }
+    else if(stamp(q) > stamp(cur)){ byId.set(k, q); kept++; }
+  }
+  _lastQMergeKept = kept;
+  return Array.from(byId.values());
+}
+
+function _mergeMovements(local, remote){
+  // Append-only ledger (docs are never edited or deleted) → pure union by id,
+  // newest-first by posting time, re-capped at the same 10,000 safety valve.
+  const L = Array.isArray(local) ? local : [];
+  const R = Array.isArray(remote) ? remote : [];
+  const byId = new Map();
+  for(const m of R){ if(m && m.id != null) byId.set(String(m.id), m); }
+  let kept = 0;
+  for(const m of L){ if(m && m.id != null && !byId.has(String(m.id))){ byId.set(String(m.id), m); kept++; } }
+  _lastMvMergeKept = kept;
+  const out = Array.from(byId.values());
+  out.sort((a,b) => (b.at||0) - (a.at||0));
+  if(out.length > 10000) out.length = 10000;
+  return out;
+}
+
+function _mergeAddWinsMap(local, remote, counter){
+  // colorLibrary / coverModelMapping: keys are added (never deleted in any code
+  // path), values occasionally edited. Union of keys; remote wins shared keys so
+  // genuine edits propagate (add-wins, same trade as cfg.rowOverrides).
+  const L = (local && typeof local === 'object') ? local : {};
+  const R = (remote && typeof remote === 'object') ? remote : {};
+  let kept = 0;
+  for(const k in L){ if(!(k in R)) kept++; }
+  if(counter === 'map') _lastMapMergeKept += kept;
+  return Object.assign({}, L, R);
+}
 // ── KEEP-LOCAL UNIT MERGE (v4.56) ─────────────────────────────────────────────
 // Replaces the old wholesale `units = restored.units`, which silently dropped any
 // tub that existed locally but was missing from an incoming (stale) remote state —
@@ -6123,15 +6589,27 @@ function _mergeDispatched(local, remote){
     if(sn && d.dispatchedAt) return 'd:' + sn + '@' + d.dispatchedAt;
     return d.id != null ? ('id:' + d.id) : null;
   };
-  const remoteKeys = new Set(remote.map(keyOf).filter(v => v != null));
-  const merged = remote.slice();
+  // v5.14 — per-record LWW on shared keys. The old rule was "remote copy wins"
+  // unconditionally, which let a STALE peer's 'out' copy revert a fresh
+  // 'returned' / 'delivered-to-dealer' status. Reverting 'returned' is not just
+  // cosmetic: dispatchedOutSns then re-includes the S/N and the staleness rules
+  // DROP the returned tub's factory/incoming row on the next merge — the tub
+  // vanishes. Records without updatedAt (legacy + untouched ones) keep the old
+  // deterministic behavior: remote wins ties/absence, so status updates still
+  // propagate and every device resolves identically from the shared doc.
+  const stamp = d => (d && typeof d.updatedAt === 'string') ? d.updatedAt : '';
+  const byKey = new Map();
+  remote.forEach(d => { if(!d) return; const k = keyOf(d); if(k != null) byKey.set(k, d); });
+  let kept = 0;
   local.forEach(d => {
     if(!d) return;
     const k = keyOf(d); if(k == null) return;
-    if(remoteKeys.has(k)) return;   // remote copy wins (status updates propagate)
-    merged.push(d);                 // local-only dispatch -> KEEP (don't let a stale remote wipe it)
+    const cur = byKey.get(k);
+    if(!cur){ byKey.set(k, d); kept++; return; }        // local-only dispatch -> KEEP
+    if(stamp(d) > stamp(cur)){ byKey.set(k, d); kept++; } // local edit is NEWER -> wins (re-push spreads it)
   });
-  return merged;
+  _lastDispMergeKept = kept;
+  return Array.from(byKey.values());
 }
 
 function _mergeFactory(local, remote, localIncoming, remoteCfg){
@@ -6459,16 +6937,19 @@ function fbApplyRemoteState(restored, sourceTimestamp){
     if(Array.isArray(restored.incoming)) incoming = _mergeIncoming(incoming, restored.incoming);
     if(Array.isArray(restored.materials)) materials = _mergeMaterials(materials, restored.materials);
     if(Array.isArray(restored.matTransfers)) matTransfers = _mergeMatTransfers(matTransfers, restored.matTransfers);
-    if(Array.isArray(restored.events)) events = restored.events;
+    if(Array.isArray(restored.events)) events = _mergeEvents(events, restored.events, restored.cfg);
+    // activity stays wholesale ON PURPOSE: it's a cosmetic 30-entry ticker without ids;
+    // merging it adds no operational value and losing a ticker line is harmless.
     if(Array.isArray(restored.activity)) activity = restored.activity;
-    if(Array.isArray(restored.queue)) queue = restored.queue;
+    if(Array.isArray(restored.queue)) queue = _mergeQueue(queue, restored.queue, restored.cfg);
     if(Array.isArray(restored.factory)) factory = _mergeFactory(factory, restored.factory, incoming, restored.cfg);
     if(Array.isArray(restored.marriages)) marriages = _mergeMarriages(marriages, restored.marriages);
     if(Array.isArray(restored.dispatchRequests)) dispatchRequests = _mergeRequests(dispatchRequests, restored.dispatchRequests);
     if(Array.isArray(restored.coverInventory)) coverInventory = _mergeCovers(coverInventory, restored.coverInventory);
-    if(restored.colorLibrary && typeof restored.colorLibrary === 'object') colorLibrary = restored.colorLibrary;
-    if(restored.coverModelMapping && typeof restored.coverModelMapping === 'object') coverModelMapping = restored.coverModelMapping;
-    if(Array.isArray(restored.movements)) movements = restored.movements;
+    _lastMapMergeKept = 0;
+    if(restored.colorLibrary && typeof restored.colorLibrary === 'object') colorLibrary = _mergeAddWinsMap(colorLibrary, restored.colorLibrary, 'map');
+    if(restored.coverModelMapping && typeof restored.coverModelMapping === 'object') coverModelMapping = _mergeAddWinsMap(coverModelMapping, restored.coverModelMapping, 'map');
+    if(Array.isArray(restored.movements)) movements = _mergeMovements(movements, restored.movements);
     if(restored.cfg && typeof restored.cfg === 'object') cfg = mergeCfgPreservingPins(cfg, restored.cfg);
     // ── RUN INTEGRITY CHECKS BEFORE PERSISTING (fix: repairs must hit disk) ──
     // If the cloud state had inconsistencies (e.g. a marriage stuck on pending
@@ -6517,7 +6998,7 @@ function fbApplyRemoteState(restored, sourceTimestamp){
   // merged result so the cloud + every other device regain them (stops the
   // appear/disappear loop instead of just patching it on this screen).
   try {
-    if(_lastMergeKept > 0 || _lastReqMergeKept > 0 || _lastIncMergeKept > 0 || _lastFacMergeKept > 0 || _lastCoverMergeKept > 0 || _lastMarMergeKept > 0){
+    if(_lastMergeKept > 0 || _lastReqMergeKept > 0 || _lastIncMergeKept > 0 || _lastFacMergeKept > 0 || _lastCoverMergeKept > 0 || _lastMarMergeKept > 0 || _lastDispMergeKept > 0 || _lastEvMergeKept > 0 || _lastQMergeKept > 0 || _lastMvMergeKept > 0 || _lastMapMergeKept > 0){
       console.warn('[merge] kept ' + _lastMergeKept + ' local-only tub(s) + ' + _lastReqMergeKept + ' local-only request(s) the incoming state lacked \u2192 re-pushing merged state');
       _lastMergeKept = 0; _lastReqMergeKept = 0; _lastIncMergeKept = 0; _lastFacMergeKept = 0; _lastCoverMergeKept = 0; _lastMarMergeKept = 0;
       setTimeout(() => { try { _bypassNextSafePush = true; if(typeof fbCloudSync === 'function') fbCloudSync(false); } catch(e){} }, 600);
@@ -6740,40 +7221,60 @@ function pickAndUploadPhoto(type, item, onDone){
 }
 
 // Update the auth badge in the topbar (signed-in user / sign-in button)
+// ── SYNC STATUS STATE MACHINE (v5.17) ────────────────────────────────────────
+// PURE decision function behind the header pill. Fixes two field-confidence gaps:
+// (1) OFFLINE now shows HOW MANY local changes are waiting ("Offline · 3 pending"),
+//     so a tech with bad signal knows their scans are safely queued; and
+// (2) pending edits older than 5s no longer fall through to the GREEN "Synced"
+//     pill (the old branching showed Synced while edits were actually stuck).
+// Kept side-effect-free so the CI suite unit-tests every state.
+function computeSyncStatus(o){
+  o = o || {};
+  const pending = Math.max(0, (o.pending|0));
+  if(!o.fbEnabled)   return { state:'local',      label:'📦 Local-only',    bg:'',        fg:'var(--text3)' };
+  if(!o.hasUser)     return { state:'connecting', label:'⏳ Connecting…',   bg:'',        fg:'var(--text3)' };
+  if(!o.authorized)  return { state:'setup',      label:'⏳ Setting up…',   bg:'',        fg:'var(--text3)' };
+  const offline = !o.wsConnected || o.browserOnline === false;
+  if(offline){
+    if(pending > 0)  return { state:'offline-pending', label:`📡 Offline · ${pending} pending`, bg:'#fee2e2', fg:'#991b1b' };
+    return             { state:'offline',    label:'⏳ Reconnecting…', bg:'#fef3c7', fg:'#92400e' };
+  }
+  if((o.consecutiveFailures|0) >= 3)
+    return             { state:'error',      label:`⚠ Sync failing${pending?` · ${pending} pending`:''}`, bg:'#fee2e2', fg:'#991b1b' };
+  if(pending > 0 && o.lastSyncAgoSec != null && o.lastSyncAgoSec < 5)
+    return             { state:'syncing',    label:'⇅ Syncing…',       bg:'#dbeafe', fg:'#1e40af' };
+  if(pending > 0)
+    return             { state:'pending',    label:`⏳ ${pending} pending — tap to sync`, bg:'#fef3c7', fg:'#92400e' };
+  return               { state:'synced',     label:'☁ Synced',         bg:'#dcfce7', fg:'#166534' };
+}
+window.computeSyncStatus = computeSyncStatus;
+
 function updateAuthBadge(){
   const el = document.getElementById('fb-auth-badge');
   if(!el) return;
-  if(!FIREBASE_ENABLED){
-    el.innerHTML = `<span style="font-size:10.5px;color:var(--text3)" title="Firebase not configured — running offline-only">📦 Local-only</span>`;
-    return;
-  }
-  if(!_fbUser){
-    // Briefly empty during the ~600ms before auto-anon kicks in.
-    el.innerHTML = `<span style="font-size:10.5px;color:var(--text3)">⏳ Connecting…</span>`;
-    return;
-  }
-  if(!_fbAuthorized){
-    el.innerHTML = `<span style="font-size:10.5px;color:var(--text3)">⏳ Setting up…</span>`;
-    return;
-  }
-  // ── REAL connection state from .info/connected ──
-  // If the WebSocket dropped, show a yellow "reconnecting" badge — not green.
-  // Pre-connection (before _fbConnectedRef listener fires for the first time)
-  // _fbWasConnected is false; in that case fall back to "connecting" too.
   const lastSync = _fbLastSyncedAt ? new Date(_fbLastSyncedAt).toLocaleTimeString() : 'pending';
   const lastSyncAgo = _fbLastSyncedAt ? Math.round((fbServerNow() - _fbLastSyncedAt) / 1000) : null;
   const ageStr = lastSyncAgo == null ? 'pending' : (lastSyncAgo < 60 ? lastSyncAgo+'s ago' : Math.round(lastSyncAgo/60)+'m ago');
-  // Detect problems the watchdog is working on
   const pending = _fbLocalEditCounter - _fbPushedEditCounter;
   const watchdogStatus = _syncWatchdogTimer ? '✓ auto-healing on' : '⚠ auto-healing off';
-  if(!_fbWasConnected){
-    el.innerHTML = `<span style="display:inline-flex;align-items:center;gap:5px;font-size:11px;background:#fef3c7;color:#92400e;padding:4px 9px;border-radius:11px;cursor:pointer" onclick="fbCloudSync(true)" title="WebSocket offline · last sync: ${lastSync} · ${watchdogStatus}">⏳ Reconnecting…</span>`;
-  } else if(pending > 0 && lastSyncAgo != null && lastSyncAgo < 5){
-    // Mid-push state — show "syncing" briefly
-    el.innerHTML = `<span style="display:inline-flex;align-items:center;gap:5px;font-size:11px;background:#dbeafe;color:#1e40af;padding:4px 9px;border-radius:11px;cursor:pointer" onclick="fbCloudSync(true)" title="Pushing ${pending} edit(s) to cloud · ${watchdogStatus}">⇅ Syncing…</span>`;
-  } else {
-    el.innerHTML = `<span style="display:inline-flex;align-items:center;gap:5px;font-size:11px;background:#dcfce7;color:#166534;padding:4px 9px;border-radius:11px;cursor:pointer" onclick="fbCloudSync(true)" title="Connected · last sync: ${lastSync} (${ageStr}) · ${watchdogStatus} · tap to force sync">☁ Synced</span>`;
+  const st = computeSyncStatus({
+    fbEnabled: FIREBASE_ENABLED, hasUser: !!_fbUser, authorized: _fbAuthorized,
+    wsConnected: _fbWasConnected, browserOnline: (typeof navigator !== 'undefined' ? navigator.onLine : true),
+    pending, lastSyncAgoSec: lastSyncAgo, consecutiveFailures: (_fbConsecutiveFailures||0)
+  });
+  if(st.state === 'local' || st.state === 'connecting' || st.state === 'setup'){
+    el.innerHTML = `<span style="font-size:10.5px;color:${st.fg}" title="${st.state==='local'?'Firebase not configured — running offline-only':''}">${st.label}</span>`;
+    return;
   }
+  const titles = {
+    'offline-pending': `No connection — ${pending} change(s) saved locally, they sync automatically when back online · last sync: ${lastSync}`,
+    'offline':  `WebSocket offline · last sync: ${lastSync} · ${watchdogStatus}`,
+    'error':    `Cloud writes are failing (${_fbConsecutiveFailures}×) · last sync: ${lastSync} · tap to retry`,
+    'syncing':  `Pushing ${pending} edit(s) to cloud · ${watchdogStatus}`,
+    'pending':  `${pending} local edit(s) not yet in the cloud · tap to sync now · ${watchdogStatus}`,
+    'synced':   `Connected · last sync: ${lastSync} (${ageStr}) · ${watchdogStatus} · tap to force sync`
+  };
+  el.innerHTML = `<span style="display:inline-flex;align-items:center;gap:5px;font-size:11px;background:${st.bg};color:${st.fg};padding:4px 9px;border-radius:11px;cursor:pointer" onclick="fbCloudSync(true)" title="${titles[st.state]||''}">${st.label}</span>`;
 }
 
 // ══════════════════════════════════════════════════════════════════
@@ -7736,6 +8237,20 @@ const TEAM_MEMBERS = [
 let currentUser = null;
 try { currentUser = JSON.parse(localStorage.getItem('aspen_user') || 'null'); }
 catch(e){ console.warn('Failed to parse aspen_user:', e); currentUser = null; }
+
+// ── PER-PERSON ACTOR IDENTITY (v5.18) ────────────────────────────────────────
+// Every action record (movements ledger, trackingHistory, cover history, dispatch
+// confirmations, activity ticker) is signed with the REAL PERSON picked on the
+// Welcome screen — not just the shared role. Falls back to the role label for
+// legacy flows where no person was picked, so nothing ever records blank.
+function actorName(){
+  try {
+    if(currentUser && currentUser.name) return currentUser.name;
+    if(typeof ROLES !== 'undefined' && ROLES[currentRole] && ROLES[currentRole].label) return ROLES[currentRole].label;
+  } catch(e){}
+  return 'Unknown';
+}
+window.actorName = actorName;
 // If user exists but role is invalid, fall back. If no user yet, the welcome screen will set it.
 if(currentUser && currentUser.name){
   const m = TEAM_MEMBERS.find(t => t.name === currentUser.name);
@@ -7811,11 +8326,11 @@ function renderWelcomeTeam(){
   const grid = document.getElementById('welcome-team-grid');
   if(!grid) return;
   grid.innerHTML = TEAM_MEMBERS.map((m, i) => `
-    <div class="user-card" onclick="pickUser('${m.name}')" style="animation:fadeUp .4s ease-out ${i*0.04}s both">
+    <div class="user-card" onclick="pickUser(TEAM_MEMBERS[${i}].name)" style="animation:fadeUp .4s ease-out ${i*0.04}s both">
       <div class="user-card-emoji">${m.emoji}</div>
       <div class="user-card-avatar" style="background:linear-gradient(135deg,${m.color},${m.color}dd)">${userInitials(m.name)}</div>
-      <div class="user-card-name">${m.name}</div>
-      <div class="user-card-title">${m.title}</div>
+      <div class="user-card-name">${escapeHTML(m.name)}</div>
+      <div class="user-card-title">${escapeHTML(m.title)}</div>
     </div>
   `).join('');
 }
@@ -8677,7 +9192,7 @@ let recTab = 'pending';     // pending|received
 // ═══════════════════════════════════════════════════════
 const tl = t => ({hot:'Hot Tub',swim:'Swim Spa',extra:'Extra/Stock',misc:'Misc/Other',material:'Material',accessory:'Accessory'}[t]||t);
 const _esc_el = document.createElement('div');
-function escapeHTML(s){ if(s==null) return ''; _esc_el.textContent=String(s); return _esc_el.innerHTML; }
+function escapeHTML(s){ if(s==null) return ''; return String(s).replace(/[&<>"']/g, c => c==='&'?'&amp;':c==='<'?'&lt;':c==='>'?'&gt;':c==='"'?'&quot;':'&#39;'); }  // v5.13: manual escaper — also neutralizes quotes so attribute values (value="...") are safe, not just text nodes
 // Returns today's date in the user's LOCAL timezone as YYYY-MM-DD.
 // Previously used UTC which caused records logged after ~6pm Central Time to
 // show tomorrow's date (UTC was already past midnight). We pad to ensure
@@ -9792,6 +10307,7 @@ function autoOrganizeUnits(){
       // Placed → drop from incoming AND the arriving queue mirror so it doesn't
       // reappear asking for a position.
       incoming = incoming.filter(x => x.id !== it.id);
+      _tombstoneQueueItem(it.id);   // v5.12
       if(typeof queue !== 'undefined' && Array.isArray(queue)) queue = queue.filter(q => q.id !== it.id);
       addAct(`📦 Auto-organize: placed ${newU.sn||newU.dealer} at ${dest.pos}`, 'var(--teal)');
       placed++;
@@ -9913,7 +10429,7 @@ function renderStackTowers(pos, opts={}){
     if(u){
       slots.push(`<div class="stk-slot stk-occ ${isTop?'stk-top':''} t-${u.type}" title="${(u.sn||u.dealer||'').replace(/"/g,'')} (${LEVEL_LABEL(lv)})">
         <div class="stk-lv">${lvLbl}</div>
-        <div class="stk-dl">${u.dealer||''}</div>
+        <div class="stk-dl">${escapeHTML(u.dealer||'')}</div>
         <div class="stk-sn">${u.sn||'—'}</div>
         ${isTop?'<div class="stk-top-mark">↑ access</div>':''}
       </div>`);
@@ -9961,7 +10477,7 @@ function validatePos(input){
   }
   return {ok:true, pos:s};
 }
-function addAct(m,c){ activity.unshift({m,c,t:new Date().toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'})}); if(activity.length>30)activity.pop(); }
+function addAct(m,c){ activity.unshift({m,c,t:new Date().toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'}), w:(typeof actorName==='function'?actorName():'')}); if(activity.length>30)activity.pop(); }  // v5.18: w = who did it
 
 // ═══════════════════════════════════════════════════════════════════════════
 // STOCK MOVEMENTS LEDGER  (SAP-style material documents)
@@ -10280,6 +10796,114 @@ function renderActionItems(){
   `).join('');
 }
 
+// ── OPERATIONS KPIs (v5.15) ───────────────────────────────────────────────────
+// PURE computation over the data the app already records (dispatched records,
+// units entry dates, coverInventory decrement history). No new storage, no libs.
+// Kept side-effect-free so the CI suite can unit-test it with synthetic data.
+function computeOpsKPIs(dispatchedArr, unitsArr, coverInvArr, nowMs){
+  const now = nowMs || Date.now();
+  const D = Array.isArray(dispatchedArr) ? dispatchedArr : [];
+  const U = Array.isArray(unitsArr) ? unitsArr : [];
+  const C = Array.isArray(coverInvArr) ? coverInvArr : [];
+  const dayMs = 864e5;
+  const parse = v => { if(!v || typeof v !== 'string') return null; const t = Date.parse(v.length===10 ? v+'T12:00:00' : v); return isNaN(t) ? null : t; };
+  const dispDate = d => parse(d && (d.dispatchDate || d.dispatchedAt));
+  // month buckets: last 6 calendar months, oldest → newest
+  const months = [];
+  { const base = new Date(now); base.setDate(1);
+    for(let i=5;i>=0;i--){ const m = new Date(base.getFullYear(), base.getMonth()-i, 1);
+      months.push({ y:m.getFullYear(), mo:m.getMonth(), label: m.toLocaleString('en-US',{month:'short'}), dispatches:0, covers:0 }); } }
+  const bucketOf = t => { const d = new Date(t); return months.find(b => b.y===d.getFullYear() && b.mo===d.getMonth()) || null; };
+  // dispatches per month + returns + top dealers (90d) + cycle time
+  let returned = 0, totalDisp = 0, ret90 = 0, tot90 = 0;
+  const reasons = {}, dealers90 = {};
+  let cycleSum = 0, cycleN = 0;
+  const cut90 = now - 90*dayMs;
+  for(const d of D){
+    if(!d) continue;
+    totalDisp++;
+    const t = dispDate(d);
+    if(t){ const b = bucketOf(t); if(b) b.dispatches++; }
+    const isRet = d.deliveryStatus === 'returned';
+    if(isRet){ returned++; const r = String(d.returnReason||'').split(' — ')[0].trim() || 'Unspecified'; reasons[r] = (reasons[r]||0)+1; }
+    if(t && t >= cut90){ tot90++; if(isRet) ret90++; const dl = (d.dealer||'').trim(); if(dl) dealers90[dl] = (dealers90[dl]||0)+1; }
+    const e = parse(d.entryDate);
+    if(t && e && t >= e && (t - e) <= 730*dayMs){ cycleSum += (t - e)/dayMs; cycleN++; }
+  }
+  // covers consumed per month (decrement history across all rows)
+  for(const row of C){
+    if(!row || !Array.isArray(row.history)) continue;
+    for(const h of row.history){
+      if(!h || h.action !== 'decrement') continue;
+      const t = parse(h.at); if(!t) continue;
+      const b = bucketOf(t); if(b) b.covers++;
+    }
+  }
+  // current warehouse age
+  let ageSum = 0, ageN = 0;
+  for(const u of U){ const e = parse(u && u.entry); if(e && e <= now){ ageSum += (now - e)/dayMs; ageN++; } }
+  const topDealers = Object.entries(dealers90).sort((a,b)=>b[1]-a[1]).slice(0,5).map(([name,count])=>({name,count}));
+  const topReasons = Object.entries(reasons).sort((a,b)=>b[1]-a[1]).slice(0,3).map(([reason,count])=>({reason,count}));
+  return {
+    months: months.map(({label,dispatches,covers})=>({label,dispatches,covers})),
+    avgDaysToDispatch: cycleN ? +(cycleSum/cycleN).toFixed(1) : null,
+    cycleSampleN: cycleN,
+    returnRate: totalDisp ? +(returned/totalDisp*100).toFixed(1) : 0,
+    returnRate90: tot90 ? +(ret90/tot90*100).toFixed(1) : 0,
+    returnedCount: returned, totalDispatched: totalDisp,
+    topReasons, topDealers,
+    avgWarehouseAgeDays: ageN ? Math.round(ageSum/ageN) : null
+  };
+}
+window.computeOpsKPIs = computeOpsKPIs;
+
+function renderOpsKPIs(){
+  const el = document.getElementById('dash-kpis');
+  if(!el) return;
+  try {
+    const k = computeOpsKPIs(dispatched, units, coverInventory, Date.now());
+    const maxD = Math.max(1, ...k.months.map(m=>m.dispatches));
+    const maxC = Math.max(1, ...k.months.map(m=>m.covers));
+    const bar = (v,max,color) => `<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:3px"><div style="font-size:10px;font-weight:700;color:var(--text2)">${v}</div><div style="width:70%;max-width:34px;height:${Math.max(3, Math.round(v/max*54))}px;background:${color};border-radius:4px 4px 0 0"></div></div>`;
+    const monthRow = (key,color) => `<div style="display:flex;align-items:flex-end;height:76px;gap:2px;padding:0 2px">${k.months.map(m=>bar(m[key],key==='dispatches'?maxD:maxC,color)).join('')}</div>
+      <div style="display:flex;gap:2px;padding:0 2px;border-top:1px solid var(--line)">${k.months.map(m=>`<div style="flex:1;text-align:center;font-size:9.5px;color:var(--text3);padding-top:3px">${m.label}</div>`).join('')}</div>`;
+    el.innerHTML = `
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:16px">
+        <div>
+          <div style="font-size:11px;font-weight:800;color:var(--text2);letter-spacing:.04em;text-transform:uppercase;margin-bottom:8px">🚚 Dispatches / month</div>
+          ${monthRow('dispatches','var(--teal)')}
+        </div>
+        <div>
+          <div style="font-size:11px;font-weight:800;color:var(--text2);letter-spacing:.04em;text-transform:uppercase;margin-bottom:8px">🛏 Covers consumed / month</div>
+          ${monthRow('covers','var(--accent)')}
+        </div>
+        <div style="display:flex;flex-direction:column;gap:10px">
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+            <div style="background:var(--bg2,#f8fafc);border:1px solid var(--line);border-radius:9px;padding:10px">
+              <div style="font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase">Avg days to dispatch</div>
+              <div style="font-size:22px;font-weight:800;color:var(--text1)">${k.avgDaysToDispatch != null ? k.avgDaysToDispatch : '—'}</div>
+              <div style="font-size:9.5px;color:var(--text3)">${k.cycleSampleN} tubs · warehouse entry → out</div>
+            </div>
+            <div style="background:var(--bg2,#f8fafc);border:1px solid var(--line);border-radius:9px;padding:10px">
+              <div style="font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase">Return rate</div>
+              <div style="font-size:22px;font-weight:800;color:${k.returnRate90>5?'var(--red)':'var(--text1)'}">${k.returnRate90}%</div>
+              <div style="font-size:9.5px;color:var(--text3)">last 90d · ${k.returnRate}% all-time (${k.returnedCount}/${k.totalDispatched})</div>
+            </div>
+          </div>
+          <div style="background:var(--bg2,#f8fafc);border:1px solid var(--line);border-radius:9px;padding:10px">
+            <div style="font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;margin-bottom:5px">Top dealers · last 90 days</div>
+            ${k.topDealers.length ? k.topDealers.map(d=>`<div style="display:flex;justify-content:space-between;font-size:11.5px;padding:2px 0"><span style="color:var(--text1)">${escapeHTML(d.name)}</span><span style="font-weight:700;color:var(--teal)">${d.count}</span></div>`).join('') : '<div style="font-size:11px;color:var(--text3)">No dispatches in the last 90 days</div>'}
+          </div>
+          ${k.topReasons.length ? `<div style="background:#fff7ed;border:1px solid #fed7aa;border-radius:9px;padding:10px">
+            <div style="font-size:10px;font-weight:700;color:#9a3412;text-transform:uppercase;margin-bottom:5px">↩ Top return reasons</div>
+            ${k.topReasons.map(r=>`<div style="display:flex;justify-content:space-between;font-size:11.5px;padding:2px 0"><span style="color:var(--text1)">${escapeHTML(r.reason)}</span><span style="font-weight:700;color:#ea580c">${r.count}</span></div>`).join('')}
+          </div>` : ''}
+          ${k.avgWarehouseAgeDays != null ? `<div style="font-size:10.5px;color:var(--text3)">Current stock: avg <strong style="color:var(--text2)">${k.avgWarehouseAgeDays}d</strong> in warehouse</div>` : ''}
+        </div>
+      </div>`;
+  } catch(e){ console.warn('[kpis] render failed:', e); el.innerHTML = '<div style="font-size:11px;color:var(--text3)">KPIs unavailable</div>'; }
+}
+
 function renderDash(){
   // ── Personalized greeting banner ──
   const banner = document.getElementById('greeting-banner');
@@ -10366,19 +10990,19 @@ function renderDash(){
   document.getElementById('dash-act').innerHTML=activity.length?activity.slice(0,5).map(a=>`
     <div style="display:flex;align-items:flex-start;gap:8px;padding:8px 14px;border-bottom:1px solid var(--line)">
       <div style="width:6px;height:6px;border-radius:50%;background:${a.c};margin-top:5px;flex-shrink:0"></div>
-      <div><div style="font-size:11px;color:var(--text1)">${a.m}</div><div style="font-size:10px;color:var(--text3);margin-top:1px">${a.t}</div></div>
+      <div><div style="font-size:11px;color:var(--text1)">${escapeHTML(a.m)}${a.w?` <span style="color:var(--text3);font-size:9.5px">· ${escapeHTML(a.w)}</span>`:''}</div><div style="font-size:10px;color:var(--text3);margin-top:1px">${a.t}</div></div>
     </div>`).join(''):'<div style="padding:14px;text-align:center;color:var(--text3);font-size:11px">No activity yet</div>';
   const up=events.slice(0,3);
   document.getElementById('dash-up').innerHTML=up.length?up.map(e=>`
     <div style="display:flex;align-items:center;gap:10px;padding:8px 14px;border-bottom:1px solid var(--line)">
       <div style="width:3px;height:30px;border-radius:2px;background:${e.type==='dispatch'?'var(--teal)':e.type==='material'?'var(--orange)':'var(--accent)'};flex-shrink:0"></div>
-      <div><div style="font-size:11px;font-weight:600;color:var(--text1)">${e.title}</div><div style="font-size:10px;color:var(--text3);margin-top:1px">${fmtD(e.date)} ${e.time||''}</div></div>
+      <div><div style="font-size:11px;font-weight:600;color:var(--text1)">${escapeHTML(e.title)}</div><div style="font-size:10px;color:var(--text3);margin-top:1px">${fmtD(e.date)} ${e.time||''}</div></div>
     </div>`).join(''):'<div style="padding:14px;text-align:center;color:var(--text3);font-size:11px">No events</div>';
   const pl=incoming.filter(i=>i.status==='pending').slice(0,3);
   document.getElementById('dash-pend').innerHTML=pl.length?pl.map(it=>`
     <div style="display:flex;align-items:center;gap:10px;padding:8px 14px;border-bottom:1px solid var(--line)">
       <div style="width:6px;height:6px;border-radius:50%;background:var(--amber);flex-shrink:0"></div>
-      <div style="flex:1"><div style="font-size:11px;font-weight:600;color:var(--text1)">${it.dealer}</div><div style="font-family:var(--mono);font-size:10px;color:var(--accent)">${it.sn}</div></div>
+      <div style="flex:1"><div style="font-size:11px;font-weight:600;color:var(--text1)">${escapeHTML(it.dealer)}</div><div style="font-family:var(--mono);font-size:10px;color:var(--accent)">${it.sn}</div></div>
       <span class="badge bdg-p"><span class="bd-dot"></span>${tl(it.type)}</span>
     </div>`).join(''):'<div style="padding:14px;text-align:center;color:var(--text3);font-size:11px">No pending</div>';
 
@@ -10411,7 +11035,7 @@ function renderDash(){
         <tbody>
         ${aged.map(u=>`<tr style="border-top:1px solid var(--line);cursor:pointer" onclick="goV('map');setTimeout(()=>{document.getElementById('map-srch').value='${((u.sn||u.dealer)||'').toString().replace(/'/g,'')}';locateUnit();},120)">
           <td style="padding:7px 4px;font-family:var(--mono);font-weight:700;color:var(--accent)">${u.pos||'—'}</td>
-          <td style="padding:7px 4px;color:var(--text1)">${u.dealer||'—'}</td>
+          <td style="padding:7px 4px;color:var(--text1)">${escapeHTML(u.dealer||'—')}</td>
           <td style="padding:7px 4px;font-family:var(--mono);color:var(--text2)">${u.sn||'—'}</td>
           <td style="padding:7px 4px"><span class="tbadge tb${(u.type||'h')[0]}">${tl(u.type||'?')}</span></td>
           <td style="padding:7px 4px;color:var(--text2);font-size:10px">${fmtD(u.entry)}</td>
@@ -10450,7 +11074,7 @@ function renderDash(){
         <tbody>
         ${factoryAged.map(f=>`<tr style="border-top:1px solid var(--line);cursor:pointer" onclick="goV('factory')">
           <td style="padding:7px 4px;font-family:var(--mono);font-weight:700;color:var(--accent)">${f.sn||'—'}</td>
-          <td style="padding:7px 4px;color:var(--text1)">${f.dealer||'—'}</td>
+          <td style="padding:7px 4px;color:var(--text1)">${escapeHTML(f.dealer||'—')}</td>
           <td style="padding:7px 4px"><span class="tbadge tb${(f.type||'h')[0]}">${tl(f.type||'hot')}</span></td>
           <td style="padding:7px 4px;color:var(--text2);font-size:10px">${f.trackingState||'created'}</td>
           <td style="padding:7px 4px;color:var(--text2);font-size:10px">${fmtD(f.added)}</td>
@@ -10460,6 +11084,8 @@ function renderDash(){
       </table></div>`;
     }
   }
+  // v5.15 — operations KPIs card (defensive: its own try/catch inside)
+  renderOpsKPIs();
 }
 
 // ═══════════════════════════════════════════════════════
@@ -10700,7 +11326,7 @@ function renderQueue(){
       return `
       <div class="queue-item" style="background:#fef3c7;border-color:#fcd34d;opacity:.95;cursor:default">
         <div class="qi-type" style="background:#d97706"></div>
-        <div class="qi-name" style="color:#78350f">${item.dealer}${item.sn?' · '+item.sn:''}</div>
+        <div class="qi-name" style="color:#78350f">${escapeHTML(item.dealer)}${item.sn?' · '+item.sn:''}</div>
         <div style="display:flex;align-items:center;gap:5px;padding-left:8px">
           <span class="tbadge" style="background:#d97706;color:#fff;font-size:8px;padding:1px 5px;border-radius:3px;font-weight:700;letter-spacing:.04em">🚛 IN TRANSIT</span>
           <span class="tbadge" style="background:${typeColor[item.type]}18;color:${typeColor[item.type]};font-size:8px;padding:1px 5px;border-radius:3px;font-weight:700">${typeLabel[item.type]||item.type}</span>
@@ -10717,7 +11343,7 @@ function renderQueue(){
       ondragend="endQueueDrag(event)"
       ${canQuickPlace ? `onclick="if(!event.defaultPrevented)quickPlaceFromQueue(${item.id})" style="cursor:pointer;${isMultiPallet?'flex-wrap:wrap;':''}"` : `style="${isMultiPallet?'flex-wrap:wrap':''}"`}>
       <div class="qi-type" style="background:${typeColor[item.type]||'var(--text3)'}"></div>
-      <div class="qi-name">${item.dealer}${item.sn?' · '+item.sn:''}</div>
+      <div class="qi-name">${escapeHTML(item.dealer)}${item.sn?' · '+item.sn:''}</div>
       <div style="display:flex;align-items:center;gap:5px;padding-left:8px">
         <span class="tbadge" style="background:${typeColor[item.type]}18;color:${typeColor[item.type]};font-size:8px;padding:1px 5px;border-radius:3px;font-weight:700">${typeLabel[item.type]||item.type}</span>
         ${isMultiPallet
@@ -10754,7 +11380,7 @@ function quickPlaceFromQueue(queueId){
     inc.arrivedAt = toISO();
     if(inc.trackingId){
       inc.trackingHistory = inc.trackingHistory || [];
-      inc.trackingHistory.push({state:'received-at-warehouse', at:toISO(), by:ROLES[currentRole].label, note:'via queue tap'});
+      inc.trackingHistory.push({state:'received-at-warehouse', at:toISO(), by: actorName(), note:'via queue tap'});
     }
     // CRITICAL: persist immediately. The user might close the position picker
     // without completing — without this save, the status/arrivedAt mutation
@@ -10784,6 +11410,7 @@ function removeFromQueue(id){
   if(qi && qi._fromIncoming){
     incoming = incoming.filter(i => i.id !== id);
   }
+  _tombstoneQueueItem(id);   // v5.12
   queue=queue.filter(i=>i.id!==id);
   renderQueue();renderIncoming();renderBanner();updBadges();
 }
@@ -10894,6 +11521,7 @@ function setupDropExtended(el,pos){
       if(qi._fromIncoming){
         incoming = incoming.filter(i => i.id !== qi.id);
       }
+      _tombstoneQueueItem(qi.id);   // v5.12
       queue=queue.filter(i=>i.id!==qi.id);
       renderQueue();drawMap();updBadges();renderMaterials();renderIncoming();renderBanner();
       return;
@@ -12005,6 +12633,7 @@ window.setupStagingDrop = function(cell, id){
       delete newUnit.cat; delete newUnit.items;
       units.push(newUnit);
       if(qi._fromIncoming) incoming = incoming.filter(i => i.id !== qi.id);
+      _tombstoneQueueItem(qi.id);   // v5.12
       queue = queue.filter(i => i.id !== qi.id);
       if(qi.sn) postMovement({type:'101', sn:qi.sn, material:qi.type||'', qty:1, from:LOC_TRANSIT, to:LOC_WAREHOUSE(id), stockType:'unrestricted', note:'Received into '+label});
       addAct(`${qi.dealer||qi.sn||'Item'} staged at ${label}`, 'var(--teal)');
@@ -12785,14 +13414,14 @@ function showCellPanel(pos,cu){
           <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M5.5 8.5l-2 2a2.5 2.5 0 003.5 3.5l2-2M10.5 7.5l2-2a2.5 2.5 0 00-3.5-3.5l-2 2M5 11l6-6"/></svg>
           ⚠ Married — at Factory (cannot dispatch)
         </div>
-        ${marPending.map(m=>`<div class="uc-marriage-item"><span>${m.accessoryName}${m.accessoryQty&&m.accessoryQty>1?` × ${m.accessoryQty}`:''}</span><span class="uc-marriage-loc">FACTORY</span></div>`).join('')}
+        ${marPending.map(m=>`<div class="uc-marriage-item"><span>${escapeHTML(m.accessoryName)}${m.accessoryQty&&m.accessoryQty>1?` × ${m.accessoryQty}`:''}</span><span class="uc-marriage-loc">FACTORY</span></div>`).join('')}
       </div>` : ''}
       ${marDelivered.length ? `<div class="uc-marriage delivered">
         <div class="uc-marriage-hd">
           <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M13 4L6 12l-3-3"/></svg>
           ✓ Married — accessory at warehouse (ship together)
         </div>
-        ${marDelivered.map(m=>`<div class="uc-marriage-item"><span>${m.accessoryName}${m.accessoryQty&&m.accessoryQty>1?` × ${m.accessoryQty}`:''}</span><span class="uc-marriage-loc">READY</span></div>`).join('')}
+        ${marDelivered.map(m=>`<div class="uc-marriage-item"><span>${escapeHTML(m.accessoryName)}${m.accessoryQty&&m.accessoryQty>1?` × ${m.accessoryQty}`:''}</span><span class="uc-marriage-loc">READY</span></div>`).join('')}
       </div>` : ''}
     ` : '';
     const dealerC = dealerColor(u.dealer);
@@ -12806,7 +13435,7 @@ function showCellPanel(pos,cu){
     return `<div class="uc" style="position:relative;${isCover?'border-left:3px solid #7dd3fc;background:#f0f9ff;':isMaterial?'border-left:3px solid var(--orange);background:#fff7ed;':marPending.length?'border-left:3px solid var(--red);background:#fff5f5;':marReady?'border-left:4px solid #10b981;background:#f0fdf4;':`border-left:4px solid ${dealerC.border};`}">
       ${!isCover && !isMaterial && !marPending.length && !marReady ? `<div style="position:absolute;left:-4px;top:8px;bottom:8px;width:4px;background:${dealerC.border};border-radius:2px"></div>` : ''}
       ${marReady ? `<div style="position:absolute;right:8px;top:8px;background:#10b981;color:#fff;font-size:9px;font-weight:800;letter-spacing:.05em;padding:2px 7px;border-radius:9px;box-shadow:0 1px 3px rgba(16,185,129,.4)" title="Marriage complete — ready to dispatch">✓ READY</div>` : ''}
-      <div class="uc-dealer">${u.dealer}${ageBadge}${u.alreadyInWh?` <span style="display:inline-block;font-size:8.5px;font-weight:800;color:#854d0e;background:#fde68a;border:.5px solid #d97706;padding:1px 5px;border-radius:3px;letter-spacing:.04em;margin-left:6px;vertical-align:middle" title="Pre-existing inventory">📍 WH</span>`:''}${(()=>{
+      <div class="uc-dealer">${escapeHTML(u.dealer)}${ageBadge}${u.alreadyInWh?` <span style="display:inline-block;font-size:8.5px;font-weight:800;color:#854d0e;background:#fde68a;border:.5px solid #d97706;padding:1px 5px;border-radius:3px;letter-spacing:.04em;margin-left:6px;vertical-align:middle" title="Pre-existing inventory">📍 WH</span>`:''}${(()=>{
         if(!isStackedType(u.type)) return '';
         const blockers = unitsAbove(u);
         const isTop = blockers.length === 0;
@@ -12831,7 +13460,7 @@ function showCellPanel(pos,cu){
               : `Qty: <strong>${u.qty||1}</strong>`}
             ${u.cat?`<span style="font-size:9px;color:var(--text3);margin-left:6px;text-transform:uppercase;letter-spacing:.05em">${u.cat}</span>`:''}
           </div>
-          ${u.notes && !u.notes.match(/^\d+×\d+/)?`<div style="font-size:10px;color:var(--text2);margin:3px 0">${u.notes}</div>`:''}
+          ${u.notes && !u.notes.match(/^\d+×\d+/)?`<div style="font-size:10px;color:var(--text2);margin:3px 0">${escapeHTML(u.notes)}</div>`:''}
          `
         :`<div class="uc-sn">${u.sn||'—'}</div>`
       }
@@ -13421,7 +14050,7 @@ function openDispForm(id){
       </div>
       <div style="font-size:11px;color:#991b1b;line-height:1.5;margin-bottom:8px">This spa is married to items that have not yet arrived from the Aspen factory. Dispatching now would split the order.</div>
       ${marPending.map(m=>`<div style="background:#fff;border:1px solid #fecaca;border-radius:6px;padding:7px 10px;margin-top:5px;display:flex;justify-content:space-between;align-items:center;font-size:11px">
-        <span style="color:#7f1d1d;font-weight:600">${m.accessoryName}${m.accessoryQty&&m.accessoryQty>1?` × ${m.accessoryQty}`:''}</span>
+        <span style="color:#7f1d1d;font-weight:600">${escapeHTML(m.accessoryName)}${m.accessoryQty&&m.accessoryQty>1?` × ${m.accessoryQty}`:''}</span>
         <button class="btn btn-sm btn-g" style="font-size:10px;padding:3px 9px" onclick="markMarriageDelivered(${m.id});setTimeout(()=>openDispForm(${id}),200)">Mark delivered</button>
       </div>`).join('')}
       <div style="font-size:10px;color:#991b1b;margin-top:8px;font-style:italic">If you really must dispatch, click "Override & Dispatch" below.</div>
@@ -13454,7 +14083,7 @@ function openDispForm(id){
     ${stackBlock}
     ${marDeliveredInfo}
     <div class="disp-hl">
-      <div style="font-weight:600;color:var(--teal);font-size:13px">${u.dealer}</div>
+      <div style="font-weight:600;color:var(--teal);font-size:13px">${escapeHTML(u.dealer)}</div>
       <div style="font-family:var(--mono);font-size:10px;color:var(--text2);margin-top:2px">S/N: ${u.sn||'N/A'} · ${tl(u.type)} · Pos: ${u.pos}${isStackedType(u.type)?` · S${u.stack||'?'}-${LEVEL_SHORT(u.level||0)}`:''} · Entry: ${fmtD(u.entry)}</div>
     </div>
     <div class="fgrid fgrid3">
@@ -13535,7 +14164,7 @@ function openDispatchChecklist(id){
   panel.innerHTML = `
     <div style="padding:18px 22px;border-bottom:1px solid var(--line);background:linear-gradient(135deg,#0d9e78,#0b8568);color:#fff;border-radius:16px 16px 0 0">
       <div style="font-size:10.5px;font-weight:700;letter-spacing:.1em;opacity:.85;text-transform:uppercase">Pickup Checklist · S/N ${u.sn||'—'}</div>
-      <div style="font-size:18px;font-weight:800;margin-top:4px">${u.dealer||'—'} · ${fmtD(pendingDate)}${pendingTime?` ${pendingTime}`:''}</div>
+      <div style="font-size:18px;font-weight:800;margin-top:4px">${escapeHTML(u.dealer||'—')} · ${fmtD(pendingDate)}${pendingTime?` ${pendingTime}`:''}</div>
       <div style="font-size:11.5px;opacity:.9;margin-top:5px">Confirm every physical item is loaded BEFORE the dealer leaves. The dealer's signature is the final step.</div>
     </div>
     <div style="padding:18px 22px">
@@ -13812,6 +14441,7 @@ function addUnit(inIdx){
   if(inIdx>=0 && incoming[inIdx]){
     const placedId = incoming[inIdx].id;
     incoming.splice(inIdx, 1);
+    _tombstoneQueueItem(placedId);   // v5.12
     queue = queue.filter(q => q.id !== placedId);
   }
   const tag = alreadyInWh ? ' (already in WH)' : '';
@@ -13961,7 +14591,7 @@ function cleanupPendingCoversForSn(sn){
     if(removed > 0){
       cleaned += removed;
       row.history = row.history || [];
-      row.history.push({at: toISO(), action:'pending-cancelled', spaSn: sn, by: ROLES[currentRole].label, reason:'spa removed/rejected'});
+      row.history.push({at: toISO(), action:'pending-cancelled', spaSn: sn, by: actorName(), reason:'spa removed/rejected'});
     }
   });
   return cleaned;
@@ -13993,6 +14623,7 @@ function rmUnit(id){
   }
   if(!confirm(`Remove ${u.sn||u.dealer} from warehouse?`))return;
   snapshot(`remove ${u.sn||u.dealer}`);
+  _trashAdd('unit', `${u.sn||u.dealer} · ${u.model||u.type||'tub'} · ${u.dealer||''}`, u);   // v5.19: 30-day restore
   try{ postMovement({type:'551', sn:u.sn||'', material:u.type||'', qty:1, from:LOC_WAREHOUSE(u.pos), to:null, stockType:'unrestricted', note:'Removed from warehouse'}); }catch(e){}
   // Cleanup: credit back paired cover + remove from pending queue
   const cleaned = cleanupPendingCoversForSn(u.sn);
@@ -14207,9 +14838,9 @@ function renderIncoming(){
     } else if(isTransit && it._marriedSn){
       meta = `<strong>${it._accessoryName || it.dealer || 'Accessory'}</strong> · ${typeLabel} · <span style="color:#831843;font-weight:600">💍 for S/N ${it._marriedSn}</span> · <span style="color:#92400e;font-weight:600">loaded ${it.transitLoadedAt ? fmtTrackingTime(it.transitLoadedAt) : 'recently'}</span>`;
     } else if(isTransit){
-      meta = `<strong>${it.dealer||'No dealer'}</strong> · ${typeLabel} · <span style="color:#92400e;font-weight:600">loaded ${it.transitLoadedAt ? fmtTrackingTime(it.transitLoadedAt) : 'recently'}</span>${it.transitLoadedBy ? ' by '+it.transitLoadedBy : ''}`;
+      meta = `<strong>${escapeHTML(it.dealer||'No dealer')}</strong> · ${typeLabel} · <span style="color:#92400e;font-weight:600">loaded ${it.transitLoadedAt ? fmtTrackingTime(it.transitLoadedAt) : 'recently'}</span>${it.transitLoadedBy ? ' by '+it.transitLoadedBy : ''}`;
     } else {
-      meta = `<strong>${it.dealer||'No dealer'}</strong> · ${typeLabel} · expected ${it.date||'—'}`;
+      meta = `<strong>${escapeHTML(it.dealer||'No dealer')}</strong> · ${typeLabel} · expected ${it.date||'—'}`;
     }
     return `<div style="${cardStyle};border:1.5px solid;border-radius:11px;padding:14px 16px;margin:11px 14px;display:flex;flex-direction:column;gap:11px">
       <div style="display:flex;align-items:start;justify-content:space-between;gap:12px;flex-wrap:wrap">
@@ -14241,7 +14872,7 @@ function receiveTransitItem(factoryId){
   if(!confirm(`Mark ${item.sn||'this spa'} as received at warehouse?\n\nDealer: ${item.dealer||'—'}\n\nThis will move it to the Incoming list, ready for position assignment.`)) return;
   snapshot('receive transit item');
   const at = toISO();
-  const by = ROLES[currentRole].label;
+  const by = actorName();
   // ── MARRIED ACCESSORY shortcut: mark marriage delivered, don't go to incoming ──
   const isAcc = item.type === 'accessory' || item.type === 'misc';
   if(isAcc && item.marriedSn){
@@ -14302,7 +14933,7 @@ function rejectTransitItem(factoryId){
     onConfirm: ({reasonCode, reasonLabel, notes, photo}) => {
       snapshot('reject transit item');
       const at = toISO();
-      const by = ROLES[currentRole].label;
+      const by = actorName();
       item.trackingHistory = item.trackingHistory || [];
       const noteText = `rejected by warehouse: ${reasonLabel}${notes?' — '+notes:''}`;
       item.trackingHistory.push({state:'in-transit', at, by, note: noteText, reasonCode, photo: photo||null});
@@ -14466,7 +15097,7 @@ function rejectIncoming(id){
         // Preserve original spa fields so factory can re-ship if it gets fixed
         model: it.model, acrylicColor: it.acrylicColor, cabinetColor: it.cabinetColor,
         plasticWrap: it.plasticWrap, cover: it.cover, looseAccessories: it.looseAccessories,
-        trackingHistory: [...(it.trackingHistory||[]), {state:'in-transit', at:toISO(), by:ROLES[currentRole].label, note: noteText, reasonCode, photo: photo||null}]
+        trackingHistory: [...(it.trackingHistory||[]), {state:'in-transit', at:toISO(), by: actorName(), note: noteText, reasonCode, photo: photo||null}]
       });
       incoming = incoming.filter(i => i.id !== id);
       queue = queue.filter(q => q.id !== id);
@@ -14560,7 +15191,7 @@ function markAsArrived(id){
   if(it.trackingId){
     it.trackingState = 'received-at-warehouse';
     it.trackingHistory = it.trackingHistory || [];
-    it.trackingHistory.push({state:'received-at-warehouse', at:toISO(), by:ROLES[currentRole].label});
+    it.trackingHistory.push({state:'received-at-warehouse', at:toISO(), by: actorName()});
   }
   addAct(`Arrived at warehouse: ${it.sn||it.dealer}`,'var(--teal)');
   toast(`${it.sn||it.dealer} received — assign position`,'ok');
@@ -14665,7 +15296,7 @@ function openPositionPicker(incomingId){
         <div>
           <div style="font-size:10px;letter-spacing:.1em;color:var(--text3);text-transform:uppercase;margin-bottom:6px;font-weight:700">Assign Position</div>
           <div style="font-size:22px;font-weight:800;font-family:ui-monospace,monospace;letter-spacing:.01em">${typeIcon} ${it.sn || '(no S/N)'}</div>
-          <div style="font-size:13px;color:var(--text2);margin-top:4px"><strong>${it.dealer||'—'}</strong> · ${typeLabel}</div>
+          <div style="font-size:13px;color:var(--text2);margin-top:4px"><strong>${escapeHTML(it.dealer||'—')}</strong> · ${typeLabel}</div>
         </div>
         <button class="btn btn-sm" onclick="closePositionPicker()" style="font-size:18px;line-height:1">✕</button>
       </div>
@@ -14743,7 +15374,7 @@ function confirmPosition(incomingId, posRaw){
     notes: it.status === 'arrived' ? 'Received via scan/quick-receive' : 'Placed from incoming list',
     trackingId: it.trackingId,
     trackingState: 'placed-in-warehouse',
-    trackingHistory: [...(it.trackingHistory||[]), {state:'placed-in-warehouse', at:toISO(), by:ROLES[currentRole].label, pos:v.pos}],
+    trackingHistory: [...(it.trackingHistory||[]), {state:'placed-in-warehouse', at:toISO(), by: actorName(), pos:v.pos}],
     // Propagate spa identity fields from incoming
     model: it.model, acrylicColor: it.acrylicColor, cabinetColor: it.cabinetColor,
     plasticWrap: it.plasticWrap, looseAccessories: it.looseAccessories,
@@ -15097,7 +15728,7 @@ function openTrackingHistory(source, id){
       <div>
         <div style="font-size:10px;letter-spacing:.1em;color:var(--text3);text-transform:uppercase;margin-bottom:6px;font-weight:700">Tracking History</div>
         <div style="font-size:20px;font-weight:800;font-family:ui-monospace,monospace;letter-spacing:.01em">${typeIcon} ${displayItemId(item, {subFontSize:'13px'})}</div>
-        <div style="font-size:12px;color:var(--text2);margin-top:4px"><strong>${item.dealer||'—'}</strong> · ${typeLabel} · ${sourceLabel}</div>
+        <div style="font-size:12px;color:var(--text2);margin-top:4px"><strong>${escapeHTML(item.dealer||'—')}</strong> · ${typeLabel} · ${sourceLabel}</div>
         ${item.trackingId ? `<div style="font-size:10px;color:var(--text3);margin-top:4px;font-family:ui-monospace,monospace">TID: ${item.trackingId}</div>` : ''}
       </div>
       <button class="btn btn-sm" onclick="closeTrackingHistory()" style="font-size:18px;line-height:1">✕</button>
@@ -15309,7 +15940,7 @@ function renderInTransit(){
           </div>
           <div style="font-size:13px;color:var(--text2);line-height:1.4;margin-bottom:3px">
             <span style="font-size:15px;margin-right:5px">${typeIcon}</span>
-            <strong>${item.dealer||'—'}</strong> · ${typeLabel}
+            <strong>${escapeHTML(item.dealer||'—')}</strong> · ${typeLabel}
           </div>
           <div style="font-size:11px;color:var(--text3);line-height:1.55">
             <span>Loaded ${loadedAt}${stalledMsg ? ` · <strong style="color:${stalled?'#b91c1c':'var(--text2)'}">${stalledMsg}</strong>` : ''}</span><br>
@@ -15639,7 +16270,7 @@ function truckLoadOne(factoryId){
   snapshot('truck load (no tid)');
   f.trackingState = 'in-transit';
   f.trackingHistory = f.trackingHistory || [];
-  f.trackingHistory.push({state:'in-transit', at:toISO(), by:ROLES[currentRole].label});
+  f.trackingHistory.push({state:'in-transit', at:toISO(), by: actorName()});
   addAct(`📦 Loaded on truck: ${f.sn||f.dealer}`,'var(--accent)');
   postMovement({type:'311', sn:f.sn, material:f.type||'', qty:f.qty||1, from:LOC_FACTORY, to:LOC_TRANSIT, stockType:'in-transit', note:'Loaded on truck'});
   // Sync marriage if this is a married accessory
@@ -15939,7 +16570,7 @@ function renderMaterials(){
       </div>
       <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:6px">
         ${p.items.map(m=>`<div style="background:#fff;border:1px solid var(--line);border-radius:6px;padding:7px 9px;position:relative">
-          <div style="font-size:11px;font-weight:700;color:var(--text1);padding-right:42px">${m.name}</div>
+          <div style="font-size:11px;font-weight:700;color:var(--text1);padding-right:42px">${escapeHTML(m.name)}</div>
           <div style="font-family:var(--mono);font-size:10px;color:var(--orange);margin-top:2px">${m.boxes||0} × ${m.perBox||0} = <strong>${m.qty}</strong></div>
           <div style="position:absolute;top:5px;right:5px;display:flex;gap:3px">
             <button class="btn btn-sm" style="padding:2px 6px;font-size:9px;line-height:1" onclick="openMaterialEdit(${m.id})" title="Edit">✎</button>
@@ -15952,7 +16583,7 @@ function renderMaterials(){
   const cards=standalone.map(m=>`
     <div class="mat-card">
       ${m.photo?`<img src="${m.photo}" class="mat-photo" onclick="showLB('${m.photo}')" title="Click to enlarge">`:`<div class="mat-no-photo">No photo</div>`}
-      <div style="font-size:12px;font-weight:700;color:var(--text1);margin-bottom:3px">${m.name}</div>
+      <div style="font-size:12px;font-weight:700;color:var(--text1);margin-bottom:3px">${escapeHTML(m.name)}</div>
       <div style="display:flex;gap:5px;align-items:center;margin-bottom:5px;flex-wrap:wrap">
         <span class="badge bdg-p"><span class="bd-dot"></span>${catL[m.cat]||m.cat}</span>
         ${m.boxes && m.perBox
@@ -15961,7 +16592,7 @@ function renderMaterials(){
       </div>
       ${m.pos?`<div style="font-size:10px;color:var(--text2)">📍 <strong>${m.pos}</strong></div>`:''}
       <div style="font-size:10px;color:var(--text3);margin-top:2px">${fmtD(m.date)}</div>
-      ${m.notes?`<div style="font-size:10px;color:var(--text2);margin-top:4px;padding-top:4px;border-top:1px solid var(--line)">${m.notes}</div>`:''}
+      ${m.notes?`<div style="font-size:10px;color:var(--text2);margin-top:4px;padding-top:4px;border-top:1px solid var(--line)">${escapeHTML(m.notes)}</div>`:''}
       ${renderPhotoStrip(m, 'materials')}
       <div style="display:flex;gap:4px;margin-top:6px;padding-top:6px;border-top:1px solid var(--line);flex-wrap:wrap">
         <button class="btn btn-sm" style="padding:4px 9px;font-size:10px" onclick="openMaterialEdit(${m.id})" title="Edit this material">✎ Edit</button>
@@ -16284,9 +16915,10 @@ function confirmReturnUnit(recId, sn){
   const reasonText = `${reasonLabel}${notes ? ' — ' + notes : ''}`;
   snapshot('return dispatched unit');
   const at = toISO();
-  const by = ROLES[currentRole].label;
+  const by = actorName();
   // Keep the dispatch record as audit history, flagged returned.
   rec.deliveryStatus = 'returned';
+  rec.updatedAt = editStamp();   // v5.14: LWW stamp — a stale peer's 'out' copy must not revert this (it would re-mark the S/N dispatched-out and the staleness rules would then DROP the returned tub's factory/incoming row)
   rec.returnedAt = at;
   rec.returnedTo = dest;
   rec.returnReason = reasonText;
@@ -16432,7 +17064,7 @@ function openEditDispatchDates(recId){
     if(nentry) d.entryDate = nentry;
     let moved = 0;
     if(nd && typeof events !== 'undefined' && Array.isArray(events)){
-      events.forEach(ev => { if(ev.type === 'dispatch' && String(ev.sn) === String(d.sn)){ ev.date = nd; moved++; } });
+      events.forEach(ev => { if(ev.type === 'dispatch' && String(ev.sn) === String(d.sn)){ ev.date = nd; ev.updatedAt = editStamp(); moved++; } });
     }
     addAct(`\u{1F4C5} Dates edited: S/N ${d.sn||d.dealer}${moved?` \u00B7 ${moved} calendar event(s) moved`:''}`,'var(--accent)');
     toast('Dates updated','ok');
@@ -16583,14 +17215,14 @@ function renderDispatched(){
     const editDatesBtn = `<button class="btn btn-sm" style="font-size:10px;padding:3px 8px" onclick="openEditDispatchDates(${d.id||0})" title="Fix the pickup / delivery dates">\u{1F4C5} Dates</button>`;
     return `<tr>
     <td class="td-m">${d.sn||'—'}</td>
-    <td style="font-weight:600">${d.dealer||'—'}</td>
+    <td style="font-weight:600">${escapeHTML(d.dealer||'—')}</td>
     <td>${tBadge}</td>
     <td class="td-s">${d.originalPos||'—'}</td>
     <td class="td-s">${d.entryDate ? fmtD(d.entryDate) : '—'}</td>
     <td>${d.dispatchDate ? fmtD(d.dispatchDate) : '—'} <span class="td-s">${d.dispatchTime||''}</span></td>
     <td style="font-weight:600">${d.authorizedBy||'—'}</td>
     <td class="td-s" style="max-width:150px">
-      <div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${d.notes||'—'}</div>
+      <div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHTML(d.notes||'—')}</div>
       ${checklist?`<div style="margin-top:2px">${checklist}</div>`:''}
       ${evidenceLinks?`<div style="margin-top:4px;display:flex;gap:4px;flex-wrap:wrap">${evidenceLinks}</div>`:''}
     </td>
@@ -16694,11 +17326,12 @@ function openConfirmDelivery(recId, sn){
     }
   });
   panel.querySelector('#dc-submit').addEventListener('click', () => {
-    const by = panel.querySelector('#dc-confirmed-by').value.trim() || ROLES[currentRole].label;
+    const by = panel.querySelector('#dc-confirmed-by').value.trim() || actorName();
     const date = panel.querySelector('#dc-date').value || toISO();
     const notes = panel.querySelector('#dc-notes').value.trim();
     snapshot('confirm delivery to dealer');
     rec.deliveryStatus = 'delivered-to-dealer';
+    rec.updatedAt = editStamp();   // v5.14: LWW stamp — protects the confirmation from a stale peer's older copy
     rec.deliveryConfirmedAt = date + 'T' + new Date().toTimeString().slice(0,8);
     rec.deliveryConfirmedBy = by;
     if(notes) rec.deliveryNotes = notes;
@@ -17059,7 +17692,7 @@ function dispatchAndDeliverGroup(gid){
   const now = (typeof toISO==='function'?toISO():new Date().toISOString().slice(0,10));
   const nowTime = new Date().toTimeString().slice(0,5);
   const bol = (grp.find(e=>e.bolPdf)||{}).bolPdf||null;
-  const by = (ROLES[currentRole]&&ROLES[currentRole].label)||'Warehouse';
+  const by = actorName();
   let n=0;
   ready.forEach(u=>{
     const rec = {id:u.id, sn:u.sn, dealer:u.dealer||dealer, type:u.type, originalPos:u.pos, entryDate:u.entry||'\u2014',
@@ -17155,8 +17788,8 @@ function selDayPanel(ds){
   otherEvents.forEach(ev=>{
     html += `<div class="ev-item ev-${ev.type||'entry'}">
       <div class="ev-time">${ev.time||'All day'}</div>
-      <div class="ev-title">${ev.title}</div>
-      ${ev.dealer?`<div class="ev-sub">${ev.dealer}</div>`:''}
+      <div class="ev-title">${escapeHTML(ev.title)}</div>
+      ${ev.dealer?`<div class="ev-sub">${escapeHTML(ev.dealer)}</div>`:''}
     </div>`;
   });
   dayEl.innerHTML = html;
@@ -17235,6 +17868,8 @@ function rmDispatchGroup(groupId){
   if(!grp.length) return;
   if(!confirm(`Delete this dispatch (${grp.length} S/N${grp.length>1?'s':''}) for ${grp[0].dealer}?`)) return;
   snapshot('delete dispatch');
+  _trashAdd('event-group', `Dispatch · ${grp[0].dealer||''} · ${grp.length} S/N · ${grp[0].date||''}`, grp);   // v5.19: 30-day restore
+  _tombstoneEventGroup(groupId);   // v5.12: block stale-remote resurrection of this dispatch
   events = events.filter(e => String(e.groupId) !== String(groupId));
   toast('Dispatch deleted','ok');
   renderCal();
@@ -17285,7 +17920,7 @@ function renderAllEvts(){
     return `
     <div class="ev-item ev-${ev.type||'entry'}" style="${opacity};cursor:pointer;transition:all .12s" onclick="openEventDetail('${ev.date}')" onmouseover="this.style.transform='translateX(2px)';this.style.boxShadow='0 2px 6px rgba(0,0,0,.08)'" onmouseout="this.style.transform='';this.style.boxShadow=''">
       <div class="ev-time">${fmtD(ev.date)} ${ev.time||''}</div>
-      <div class="ev-title">${ev.title}</div>
+      <div class="ev-title">${escapeHTML(ev.title)}</div>
       ${subtitle?`<div class="ev-sub">${subtitle}</div>`:''}
     </div>`;
   }).join('');
@@ -18403,7 +19038,7 @@ function toast(msg,type='ok'){
   const w=document.getElementById('toast-wrap');
   const e=document.createElement('div');
   e.className='toast'+(type==='err'?' err':'');
-  e.innerHTML=`<span style="font-size:11px;color:${type==='err'?'var(--red)':'var(--teal)'}">●</span> ${msg}`;
+  e.innerHTML=`<span style="font-size:11px;color:${type==='err'?'var(--red)':'var(--teal)'}">●</span> ${(typeof escapeHTML==='function'?escapeHTML(msg):msg)}`;  // v5.13: messages carry dealer/model names typed by users
   w.appendChild(e);
   setTimeout(()=>{e.style.opacity='0';e.style.transform='translateX(10px)';e.style.transition='all .22s';setTimeout(()=>e.remove(),220);},3000);
 }
@@ -19729,7 +20364,7 @@ function on3DHover(e){
       ? `${data.stackIdx+1} of ${data.totalStack} (${data.stackIdx===0?'BOTTOM':data.stackIdx===data.totalStack-1?'TOP':'middle'})`
       : 'single';
     tt.innerHTML = `
-      <div class="w3d-tt-title">${u.dealer}${u.sn?' · '+u.sn:''}</div>
+      <div class="w3d-tt-title">${escapeHTML(u.dealer)}${u.sn?' · '+u.sn:''}</div>
       <div class="w3d-tt-row"><strong>Position:</strong> ${data.pos}</div>
       <div class="w3d-tt-row"><strong>Type:</strong> ${tl(u.type)}</div>
       <div class="w3d-tt-row"><strong>Stack:</strong> ${stackPos}</div>
@@ -19950,10 +20585,10 @@ function buildFactoryCard(f){
         </div>`;
     return `<div class="fct-card ${cardClass}" ${cardStyle}>
       ${isAcc
-        ? `<div class="fct-sn" style="font-size:12px;letter-spacing:0">${f.dealer}</div>
+        ? `<div class="fct-sn" style="font-size:12px;letter-spacing:0">${escapeHTML(f.dealer)}</div>
            <div class="fct-dealer" style="font-family:var(--mono);font-size:10px">Qty: ${f.qty||1}</div>`
         : `<div class="fct-sn">${f.sn||'—'}</div>
-           <div class="fct-dealer">${f.dealer}</div>`}
+           <div class="fct-dealer">${escapeHTML(f.dealer)}</div>`}
       <div class="fct-meta">
         <span class="tbadge tb${(f.type||'h')[0]}" style="display:inline-block">${tl(f.type)}</span>
         <span style="margin-left:6px">Added ${fmtD(f.added)}</span>
@@ -19966,7 +20601,7 @@ function buildFactoryCard(f){
           📦 <strong>${f.looseAccessories.length}</strong> loose accessor${f.looseAccessories.length===1?'y':'ies'} inside
         </div>` : ''}
       ${readyTag}${returnedTag}${holdBadge}
-      ${f.notes ? `<div style="font-size:10.5px;color:var(--text2);margin-bottom:7px;font-style:italic">${f.notes}</div>` : ''}
+      ${f.notes ? `<div style="font-size:10.5px;color:var(--text2);margin-bottom:7px;font-style:italic">${escapeHTML(f.notes)}</div>` : ''}
       ${marTag}
       ${renderPhotoStrip(f, 'factory-spas')}
       ${actsHtml}
@@ -20489,7 +21124,7 @@ function addFactorySpa(){
     trackingId,
     updatedAt: editStamp(),
     trackingState: 'created-at-factory',
-    trackingHistory: [{state:'created-at-factory', at: toISO(), by: ROLES[currentRole].label}]
+    trackingHistory: [{state:'created-at-factory', at: toISO(), by: actorName()}]
   });
   // Clear any prior delete tombstone for this S/N so a re-add isn't dropped by the
   // merge during the same sync window (the fresh updatedAt already beats it, but
@@ -20669,10 +21304,10 @@ function decrementCoverStock(color, model, source, spaSn){
   // ── If out of stock: don't go negative. Add to pending queue instead. ──
   if(row.qty <= 0){
     // Add this spa to the pending queue
-    row.pending.push({spaSn: spaSn||'', queuedAt: toISO(), by: ROLES[currentRole].label});
+    row.pending.push({spaSn: spaSn||'', queuedAt: toISO(), by: actorName()});
     row.updated = editStamp();
     row.history = row.history || [];
-    row.history.push({at: toISO(), action:'queued-pending', spaSn: spaSn||'', by: ROLES[currentRole].label});
+    row.history.push({at: toISO(), action:'queued-pending', spaSn: spaSn||'', by: actorName()});
     toast(`📋 Cover ${color}${model?' ('+model+')':''} OUT OF STOCK at ${srcLabel} — queued as pending for S/N ${spaSn||'—'}. Will auto-fulfill when stock arrives.`,'amber');
     // Auto-create a factory request to replenish (avoid duplicates)
     const existingReq = dispatchRequests.find(r =>
@@ -20706,7 +21341,7 @@ function decrementCoverStock(color, model, source, spaSn){
   row.qty -= 1;
   row.updated = editStamp();
   row.history = row.history || [];
-  row.history.push({at: toISO(), action:'decrement', spaSn: spaSn||'', by: ROLES[currentRole].label});
+  row.history.push({at: toISO(), action:'decrement', spaSn: spaSn||'', by: actorName()});
   return true;
 }
 
@@ -20843,7 +21478,7 @@ function priorityUpPendingCover(rowId, currentIdx){
   const item = row.pending.splice(currentIdx, 1)[0];
   row.pending.unshift(item);
   row.history = row.history || [];
-  row.history.push({at: toISO(), action:'priority-bumped', spaSn: item.spaSn||'', by: ROLES[currentRole].label, fromIdx: currentIdx, toIdx: 0});
+  row.history.push({at: toISO(), action:'priority-bumped', spaSn: item.spaSn||'', by: actorName(), fromIdx: currentIdx, toIdx: 0});
   addAct(`⬆ Priority bumped for S/N ${item.spaSn} (cover ${row.color}${row.model?' '+row.model:''})`,'var(--accent)');
   toast(`S/N ${item.spaSn} now first in pending queue`,'ok');
   renderCoverInventory(); updBadges();
@@ -20864,7 +21499,7 @@ function incrementCoverStock(color, model, source, spaSn, reason){
   row.qty += 1;
   row.updated = editStamp();
   row.history = row.history || [];
-  row.history.push({at: toISO(), mid: (Date.now().toString(36) + Math.random().toString(36).slice(2,8)), action:'increment', spaSn: spaSn||'', by: ROLES[currentRole].label, reason: reason||''});
+  row.history.push({at: toISO(), mid: (Date.now().toString(36) + Math.random().toString(36).slice(2,8)), action:'increment', spaSn: spaSn||'', by: actorName(), reason: reason||''});
   // After increment, try to fulfill any pending requests for this cover
   fulfillPendingCovers(row);
 }
@@ -20965,7 +21600,7 @@ async function printQRLabel(itemId, source){
     // Backfill: this older item doesn't have a tracking ID yet — generate one now
     item.trackingId = makeTrackingId(source === 'materials' ? 'MAT' : 'SPA');
     item.trackingState = item.trackingState || 'created-at-factory';
-    item.trackingHistory = item.trackingHistory || [{state:'created-at-factory', at: toISO(), by: ROLES[currentRole].label}];
+    item.trackingHistory = item.trackingHistory || [{state:'created-at-factory', at: toISO(), by: actorName()}];
     // CRITICAL: persist the backfill so the QR we're about to print actually
     // resolves back to a known item next time someone scans it. Without this
     // save, closing the tab after printing leaves a "ghost label" — paper has
@@ -21323,6 +21958,97 @@ async function printQRLabel(itemId, source){
 //   'receive'   → mark as 'received-at-warehouse' + prompt for position assignment
 //   'dispatch'  → mark as 'dispatched-out' (loading at warehouse for dealer delivery)
 let _qrScanState = null;
+
+// ── BATCH SCAN SESSION (v5.16) ────────────────────────────────────────────────
+// A memory layer AROUND the scanner: every scan outcome is recorded into a
+// session (counter + per-item list + close summary), and an item successfully
+// scanned once in the session is deduped (warn, no double action) — EXCEPT in
+// 'factory-request' mode, where repeat scans of the same item are the workflow
+// (pending→approved→shipped→received). Business logic is untouched: outcomes are
+// captured at the unified setScanResult helper, and legacy toast-only branches
+// are classified by the _scanCallWithSession wrapper. Core kept PURE for CI.
+function _scanSessionNew(mode){ return { mode: mode||'', startedAt: Date.now(), items: [], okKeys: {}, _lastKey: '' }; }
+function _scanSessionShouldDedup(sess, key){
+  if(!sess || !key) return false;
+  if(sess.mode === 'factory-request') return false;   // repeat scans ARE the workflow
+  return !!sess.okKeys[key];
+}
+function _scanSessionRecord(sess, key, kind, id, note){
+  if(!sess) return;
+  sess.items.push({ key: key||'', kind: kind||'ok', id: id||key||'', note: note||'', at: Date.now() });
+  if(kind === 'ok' && key) sess.okKeys[key] = true;
+}
+function _scanSessionSummary(sess){
+  const out = { total: 0, ok: 0, dup: 0, err: 0, warn: 0 };
+  if(!sess) return out;
+  for(const it of sess.items){
+    out.total++;
+    if(it.kind === 'ok') out.ok++;
+    else if(it.kind === 'dup') out.dup++;
+    else if(it.kind === 'err') out.err++;
+    else out.warn++;
+  }
+  return out;
+}
+window._scanSessionNew = _scanSessionNew; window._scanSessionShouldDedup = _scanSessionShouldDedup;
+window._scanSessionRecord = _scanSessionRecord; window._scanSessionSummary = _scanSessionSummary;
+
+let _scanSession = null;
+
+function _scanSessionRenderUI(){
+  if(!_scanSession) return;
+  const sum = _scanSessionSummary(_scanSession);
+  const chip = document.getElementById('qr-sess-count');
+  if(chip) chip.innerHTML = `📦 <strong>${sum.ok}</strong>${sum.err?` · <span style="color:#fca5a5">${sum.err}✗</span>`:''}${sum.dup?` · <span style="color:#fbbf24">${sum.dup}⟳</span>`:''}`;
+  const list = document.getElementById('qr-sess-list');
+  if(list){
+    const pal = { ok:'#86efac', err:'#fca5a5', dup:'#fbbf24', warn:'#fbbf24' };
+    const ico = { ok:'✓', err:'✗', dup:'⟳', warn:'⚠' };
+    list.innerHTML = _scanSession.items.slice(-6).reverse().map(it =>
+      `<div style="display:flex;gap:7px;align-items:baseline;font-size:11px;padding:2px 0">
+        <span style="color:${pal[it.kind]||'#fff'};font-weight:800">${ico[it.kind]||'•'}</span>
+        <span style="font-family:ui-monospace,monospace;font-weight:700;color:rgba(255,255,255,.9)">${escapeHTML(it.id)}</span>
+        <span style="color:rgba(255,255,255,.55);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHTML(it.note)}</span>
+      </div>`).join('');
+  }
+}
+
+// Short audible beep for scan feedback (iPhones have no vibrate API). Lazy
+// AudioContext created inside the camera user-gesture context; fully guarded.
+let _beepCtx = null;
+function _scanBeep(kind){
+  try {
+    _beepCtx = _beepCtx || new (window.AudioContext || window.webkitAudioContext)();
+    if(_beepCtx.state === 'suspended') _beepCtx.resume();
+    const o = _beepCtx.createOscillator(), g = _beepCtx.createGain();
+    o.connect(g); g.connect(_beepCtx.destination);
+    o.frequency.value = kind === 'ok' ? 880 : (kind === 'err' ? 220 : 550);
+    g.gain.setValueAtTime(0.12, _beepCtx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.0001, _beepCtx.currentTime + (kind === 'err' ? 0.28 : 0.12));
+    o.start(); o.stop(_beepCtx.currentTime + (kind === 'err' ? 0.3 : 0.14));
+  } catch(e){}
+}
+
+// Wrapper used by the scan loop + manual entry: runs handleQRPayload and, if the
+// branch only toast()ed (22 legacy branches don't call setScanResult), classifies
+// the outcome from the FIRST toast so the session still records it.
+function _scanCallWithSession(raw, mode){
+  if(!_scanSession){ handleQRPayload(raw, mode); return; }
+  const before = _scanSession.items.length;
+  const origToast = toast;
+  let firstToast = null;
+  try {
+    toast = function(msg, type){ if(firstToast === null) firstToast = { msg: String(msg||''), type: type||'ok' }; return origToast.apply(this, arguments); };
+    handleQRPayload(raw, mode);
+  } finally { toast = origToast; }
+  if(_scanSession && _scanSession.items.length === before){
+    const kind = firstToast ? (firstToast.type === 'err' ? 'err' : (firstToast.type === 'warn' || firstToast.type === 'amber') ? 'warn' : 'ok') : 'ok';
+    _scanSessionRecord(_scanSession, _scanSession._lastKey, kind, _scanSession._lastKey || '—', firstToast ? firstToast.msg.slice(0, 70) : '');
+    _scanSessionRenderUI();
+  }
+}
+window._scanCallWithSession = _scanCallWithSession;
+
 async function openQRScanner(mode, hint){
   const overlay = document.createElement('div');
   overlay.id = 'qr-scan-overlay';
@@ -21349,7 +22075,10 @@ async function openQRScanner(mode, hint){
           <div style="font-size:14px;font-weight:700">📷 ${titleByMode[mode]||'Scan QR'}</div>
           <div style="font-size:11px;color:rgba(255,255,255,.6);margin-top:2px">${sub}</div>
         </div>
-        <button onclick="closeQRScanner()" style="background:rgba(255,255,255,.1);border:0;color:#fff;width:32px;height:32px;border-radius:50%;cursor:pointer;font-size:16px">✕</button>
+        <div style="display:flex;align-items:center;gap:8px">
+          <div id="qr-sess-count" style="background:rgba(251,191,36,.15);border:1px solid rgba(251,191,36,.4);color:#fbbf24;font-size:12px;font-weight:700;padding:5px 10px;border-radius:20px;white-space:nowrap">📦 <strong>0</strong></div>
+          <button onclick="closeQRScanner()" style="background:rgba(255,255,255,.1);border:0;color:#fff;width:32px;height:32px;border-radius:50%;cursor:pointer;font-size:16px">✕</button>
+        </div>
       </div>
       <div style="position:relative;background:#000;aspect-ratio:1/1;display:flex;align-items:center;justify-content:center">
         <video id="qr-vid" style="width:100%;height:100%;object-fit:cover" playsinline muted></video>
@@ -21368,9 +22097,10 @@ async function openQRScanner(mode, hint){
         <div style="margin-top:10px;padding-top:10px;border-top:1px solid rgba(255,255,255,.08)">
           <div style="font-size:10px;color:rgba(255,255,255,.5);margin-bottom:5px">Or enter tracking ID manually:</div>
           <div style="display:flex;gap:6px">
-            <input id="qr-manual" placeholder="ASPN-SPA-XXXXXX" value="${hint||''}" style="flex:1;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.15);color:#fff;padding:8px 10px;border-radius:6px;font-family:ui-monospace,monospace;font-size:12px" onkeydown="if(event.key==='Enter')handleQRPayload(this.value, '${mode}')">
-            <button onclick="handleQRPayload(document.getElementById('qr-manual').value, '${mode}')" style="background:#fbbf24;color:#0f172a;border:0;padding:8px 14px;border-radius:6px;font-weight:700;font-size:12px;cursor:pointer">Submit</button>
+            <input id="qr-manual" placeholder="ASPN-SPA-XXXXXX" value="${hint||''}" style="flex:1;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.15);color:#fff;padding:8px 10px;border-radius:6px;font-family:ui-monospace,monospace;font-size:12px" onkeydown="if(event.key==='Enter')_scanCallWithSession(this.value, '${mode}')">
+            <button onclick="_scanCallWithSession(document.getElementById('qr-manual').value, '${mode}')" style="background:#fbbf24;color:#0f172a;border:0;padding:8px 14px;border-radius:6px;font-weight:700;font-size:12px;cursor:pointer">Submit</button>
           </div>
+          <div id="qr-sess-list" style="margin-top:8px;max-height:96px;overflow-y:auto"></div>
         </div>
       </div>
     </div>`;
@@ -21398,6 +22128,7 @@ async function openQRScanner(mode, hint){
   document.getElementById('qr-status').textContent = 'Point camera at QR code';
 
   _qrScanState = {stream, mode, scanning:true};
+  _scanSession = _scanSessionNew(mode);   // v5.16: batch session starts with the camera
   const ctx = canvas.getContext('2d');
   // Scan loop: runs continuously as long as the overlay is open (_qrScanState exists).
   // Frame processing is gated behind _qrScanState.scanning so we can pause briefly while
@@ -21415,7 +22146,7 @@ async function openQRScanner(mode, hint){
       const code = jsQR(imageData.data, imageData.width, imageData.height, {inversionAttempts: 'dontInvert'});
       if(code && code.data){
         _qrScanState.scanning = false;  // pause until handleQRPayload finishes + 1.4s cooldown
-        handleQRPayload(code.data, mode);
+        _scanCallWithSession(code.data, mode);   // v5.16: session-aware
         // Note: do NOT return here. Keep rescheduling so the loop stays alive for the
         // next scan. The 1.4s timeout in handleQRPayload will flip scanning back to true.
       }
@@ -21432,6 +22163,17 @@ function closeQRScanner(){
   _qrScanState = null;
   const o = document.getElementById('qr-scan-overlay');
   if(o) o.remove();
+  // v5.16 — batch session summary: one glance tells the loader if the whole
+  // truck/order went through, and the activity ticker records who did it.
+  if(_scanSession && _scanSession.items.length){
+    const sum = _scanSessionSummary(_scanSession);
+    const modeLbl = ({load:'load on truck', receive:'receive at WH', dispatch:'dispatch', 'sched-stage':'stage for dispatch', 'factory-pickup':'dealer pickup', 'factory-receive':'receive at factory', 'factory-request':'factory request'})[_scanSession.mode] || _scanSession.mode || 'scan';
+    const parts = [`${sum.ok} ok`]; if(sum.dup) parts.push(`${sum.dup} duplicate${sum.dup>1?'s':''}`); if(sum.err) parts.push(`${sum.err} failed`); if(sum.warn) parts.push(`${sum.warn} warning${sum.warn>1?'s':''}`);
+    toast(`📷 Scan session (${modeLbl}): ${parts.join(' · ')}`, sum.err ? 'err' : 'ok');
+    try { addAct(`📷 Scan session — ${modeLbl}: ${parts.join(' · ')}`, sum.err ? 'var(--red)' : 'var(--teal)'); } catch(e){}
+    try { if(typeof updBadges === 'function') updBadges(); } catch(e){}
+  }
+  _scanSession = null;
 }
 
 // Show a big, impossible-to-miss flash overlay on the scanner after a scan completes.
@@ -21462,6 +22204,7 @@ function flashScanResult(kind, title, subtitle){
   }, 1800);
   // Haptic feedback on supported devices
   try { if(navigator.vibrate) navigator.vibrate(kind === 'ok' ? [40,30,40] : [120]); } catch(e){}
+  _scanBeep(kind);   // v5.16: audible feedback (iPhones have no vibrate API)
 }
 
 // Unified scan-result handler: updates both the small text below the camera AND
@@ -21478,6 +22221,12 @@ function setScanResult(kind, id, note){
     resultEl.innerHTML = `<span style="color:${palette[kind]||'#fff'}">${iconChar[kind]||'•'} <strong>${id||''}</strong>${note?' · '+note:''}</span>`;
   }
   flashScanResult(kind, id||'', note||'');
+  // v5.16 — record every unified outcome into the batch session + live counter/list
+  if(_scanSession){
+    if(_scanSession._skipHook){ _scanSession._skipHook = false; }
+    else { _scanSessionRecord(_scanSession, _scanSession._lastKey || String(id||''), kind, String(id||''), String(note||'')); }
+    _scanSessionRenderUI();
+  }
 }
 
 // Process a scanned (or manually entered) QR payload. Routes the item through
@@ -21521,6 +22270,22 @@ function handleQRPayload(raw, mode){
     }
   }
   if(!tid){ toast('No tracking ID detected','err'); return; }
+
+  // v5.16 — batch-session dedup: an item already scanned OK in THIS session
+  // doesn't fire its action twice (double-scan while loading a truck). Failed
+  // scans stay retryable, and 'factory-request' mode is exempt (repeat scans
+  // advance the request — that's the workflow). The key binds the session
+  // records to this scan for the wrapper/setScanResult hooks.
+  if(_scanSession){
+    const _sessKey = parsedSn || tid;
+    _scanSession._lastKey = _sessKey;
+    if(_scanSessionShouldDedup(_scanSession, _sessKey)){
+      _scanSessionRecord(_scanSession, _sessKey, 'dup', _sessKey, 'Already scanned this session');
+      _scanSession._skipHook = true;   // the manual 'dup' record above stands; don't double-log via the hook
+      setScanResult('warn', _sessKey, 'Already scanned this session — skipped');
+      return;
+    }
+  }
 
   // ── SCHEDULE SCAN → STAGE (sched-stage mode) ──────────────────────────
   // Launched from a scheduled dispatch card. Each scanned tub is moved to
@@ -21880,7 +22645,7 @@ function handleQRPayload(raw, mode){
   snapshot('qr scan ' + mode);
   const item = found.item;
   const at = toISO();
-  const by = ROLES[currentRole].label;
+  const by = actorName();
   item.trackingHistory = item.trackingHistory || [];
 
   if(mode === 'load'){
@@ -22210,10 +22975,10 @@ function holdFactoryItem(id){
   f.onHold = {
     reason: (reason||'').trim() || 'No reason given',
     since: toISO(),
-    by: ROLES[currentRole].label
+    by: actorName()
   };
   f.trackingHistory = f.trackingHistory || [];
-  f.trackingHistory.push({state:'on-hold', at:toISO(), by:ROLES[currentRole].label, note:f.onHold.reason});
+  f.trackingHistory.push({state:'on-hold', at:toISO(), by: actorName(), note:f.onHold.reason});
   f.updatedAt = editStamp();   // last-edit-wins: keep the hold from being reverted by a stale remote
   addAct(`⏸ ${f.sn||f.dealer} put ON HOLD: ${f.onHold.reason}`,'var(--text2)');
   postMovement({type:'344', sn:f.sn, material:f.type||'', qty:f.qty||1, from:LOC_FACTORY, to:LOC_FACTORY, stockType:'blocked', note:f.onHold.reason});
@@ -22230,7 +22995,7 @@ function resumeFactoryItem(id){
   const wasReason = f.onHold.reason;
   delete f.onHold;
   f.trackingHistory = f.trackingHistory || [];
-  f.trackingHistory.push({state:'created', at:toISO(), by:ROLES[currentRole].label, note:'Resumed from hold (was: '+wasReason+')'});
+  f.trackingHistory.push({state:'created', at:toISO(), by: actorName(), note:'Resumed from hold (was: '+wasReason+')'});
   f.updatedAt = editStamp();   // last-edit-wins: keep the resume from being reverted by a stale remote
   addAct(`▶ ${f.sn||f.dealer} resumed from hold`,'var(--teal)');
   postMovement({type:'343', sn:f.sn, material:f.type||'', qty:f.qty||1, from:LOC_FACTORY, to:LOC_FACTORY, stockType:'unrestricted', note:'Resumed from hold'});
@@ -22296,7 +23061,7 @@ function shipFromFactory(id){
     try{ postMovement({type:'RTS', sn:f.sn||'', material:f.type||'accessory', qty:f.qty||1, from:LOC_FACTORY, to:LOC_WAREHOUSE(''), stockType:'unrestricted', note:'Released \u2014 married accessory ready (S/N '+(f.marriedSn||'?')+')'}); }catch(e){}
     f.trackingId = f.trackingId || makeTrackingId('ACC');
     f.trackingHistory = f.trackingHistory || [];
-    f.trackingHistory.push({state:'ready-to-ship', at:toISO(), by:ROLES[currentRole].label, note:'Marked ready — waiting for Truck/Transit to scan'});
+    f.trackingHistory.push({state:'ready-to-ship', at:toISO(), by: actorName(), note:'Marked ready — waiting for Truck/Transit to scan'});
     // Mark the linked marriage as ready-to-ship (NOT delivered — that only
     // happens when Receiving accepts the arrived accessory at the warehouse)
     const linkedMarriage = marriages.find(m => m.accessoryId === f.id && m.status === 'pending');
@@ -22332,7 +23097,7 @@ function shipFromFactory(id){
   f.trackingState = 'ready-to-ship';
   try{ postMovement({type:'RTS', sn:f.sn||'', material:f.type||'', qty:f.qty||1, from:LOC_FACTORY, to:LOC_WAREHOUSE(''), stockType:'unrestricted', note:'Released \u2014 Ship to WH (awaiting truck)'}); }catch(e){}
   f.trackingHistory = f.trackingHistory || [];
-  f.trackingHistory.push({state:'ready-to-ship', at:toISO(), by:ROLES[currentRole].label, note:'Marked ready for truck pickup'});
+  f.trackingHistory.push({state:'ready-to-ship', at:toISO(), by: actorName(), note:'Marked ready for truck pickup'});
   addAct(`📦 Ready for pickup: ${f.sn||f.dealer}`,'var(--amber)');
   toast(`${f.sn||f.dealer} marked ready — Truck / Transit will scan to load`,'ok');
   renderFactory(); updBadges();
@@ -22367,7 +23132,7 @@ function markReadyForPickup(id){
   f.trackingState = 'ready-for-pickup';
   f.trackingId = f.trackingId || makeTrackingId(isAcc ? 'ACC' : 'SPA');
   f.trackingHistory = f.trackingHistory || [];
-  f.trackingHistory.push({state:'ready-for-pickup', at:toISO(), by:ROLES[currentRole].label, note:'Dealer pickup at factory'});
+  f.trackingHistory.push({state:'ready-for-pickup', at:toISO(), by: actorName(), note:'Dealer pickup at factory'});
   if(isAcc && f.marriedSn){
     const lm = marriages.find(m => m.accessoryId === f.id && m.status === 'pending');
     if(lm){ lm.status = 'ready-for-pickup'; lm.readyAt = toISO(); }
@@ -22390,7 +23155,7 @@ function undoFactoryReady(id){
   snapshot('undo factory ready');
   f.trackingHistory = (f.trackingHistory||[]).filter(h => h.state !== wasState);
   f.trackingState = 'created-at-factory';
-  f.trackingHistory.push({state:'created-at-factory', at:toISO(), by:ROLES[currentRole].label, note:`Undo ${wasState}`});
+  f.trackingHistory.push({state:'created-at-factory', at:toISO(), by: actorName(), note:`Undo ${wasState}`});
   const lm = marriages.find(m => m.accessoryId === f.id && (m.status === 'ready-to-ship' || m.status === 'ready-for-pickup'));
   if(lm){ lm.status = 'pending'; lm.updatedAt = editStamp(); delete lm.readyAt; }
   addAct(`↶ Returned to factory inventory: ${f.sn||f.dealer}`,'var(--text2)');
@@ -22437,7 +23202,7 @@ function dispatchPickupFromFactory(id, viaScan){
   snapshot('dispatch dealer pickup from factory');
   const at = toISO();
   f.trackingHistory = f.trackingHistory || [];
-  f.trackingHistory.push({state:'dispatched-from-factory', at, by:ROLES[currentRole].label, note:'Dealer pickup at factory'});
+  f.trackingHistory.push({state:'dispatched-from-factory', at, by: actorName(), note:'Dealer pickup at factory'});
   postMovement({type:'601', sn:f.sn, material:f.type||'', qty:f.qty||1, from:LOC_FACTORY, to:LOC_DEALER(f.dealer), stockType:'unrestricted', note:'Dealer pickup at factory'});
   if(typeof dispatched !== 'undefined' && Array.isArray(dispatched)){
     dispatched.unshift({
@@ -22482,6 +23247,7 @@ function rmFromFactory(id){
   const f = factory.find(x=>x.id===id); if(!f) return;
   if(!confirm(`Remove "${f.sn||f.dealer}" from factory?`)) return;
   snapshot('remove from factory');
+  _trashAdd('factory', `${f.sn||f.dealer} · ${f.model||f.type||'item'} · ${f.dealer||''}`, f);   // v5.19: 30-day restore
   // Also remove orphaned marriages — pending OR ready-to-ship (both still
   // hold a reference to a factory item that's now being deleted). In-transit
   // marriages are NOT cleaned up here because by then the accessory has
@@ -22868,8 +23634,8 @@ function renderMarriages(){
         ${splitBanner}
         <div class="mar-card-body">
           <div class="mar-card-row"><span class="mar-card-lbl">Dealer</span><span class="mar-card-val">${m.spaDealer || '<em style="color:var(--text3);font-weight:400">— not set —</em>'}</span></div>
-          <div class="mar-card-row"><span class="mar-card-lbl">Accessory</span><span class="mar-card-val mar-card-acc">${m.accessoryName}${(m.accessoryQty||1) > 1 ? ` <small style="color:var(--text3);font-weight:600">× ${m.accessoryQty}</small>` : ''}</span></div>
-          ${m.notes ? `<div class="mar-card-row"><span class="mar-card-lbl">Notes</span><span class="mar-card-val mar-card-notes">${m.notes}</span></div>` : ''}
+          <div class="mar-card-row"><span class="mar-card-lbl">Accessory</span><span class="mar-card-val mar-card-acc">${escapeHTML(m.accessoryName)}${(m.accessoryQty||1) > 1 ? ` <small style="color:var(--text3);font-weight:600">× ${m.accessoryQty}</small>` : ''}</span></div>
+          ${m.notes ? `<div class="mar-card-row"><span class="mar-card-lbl">Notes</span><span class="mar-card-val mar-card-notes">${escapeHTML(m.notes)}</span></div>` : ''}
           <div class="mar-card-row mar-card-meta"><span class="mar-card-lbl">Created</span><span>${fmtD(m.created)}${m.deliveredDate ? ` · delivered ${fmtD(m.deliveredDate)}` : ''}</span></div>
           ${marriageDispatchMode(m) ? `<div class="mar-card-row mar-card-meta"><span class="mar-card-lbl">Dispatch</span><span>${marriageModePill(m)}</span></div>` : ''}
         </div>
@@ -22923,9 +23689,9 @@ function renderMarriages(){
         <td>${badge}${extraInfo}${marriageDispatchMode(m) ? `<div style="margin-top:4px">${marriageModePill(m)}</div>` : ''}</td>
         <td class="td-m">${m.spaSn}${inWH?' <span style="font-size:9px;color:var(--teal)" title="Spa is at receiving warehouse">●</span>':' <span style="font-size:9px;color:var(--text3)" title="Spa not yet at warehouse">○</span>'}</td>
         <td>${m.spaDealer||'—'}</td>
-        <td style="font-weight:500">${m.accessoryName}${m.mountType==='inside'?' <span style="font-size:8px;background:#dbeafe;color:#1e40af;padding:1px 6px;border-radius:4px;font-weight:700;letter-spacing:.03em;white-space:nowrap" title="Packed inside the tub — never on the MINV shelf">🛁 INSIDE TUB</span>':''}</td>
+        <td style="font-weight:500">${escapeHTML(m.accessoryName)}${m.mountType==='inside'?' <span style="font-size:8px;background:#dbeafe;color:#1e40af;padding:1px 6px;border-radius:4px;font-weight:700;letter-spacing:.03em;white-space:nowrap" title="Packed inside the tub — never on the MINV shelf">🛁 INSIDE TUB</span>':''}</td>
         <td class="td-s" data-hide-mobile>${m.accessoryQty||1}</td>
-        <td class="td-s" data-hide-mobile>${m.notes||'—'}</td>
+        <td class="td-s" data-hide-mobile>${escapeHTML(m.notes||'—')}</td>
         <td class="td-s" data-hide-mobile>${fmtD(m.created)}</td>
         <td style="text-align:right;white-space:nowrap">
           <button class="btn btn-sm" style="background:#f5f3ff;border-color:#c4b5fd;color:#6d28d9;font-weight:600" onclick="openMarriageTrail(${m.id})" title="Full provenance trail — every scan/manual step + dispatch mode">🕘 Trail</button>
@@ -23617,7 +24383,7 @@ function shipMarriageFromMarriages(mid){
   acc.trackingState = 'ready-to-ship';
   acc.trackingId = acc.trackingId || makeTrackingId('ACC');
   acc.trackingHistory = acc.trackingHistory || [];
-  acc.trackingHistory.push({state:'ready-to-ship', at:toISO(), by:ROLES[currentRole].label, note:'Marked ready by Marriages crew — waiting for Truck'});
+  acc.trackingHistory.push({state:'ready-to-ship', at:toISO(), by: actorName(), note:'Marked ready by Marriages crew — waiting for Truck'});
   m.status = 'ready-to-ship'; m.updatedAt = editStamp();
   m.readyAt = toISO();
   addAct(`📦 Marriage ready for Truck pickup: ${m.accessoryName} → S/N ${m.spaSn}`,'var(--amber)');
@@ -23652,7 +24418,7 @@ function markMarriageReadyForPickup(mid){
     acc.trackingState = 'ready-for-pickup';
     acc.trackingId = acc.trackingId || makeTrackingId('ACC');
     acc.trackingHistory = acc.trackingHistory || [];
-    acc.trackingHistory.push({state:'ready-for-pickup', at:toISO(), by:ROLES[currentRole].label, note:'Dealer pickup at factory (Marriages crew)'});
+    acc.trackingHistory.push({state:'ready-for-pickup', at:toISO(), by: actorName(), note:'Dealer pickup at factory (Marriages crew)'});
   }
   m.status = 'ready-for-pickup'; m.updatedAt = editStamp();
   m.readyAt = toISO();
@@ -23675,7 +24441,7 @@ function undoMarriageReady(mid){
   if(acc && (acc.trackingState === 'ready-for-pickup' || acc.trackingState === 'ready-to-ship')){
     acc.trackingHistory = (acc.trackingHistory||[]).filter(h => h.state !== acc.trackingState);
     acc.trackingState = 'created-at-factory';
-    acc.trackingHistory.push({state:'created-at-factory', at:toISO(), by:ROLES[currentRole].label, note:`Undo ${wasState}`});
+    acc.trackingHistory.push({state:'created-at-factory', at:toISO(), by: actorName(), note:`Undo ${wasState}`});
   }
   m.status = 'pending'; m.updatedAt = editStamp();
   delete m.readyAt;
@@ -23742,7 +24508,7 @@ function dispatchMarriagePickup(mid){
   const acc = factory.find(f => f.id === m.accessoryId);
   if(acc){
     acc.trackingHistory = acc.trackingHistory || [];
-    acc.trackingHistory.push({state:'dispatched-from-factory', at, by:ROLES[currentRole].label, note:'Dealer pickup at factory'});
+    acc.trackingHistory.push({state:'dispatched-from-factory', at, by: actorName(), note:'Dealer pickup at factory'});
     _tombstoneFactoryRow(acc);         // v5.05: block stale-remote resurrection (S/N-less covers/accessories)
     factory = factory.filter(f => f.id !== acc.id);
   }
@@ -24657,7 +25423,7 @@ function saveCoverAdd(){
     id: ++nid,
     color, model, location, qty, lowThreshold, source,
     updated: toISO(),
-    history: [{at: toISO(), action:'created', by: ROLES[currentRole].label, qty}]
+    history: [{at: toISO(), action:'created', by: actorName(), qty}]
   });
   addAct(`Added cover stock: ${color}${model?' '+model:''} × ${qty} at ${source==='factory'?'Factory':'Warehouse'}`, '#6366f1');
   toast(`${color} added to ${source==='factory'?'Factory':'Warehouse'} inventory`, 'ok');
@@ -24746,10 +25512,10 @@ function saveCoverEdit(id){
   c.updated = editStamp();
   c.history = c.history || [];
   if(oldQty !== qty){
-    c.history.push({at: toISO(), action:'manual-edit', qtyBefore: oldQty, qty, by: ROLES[currentRole].label});
+    c.history.push({at: toISO(), action:'manual-edit', qtyBefore: oldQty, qty, by: actorName()});
   }
   if(oldSource !== source){
-    c.history.push({at: toISO(), action:'source-changed', from: oldSource, to: source, by: ROLES[currentRole].label});
+    c.history.push({at: toISO(), action:'source-changed', from: oldSource, to: source, by: actorName()});
   }
   // Apply the Floor Map cell chosen in the dropdown — reassign the model→cell
   // mapping (works for warehouse covers with a model). (v4.92)
@@ -24776,7 +25542,7 @@ function adjustCoverQty(id, delta){
   c.qty += delta;
   c.updated = editStamp();
   c.history = c.history || [];
-  c.history.push({at: toISO(), action: delta>0 ? 'manual-increment' : 'manual-decrement', qty: c.qty, by: ROLES[currentRole].label});
+  c.history.push({at: toISO(), action: delta>0 ? 'manual-increment' : 'manual-decrement', qty: c.qty, by: actorName()});
   // If we just added stock and there are pending entries, fulfill them
   if(delta > 0 && Array.isArray(c.pending) && c.pending.length > 0){
     fulfillPendingCovers(c);
@@ -24789,6 +25555,7 @@ function rmCover(id){
   const c = coverInventory.find(x => x.id === id); if(!c) return;
   if(!confirm(`Remove "${c.color}" from cover inventory?\n\nCurrent qty: ${c.qty}\n\nThis only removes the inventory row — any spas already assigned this cover keep their record.`)) return;
   snapshot('remove cover row');
+  _trashAdd('cover', `Cover · ${c.color}${c.model?' '+c.model:''} · qty ${c.qty}`, c);   // v5.19: 30-day restore
   coverInventory = coverInventory.filter(x => x.id !== id);
   addAct(`🗑 Removed cover row: ${c.color}${c.model?' ('+c.model+')':''} — was qty ${c.qty}`, 'var(--red)');
   toast('Cover row removed','ok');
@@ -24877,7 +25644,7 @@ function saveCoverTransfer(fromId){
     qty,
     to: toSrc,
     note,
-    by: ROLES[currentRole].label
+    by: actorName()
   });
   // Find or create destination row
   let toRow = coverInventory.find(x =>
@@ -24908,7 +25675,7 @@ function saveCoverTransfer(fromId){
     qty,
     from: fromSrc,
     note,
-    by: ROLES[currentRole].label
+    by: actorName()
   });
   // If destination has pending entries, fulfill them with the new stock
   fulfillPendingCovers(toRow);
@@ -25360,7 +26127,7 @@ function markRequestShipped(rid){
       invRow.qty -= r.qty;
       invRow.updated = editStamp();
       invRow.history = invRow.history || [];
-      invRow.history.push({at: toISO(), action:'shipped-to-factory', requestId: rid, qty: r.qty, by: ROLES[currentRole].label});
+      invRow.history.push({at: toISO(), action:'shipped-to-factory', requestId: rid, qty: r.qty, by: actorName()});
       invDeducted = r.qty;
     }
     extraNote = ` · Deducted ${r.qty} from cover stock${invDeducted ? ' (Warehouse inv)' : ''}`;
@@ -25450,7 +26217,7 @@ function markRequestReceived(rid){
     invRow.qty += r.qty;
     invRow.updated = editStamp();
     invRow.history = invRow.history || [];
-    invRow.history.push({at: toISO(), action:'received-from-warehouse', requestId: rid, qty: r.qty, by: ROLES[currentRole].label});
+    invRow.history.push({at: toISO(), action:'received-from-warehouse', requestId: rid, qty: r.qty, by: actorName()});
     // Try to fulfill any pending entries with the new stock
     fulfillPendingCovers(invRow);
     extraNote = ` · Added ${r.qty} to Factory cover inventory`;
@@ -25844,6 +26611,7 @@ function saveState(){
       // "local newer than cloud → push" recovery wouldn't trigger and the edit would
       // sit unpushed until the next scheduled sync. Bumping here pushes immediately.
       _fbLastLocalWriteAt = now;
+      try { updateAuthBadge(); } catch(e){}   // v5.17: pending count is live while offline
     }
     // After persisting locally, propagate to other devices via Firebase (debounced inside).
     // Skipped automatically when applying a remote update (echo guard).
@@ -25871,6 +26639,7 @@ function flushSave(){
     _lastSavedHash = stateHash();  // mark integrity watchdog "clean"
     _lastSavedSig = _stateSig();   // mark sig as "seen" to prevent echo in saveState
     _fbLastLocalWriteAt = now;
+    try { updateAuthBadge(); } catch(e){}   // v5.17: pending count is live while offline
   }catch(err){
     console.warn('flushSave failed:', err.message);
     if(err.name === 'QuotaExceededError'){ toast('⚠ Storage full — export backup soon', 'err'); }
@@ -25957,23 +26726,25 @@ setInterval(checkStateIntegrity, 5000);
 async function verifyCloudWrite(expectedTimestamp){
   if(!_fbDb || !_fbUser || !_fbAuthorized) return false;
   try {
-    const snap = await _fbDb.ref('state/shared/latest').once('value');
-    const payload = snap.val();
-    if(!payload){
+    // v5.11 — read ONLY the /timestamp child (a few bytes). The old code pulled the
+    // FULL shared payload (multi-MB) down on every push just to compare this number.
+    const snap = await _fbDb.ref('state/shared/latest/timestamp').once('value');
+    const cloudTs = snap.val();
+    if(cloudTs == null){
       _fbConsecutiveFailures++;
       console.warn('[fb verify] cloud is empty after push');
       return false;
     }
     // ── ACCEPT NEWER timestamps as success ──
-    // Strict equality (payload.timestamp !== expectedTimestamp) caused false
+    // Strict equality (cloudTs !== expectedTimestamp) caused false
     // failures whenever another device pushed in the window between our write
     // and our verify read. As long as the cloud has SOMETHING >= our timestamp,
     // our write landed (and was either kept, or superseded by a still-newer
     // write from someone else — both are healthy outcomes). Only treat strictly
     // older timestamps as failures: that means our write never reached the cloud.
-    if(payload.timestamp < expectedTimestamp){
+    if(cloudTs < expectedTimestamp){
       _fbConsecutiveFailures++;
-      console.warn('[fb verify] cloud timestamp is older than expected — our write was lost. expected:', expectedTimestamp, 'got:', payload.timestamp);
+      console.warn('[fb verify] cloud timestamp is older than expected — our write was lost. expected:', expectedTimestamp, 'got:', cloudTs);
       return false;
     }
     _fbConsecutiveFailures = 0;
@@ -27045,6 +27816,7 @@ setTimeout(()=>{ try{ reconcileCoverRequests(); }catch(e){} }, 6000);  // clear 
 // shipped the cover but never deducted it. Runs after the initial cloud sync has settled
 // so it operates on the merged (true) inventory; idempotent + self-healing on every load.
 setTimeout(()=>{ try{ reconcileDispatchedCovers({auto:true}); }catch(e){ console.warn('[cover reconcile]', e); } }, 7500);
+setTimeout(()=>{ try{ _trashHousekeep(); }catch(e){} }, 8500);   // v5.19: 30-day trash purge (deterministic on every device)
 setInterval(autoBackupToFirebase, 12 * 60 * 60 * 1000);
 
 // Global hotkeys
@@ -27599,9 +28371,23 @@ document.addEventListener('keydown', e=>{
   async function cleanupOldSnapshots(prefix, keep){
     try {
       const ref = _fbDb.ref(`state/${_fbDeviceId}/auto_snapshots`);
-      const snap = await ref.once('value');
-      const all = snap.val() || {};
-      const matching = Object.keys(all).filter(k => k.startsWith(prefix));
+      // v5.11 — list KEYS ONLY via the RTDB REST shallow query (?shallow=true returns
+      // {key:true,...}, a few bytes). The old code did ref.once('value'), downloading
+      // every stored snapshot payload (~dozens of MB) just to read the key names.
+      let allKeys = null;
+      try {
+        const dbUrl = (_fbDb.app && _fbDb.app.options && _fbDb.app.options.databaseURL) || '';
+        const token = _fbUser && _fbUser.getIdToken ? await _fbUser.getIdToken() : '';
+        if(dbUrl){
+          const res = await fetch(`${dbUrl}/state/${encodeURIComponent(_fbDeviceId)}/auto_snapshots.json?shallow=true${token?('&auth='+encodeURIComponent(token)):''}`);
+          if(res.ok){ const obj = await res.json(); allKeys = obj ? Object.keys(obj) : []; }
+        }
+      } catch(e){ /* REST unavailable → fall back below */ }
+      if(allKeys === null){
+        const snap = await ref.once('value');   // fallback: legacy full download
+        allKeys = Object.keys(snap.val() || {});
+      }
+      const matching = allKeys.filter(k => k.startsWith(prefix));
       if(matching.length <= keep) return;
       matching.sort(); // alphabetical = chronological for our labels
       const toDelete = matching.slice(0, matching.length - keep);
