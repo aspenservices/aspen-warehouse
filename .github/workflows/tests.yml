@@ -1,0 +1,20 @@
+name: Warehouse Tests
+# Runs the full simulation/audit suite on every push and pull request.
+# A red X on a commit means a test failed — open the run to see which one.
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install AST parser (used by the audit test)
+        run: npm install acorn acorn-walk --no-save
+      - name: Run test suite
+        run: node run-all.js index.html
