@@ -4733,7 +4733,7 @@ let _fbInitAttempts = 0;
 //   /app_version/current  (in Firebase console, manually, OR call
 //   pushVersionToFirebase() from the Admin console at deploy time)
 // ══════════════════════════════════════════════════════════════════
-const APP_VERSION = 'v5.20';
+const APP_VERSION = 'v5.21';
 window.APP_VERSION = APP_VERSION;
 
 // ── DATA EPOCH (generation guard) ────────────────────────────────────
@@ -10935,10 +10935,13 @@ function renderDash(){
   const swim=units.filter(u=>u.type==='swim').length;
   const extra=units.filter(u=>u.type==='extra').length;
   const occ=new Set(units.map(u=>u.pos)).size;
-  // Real storage capacity: only count cells where COL_TYPE is 'stor', excluding row N (elevators only)
-  const storageCols = Object.keys(COL_TYPE).filter(c=>COL_TYPE[c]==='stor').length;
-  const storageRows = ROWS.filter(r=>r!==ELEVATOR_ROW).length;
-  const total = storageCols * storageRows;
+  // Real storage capacity (v5.21): count the BLUEPRINT's spa-storage cells.
+  // The old math used COL_TYPE/ROWS — legacy stubs left EMPTY by the 2026-05-17
+  // blueprint refactor — so total was always 0 ("Of 0 positions", "Infinity%").
+  // isSpaStorageCell honors the user's row/cell overrides, so a row Alberto
+  // re-types in the Floor Map editor changes this count live.
+  let total = 0;
+  try { for(const _rn of ROW_NUMBERS_NEW){ for(const _cl of COLS_NEW){ if(isSpaStorageCell(String(_rn), _cl)) total++; } } } catch(e){ console.warn('[capacity]', e); }
   const pend=incoming.filter(i=>i.status==='pending').length;
   const pct=n=>units.length?Math.round(n/units.length*100):0;
   const marPending = marriages.filter(isMarriageActive).length;
@@ -10984,7 +10987,7 @@ function renderDash(){
       <div class="pr"><div class="pr-hd"><span class="pr-lbl">${l}</span><span class="pr-val">${c} (${pct(c)}%)</span></div>
       <div class="pr-bar"><div class="pr-fill" style="width:${pct(c)}%;background:${col}"></div></div></div>`).join('')}
     <div class="sep"></div>
-    <div class="pr"><div class="pr-hd"><span class="pr-lbl">Floor Occupancy</span><span class="pr-val">${occ}/${total} (${Math.round(occ/total*100)}%)</span></div>
+    <div class="pr"><div class="pr-hd"><span class="pr-lbl">Floor Occupancy</span><span class="pr-val">${occ}/${total}${total ? ` (${Math.round(occ/total*100)}%)` : ''}</span></div>
     <div class="pr-bar"><div class="pr-fill" style="width:${Math.round(occ/total*100)}%;background:var(--accent)"></div></div></div>
   `;
   document.getElementById('dash-act').innerHTML=activity.length?activity.slice(0,5).map(a=>`
