@@ -4733,7 +4733,7 @@ let _fbInitAttempts = 0;
 //   /app_version/current  (in Firebase console, manually, OR call
 //   pushVersionToFirebase() from the Admin console at deploy time)
 // ══════════════════════════════════════════════════════════════════
-const APP_VERSION = 'v5.21';
+const APP_VERSION = 'v5.22';
 window.APP_VERSION = APP_VERSION;
 
 // ── DATA EPOCH (generation guard) ────────────────────────────────────
@@ -5649,6 +5649,7 @@ function _fbAttachV2Listeners(){
 // Start listening for remote state updates. Called on successful auth.
 function fbStartRealtimeSync(){
   if(!_fbDb || _fbSharedRef || _fbV2CollRef) return;
+  _fbStartConnectionMonitor();   // v5.22: badge/reconnect/server-clock live on BOTH paths
   // v5.20 — prefer the per-collection v2 channel when the cloud already has it:
   // this device then NEVER downloads the legacy full blob again. If v2 doesn't
   // exist yet (first boot after this deploy), stay on the v1 listener for THIS
@@ -5737,6 +5738,18 @@ function _fbAttachV1Listener(){
   });
   console.log('[firebase] realtime listener attached on state/shared/latest');
 
+  _fbStartConnectionMonitor();   // v5.22: shared with the v2 path (see below)
+}
+
+// ── CONNECTION MONITOR + SERVER CLOCK (v5.22) ──────────────────────────────────
+// Extracted OUT of the v1 listener: the v5.20 refactor left this block inside
+// _fbAttachV1Listener, so a session booting on the v2 per-collection channel
+// never installed it — the badge sat on 'Reconnecting…' forever (while sync
+// actually worked), the reconnect flush/pull never armed, and fbServerNow()
+// lost its server-clock offset. Now BOTH boot paths call this; the internal
+// guards make repeat calls a no-op.
+function _fbStartConnectionMonitor(){
+  if(!_fbDb) return;
   // ── CONNECTION STATE MONITOR ──
   // Firebase exposes a special path '.info/connected' that's true when the
   // WebSocket is alive and false when it isn't. We use this to:

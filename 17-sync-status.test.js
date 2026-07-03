@@ -46,6 +46,7 @@ chk(src.includes('Back online — syncing'), 'reconnect flush toast missing');
 chk((src.match(/addEventListener\('offline'/g)||[]).length>=1, 'browser offline listener missing');
 chk((src.match(/pending count is live while offline/g)||[]).length===2, 'live badge refresh not wired in saveState+flushSave');
 chk(src.includes('computeSyncStatus({'), 'badge not using the state machine');
+chk((src.match(/_fbStartConnectionMonitor\(\)/g)||[]).length>=3, 'connection monitor must be installed on BOTH boot paths (v1 + v2) — the v5.20 refactor regression');
 
 console.log('Checks passed:', PASS, '· Failures:', FAIL);
 if(FAIL) fails.forEach(f=>console.log('  ✗ '+f));
