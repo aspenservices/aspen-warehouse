@@ -47,6 +47,7 @@ const chk=(c,l)=>{ if(c)PASS++; else {FAIL++; fails.push(l);} };
     let readPath='';
     const sb=new Function('cap',`'use strict';
       let _fbConsecutiveFailures=0;
+      const V2_DUAL_WRITE_LEGACY=true;
       const _fbDb={ ref:p=>{ cap.path=p; return { once:async()=>({ val:()=>${JSON.stringify(cloudTs)} }) }; } };
       const _fbUser={}, _fbAuthorized=true; const console={warn(){},log(){}};
       ${extractFn('verifyCloudWrite')}
@@ -65,7 +66,7 @@ const chk=(c,l)=>{ if(c)PASS++; else {FAIL++; fails.push(l);} };
   chk(ok===false, 'B: empty cloud must fail');
 
   // ── C. static assertions on fbCloudSync ──
-  const fcs = extractFn('fbCloudSync');
+  const fcs = extractFn('_fbCloudSyncInner');   // v5.23: writes moved into the mutex inner
   const setsOnState = (fcs.match(/\.ref\(`state\/[^`]*`\)\.set\(|\.ref\('state\/shared\/latest'\)\.set\(/g)||[]).length;
   chk(setsOnState===2, 'C: fbCloudSync state writes = '+setsOnState+' (expected 2: device latest + shared)');
   chk(!/snapshots\/\$\{ts\}/.test(fcs), 'C: per-push snapshot write still present!');

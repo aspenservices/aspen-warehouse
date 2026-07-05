@@ -24,6 +24,9 @@ function mkDevice(deviceId){
     const clone=x=>JSON.parse(JSON.stringify(x));
     const console={warn(){},log(){},error(){}};
     ${extractFn('_v2Hash')}
+    const _fbV2Cache={};
+    const _V2_BLOB_FIELDS=['bolPdf','deliveryPhoto','deliveryDoc','photo'];
+    ${extractFn('_v2StripBlobs')}
     const V2_COLLS=['units','dispatched','incoming','materials','events','activity','queue','cfg','factory','marriages','dispatchRequests','coverInventory','colorLibrary','coverModelMapping','movements','matTransfers'];
     ${extractFn('_fbV2BuildUpdate')}
     ${extractFn('_mergeEvents')}

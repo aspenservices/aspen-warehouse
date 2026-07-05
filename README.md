@@ -34,6 +34,7 @@ node tests/run-all.js index.html
 | 18-actor-identity | Per-person signatures on all action records (person first, role fallback) |
 | 19-trash-bin | Universal trash: capture/restore/purge, tombstone clearing, LWW sync, 30d purge |
 | 20-v2-sync | Per-collection sync v2: hash gating, atomic commits, convergence, bandwidth |
+| 21-hardening | v5.23 deep corrections: undo-revive, hashed PINs, blob round-trip, mutex, archive |
 
 ## Conventions
 - A test **passes** when it prints a `✅` line and no `Failures: N>0`.
