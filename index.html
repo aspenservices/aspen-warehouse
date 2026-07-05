@@ -4733,7 +4733,11 @@ let _fbInitAttempts = 0;
 //   /app_version/current  (in Firebase console, manually, OR call
 //   pushVersionToFirebase() from the Admin console at deploy time)
 // ══════════════════════════════════════════════════════════════════
-const APP_VERSION = 'v5.22';
+const APP_VERSION = 'v5.23';
+// v5.23 (#1): paste your reCAPTCHA v3 site key here AFTER enabling App Check in
+// the Firebase console (Build → App Check → Register app → reCAPTCHA v3). Until
+// then it stays '', everything works exactly as before.
+window.APP_CHECK_SITE_KEY = '';
 window.APP_VERSION = APP_VERSION;
 
 // ── DATA EPOCH (generation guard) ────────────────────────────────────
@@ -5135,12 +5139,17 @@ async function initFirebase(){
     const v = '10.13.2';
     const cdn = 'https://www.gstatic.com/firebasejs/' + v;
     await loadScriptOnce(`${cdn}/firebase-app-compat.js`);
+    // v5.23 (#1) — App Check scaffold: the REAL gate against strangers (the DB
+    // config is public + auth is anonymous). Inactive until a reCAPTCHA v3 site
+    // key is set here after enabling App Check in the Firebase console.
+    try { if(window.APP_CHECK_SITE_KEY){ await loadScriptOnce(`${cdn}/firebase-app-check-compat.js`); } } catch(e){}
     await Promise.all([
       loadScriptOnce(`${cdn}/firebase-auth-compat.js`),
       loadScriptOnce(`${cdn}/firebase-database-compat.js`),
       loadScriptOnce(`${cdn}/firebase-storage-compat.js`)
     ]);
     _fbApp = firebase.initializeApp(FIREBASE_CONFIG);
+    try { if(window.APP_CHECK_SITE_KEY && firebase.appCheck){ firebase.appCheck().activate(window.APP_CHECK_SITE_KEY, true); console.log('[app-check] active'); } } catch(e){ console.warn('[app-check]', e); }
     _fbAuth = firebase.auth();
     _fbDb = firebase.database();
     _fbStorage = firebase.storage();
@@ -5319,7 +5328,21 @@ async function fbSignOut(){
 }
 
 // Push current localStorage state to Firebase (snapshot + latest + shared realtime)
+// v5.23 (#4) — in-flight mutex: fbAutoPush(debounce) + watchdog + reconnect +
+// merge re-push can overlap; two interleaved pushes tear the trio of writes
+// (device latest / shared blob / v2 update) into momentarily inconsistent
+// channel states and duplicate uploads. One at a time, with a trailing rerun.
+let _fbSyncInFlight = false, _fbSyncQueued = false;
 async function fbCloudSync(showToast){
+  if(_fbSyncInFlight){ _fbSyncQueued = true; return; }
+  _fbSyncInFlight = true;
+  try { await _fbCloudSyncInner(showToast); }
+  finally {
+    _fbSyncInFlight = false;
+    if(_fbSyncQueued){ _fbSyncQueued = false; setTimeout(() => { try { fbCloudSync(false); } catch(e){} }, 80); }
+  }
+}
+async function _fbCloudSyncInner(showToast){
   // ═══ VERSION LOCK — blocks ALL pushes if the screen is out of date ═══
   // Hard guarantee: a client on an old version cannot affect the shared state.
   // It can only observe. The exception is the reset/wipe push itself (which runs
@@ -5381,7 +5404,9 @@ async function fbCloudSync(showToast){
       if(v2.changed.length){
         await _fbDb.ref().update(v2.upd);            // atomic multi-path commit
         Object.assign(_fbV2Hash, v2.newHashes);      // commit hash baseline AFTER success
-        for(const n of v2.changed){ _fbV2Cache[n] = state[n]; }
+        // v5.23 (#8): DON'T alias live collections into the cache — the cache is
+        // fed only by onChild (real cloud data); aliasing doubled memory and let
+        // later local mutations masquerade as "remote" in ordering edge cases.
         console.log('[v2] pushed', v2.changed.length, 'collection(s):', v2.changed.join(','));
       }
       if(!_fbV2CollRef && !_fbSharedRef){ /* listeners not yet attached (rare) */ }
@@ -5548,10 +5573,48 @@ function _v2Hash(str){        // FNV-1a 32-bit — fast, deterministic content f
 // PURE: which collections changed vs the hash cache + the atomic update object.
 // Kept side-effect-free (returns newHashes; caller commits them AFTER the write
 // succeeds) so the CI suite can unit-test the gating.
+const _V2_BLOB_FIELDS = ['bolPdf','deliveryPhoto','deliveryDoc','photo'];
+// v5.23 (#3): pull big base64 blobs OUT of the dispatched/events hot path. The
+// stripped records carry a '__b:<contentHash>' marker; blobs live in their own
+// content-addressed 'blobs' node that only uploads NEW content. Local state is
+// never stripped — markers exist only in flight (receive rehydrates in assemble).
+function _v2StripBlobs(arr, blobSink){
+  let touched = false;
+  const out = arr.map(r => {
+    if(!r || typeof r !== 'object') return r;
+    let copy = null;
+    for(const f of _V2_BLOB_FIELDS){
+      const v = r[f];
+      if(typeof v === 'string' && v.length > 2000 && !v.startsWith('__b:')){
+        if(!copy) copy = Object.assign({}, r);
+        const key = 'b' + _v2Hash(v) + '_' + v.length.toString(36);
+        blobSink[key] = v;
+        copy[f] = '__b:' + key;
+        touched = true;
+      }
+    }
+    return copy || r;
+  });
+  return touched ? out : arr;
+}
 function _fbV2BuildUpdate(stateObj, ts, writerName, hashCache){
   const upd = {}, changed = [], newHashes = {};
-  for(const name of V2_COLLS){
-    const v = stateObj[name];
+  // v5.23 (#10): cfg changes on every tombstone — don't drag the trash payloads
+  // (up to ~120KB) along each time. cfg travels WITHOUT _trashBin; the trash gets
+  // its own hash-gated node. v5.23 (#3): blobs likewise.
+  const blobs = {};
+  const src = Object.assign({}, stateObj);
+  if(src.cfg && src.cfg._trashBin !== undefined){
+    const c = Object.assign({}, src.cfg); const t = c._trashBin; delete c._trashBin;
+    src.cfg = c; src.trash = t || {};
+  }
+  if(Array.isArray(src.dispatched)) src.dispatched = _v2StripBlobs(src.dispatched, blobs);
+  if(Array.isArray(src.events))     src.events     = _v2StripBlobs(src.events, blobs);
+  // existing stored blobs must persist in the node: carry forward known cache + new
+  src.blobs = Object.assign({}, _fbV2Cache && _fbV2Cache.blobs, stateObj.__blobStore, blobs);
+  const NAMES = V2_COLLS.concat(['trash','blobs']);
+  for(const name of NAMES){
+    const v = src[name];
     if(v === undefined) continue;
     const j = JSON.stringify(v);
     const h = _v2Hash(j);
@@ -5584,6 +5647,35 @@ function _fbV2AssembleFull(dirty, meta){
               : (_fbV2Cache[name] !== undefined && name === 'cfg') ? _fbV2Cache[name]
               : local[name];
   }
+  // v5.23 (#10): re-attach the trash to cfg (it travels as its own node now)
+  if(out.cfg){
+    const t = (_fbV2Cache.trash !== undefined) ? _fbV2Cache.trash : (local.cfg && local.cfg._trashBin);
+    if(t !== undefined) out.cfg = Object.assign({}, out.cfg, { _trashBin: t });
+  }
+  // v5.23 (#3): rehydrate '__b:' blob markers from the blobs node; if a blob
+  // hasn't landed yet, fall back to the same record's local copy so per-record
+  // LWW can never wipe a PDF with a marker.
+  const bs = _fbV2Cache.blobs || {};
+  const rehydrate = (arr, localArr) => {
+    if(!Array.isArray(arr)) return arr;
+    const byId = {}; (localArr||[]).forEach(r => { if(r && r.id != null) byId[String(r.id)] = r; });
+    return arr.map(r => {
+      if(!r || typeof r !== 'object') return r;
+      let copy = null;
+      for(const f of _V2_BLOB_FIELDS){
+        const v = r[f];
+        if(typeof v === 'string' && v.startsWith('__b:')){
+          const key = v.slice(4);
+          const real = bs[key] !== undefined ? bs[key] : (byId[String(r.id)] && byId[String(r.id)][f]);
+          if(!copy) copy = Object.assign({}, r);
+          copy[f] = (typeof real === 'string' && !real.startsWith('__b:')) ? real : null;
+        }
+      }
+      return copy || r;
+    });
+  };
+  out.dispatched = rehydrate(out.dispatched, local.dispatched);
+  out.events     = rehydrate(out.events, local.events);
   out.nid = (meta && typeof meta.nid === 'number') ? meta.nid : local.nid;
   out._epoch = (meta && meta.epoch) || (window.ASPEN_DATA_EPOCH || 1);
   return out;
@@ -5624,6 +5716,9 @@ function _fbV2ApplyMeta(meta){
       fbApplyRemoteState(_fbV2AssembleFull(dirty, meta), meta.timestamp);
       console.log('[v2] applied remote update from', meta.uploadedBy, '· collections:', names.join(','));
     } catch(e){ console.error('[v2 apply]', e); }
+    // v5.23 (#8): free applied payloads — steady-state cache holds only cfg/trash
+    // (needed for tombstone coupling); hashes stay as the push baseline.
+    for(const n of names){ if(n !== 'cfg' && n !== 'trash' && n !== 'blobs') delete _fbV2Cache[n]; }
   }, 60);
 }
 
@@ -5785,7 +5880,14 @@ function _fbStartConnectionMonitor(){
         }
         // Reconnect → force pull. The listener will replay events, but
         // an explicit once() read is more reliable.
-        if(_fbAuthorized){
+        // v5.23 (#7): on a v2 session read the tiny v2 meta instead of the
+        // multi-MB legacy blob (child listeners replay the payloads themselves;
+        // _fbV2ApplyMeta re-runs the commit with all its guards).
+        if(_fbAuthorized && _fbV2CollRef){
+          _fbDb.ref('state/shared/v2/meta').once('value')
+            .then(sn => { const m = sn.val(); if(m){ _fbV2MetaInitial = false; _fbV2ApplyMeta(m); } })
+            .catch(e => console.warn('[v2 reconnect-pull]', e));
+        } else if(_fbAuthorized){
           _fbDb.ref('state/shared/latest').once('value').then(s => {
             const p = s.val();
             if(!p || !p.state || p.deviceId === _fbDeviceId) return;
@@ -7911,6 +8013,53 @@ const DEFAULT_ROLE_PINS = {
   viewer:    '0000'
 };
 
+// ── PIN HASHING (v5.23 · #1) ─────────────────────────────────────────────────
+// PINs no longer exist in PLAINTEXT anywhere in the cloud/localStorage: we store
+// sha256('aspen|'+role+'|'+pin). The Firebase config is public (GitHub Pages) and
+// auth is anonymous, so anyone could read cfg — hashed PINs make that useless.
+// Legacy plaintext values are migrated in place at boot (LWW bump wins on sync).
+// Compact synchronous SHA-256 (no async crypto.subtle — PIN checks are sync).
+function _sha256(ascii){
+  function rr(v,a){return(v>>>a)|(v<<(32-a));}
+  const mathPow=Math.pow, maxWord=mathPow(2,32); let result='';
+  const words=[], asciiBitLength=ascii.length*8;
+  let hash=_sha256.h=_sha256.h||[], k=_sha256.k=_sha256.k||[], primeCounter=k.length;
+  const isComposite={};
+  for(let candidate=2; primeCounter<64; candidate++){
+    if(!isComposite[candidate]){
+      for(let i=0;i<313;i+=candidate) isComposite[i]=candidate;
+      hash[primeCounter]=(mathPow(candidate,.5)*maxWord)|0;
+      k[primeCounter++]=(mathPow(candidate,1/3)*maxWord)|0;
+    }
+  }
+  ascii+='\x80';
+  while(ascii.length%64-56) ascii+='\x00';
+  for(let i=0;i<ascii.length;i++){ const j=ascii.charCodeAt(i); if(j>>8) return ''; words[i>>2]|=j<<((3-i)%4)*8; }
+  words[words.length]=(asciiBitLength/maxWord)|0; words[words.length]=asciiBitLength;
+  for(let j=0;j<words.length;){
+    const w=words.slice(j,j+=16), oldHash=hash.slice(0,8);
+    for(let i=0;i<64;i++){
+      const w15=w[i-15], w2=w[i-2];
+      const a=hash[0], e=hash[4];
+      const temp1=hash[7]+(rr(e,6)^rr(e,11)^rr(e,25))+((e&hash[5])^(~e&hash[6]))+k[i]
+        +(w[i]=(i<16)?w[i]:(w[i-16]+(rr(w15,7)^rr(w15,18)^(w15>>>3))+w[i-7]+(rr(w2,17)^rr(w2,19)^(w2>>>10)))|0);
+      const temp2=(rr(a,2)^rr(a,13)^rr(a,22))+((a&hash[1])^(a&hash[2])^(hash[1]&hash[2]));
+      hash=[(temp1+temp2)|0].concat(hash); hash[4]=(hash[4]+temp1)|0;
+    }
+    for(let i=0;i<8;i++) hash[i]=(hash[i]+oldHash[i])|0;
+  }
+  for(let i=0;i<8;i++) for(let j=3;j+1;j--){ const b=(hash[i]>>(j*8))&255; result+=((b<16)?0:'')+b.toString(16); }
+  return result;
+}
+function _hashPin(role, pin){ return _sha256('aspen|' + role + '|' + String(pin)); }
+function _pinLooksHashed(v){ return typeof v === 'string' && /^[0-9a-f]{64}$/.test(v); }
+// Central verifier: hashed values compare by hash; legacy plaintext compares raw.
+function pinMatches(role, entered){
+  const stored = getRolePin(role);
+  return _pinLooksHashed(stored) ? (_hashPin(role, String(entered)) === stored) : (String(entered) === stored);
+}
+window.pinMatches = pinMatches;
+
 // Returns the current PIN for a role. Reads from cfg.rolePasswords (synced),
 // falls back to the in-memory default if cfg hasn't loaded yet.
 function getRolePin(role){
@@ -7941,7 +8090,7 @@ function setRolePin(role, newPin){
   if(!window.cfg) window.cfg = {};
   if(!cfg.rolePasswords) cfg.rolePasswords = { ...DEFAULT_ROLE_PINS };
   if(!cfg.rolePasswordsUpdatedAt || typeof cfg.rolePasswordsUpdatedAt !== 'object') cfg.rolePasswordsUpdatedAt = {};
-  cfg.rolePasswords[role] = newPin;
+  cfg.rolePasswords[role] = _hashPin(role, newPin);   // v5.23 (#1): never store plaintext
   cfg.rolePasswordsUpdatedAt[role] = Date.now();
   // Persist + sync. flushSave (not saveState) so the change hits localStorage
   // synchronously before any unrelated debounced write could be cancelled by
@@ -8043,7 +8192,7 @@ function promptForPin(role, onSuccess, onCancel){
       setError('Too many attempts — wait a moment');
       return;
     }
-    if(value === correctPin){
+    if(pinMatches(role, value)){   // v5.23 (#1): hash-aware (legacy plaintext still works pre-migration)
       _pinAttempts = 0;
       _forgotTapCount = 0;
       cleanup();
@@ -8166,7 +8315,8 @@ function openPasswordManager(){
       <div class="pwmgr-list">
         ${roleList.map(r => {
           const m = TEAM_MEMBERS.find(t => t.role === r);
-          const pin = getRolePin(r);
+          const _rawPin = getRolePin(r);
+          const pin = _pinLooksHashed(_rawPin) ? '•••• (protected)' : _rawPin;   // v5.23 (#1): hashes are one-way — admin RESETS pins, never views them
           return `
             <div class="pwmgr-row" data-role="${r}">
               <div class="pwmgr-avatar" style="background:linear-gradient(135deg, ${m?.color||'#64748b'}, ${m?.color||'#64748b'}dd)">${m?.emoji || '·'}</div>
@@ -14310,7 +14460,7 @@ function confirmDispatch(id){
   postMovement({type:'601', sn:u.sn, material:u.type||'', qty:1, from:LOC_WAREHOUSE(u.pos), to:LOC_DEALER(u.dealer), stockType:'unrestricted', ref:auth, note:'Dispatch to dealer'});
   units=units.filter(x=>x.id!==id);
   addAct(`Unit ${u.sn||u.dealer} dispatched to ${u.dealer}${marPending.length?' (with '+marPending.length+' missing accessor'+(marPending.length>1?'ies':'y')+')':''}`,marPending.length?'var(--red)':'var(--teal)');
-  events.push({id:Date.now(),title:`Dispatch: ${rec.sn||rec.dealer}`,date:rec.dispatchDate,time:rec.dispatchTime,type:'dispatch',dealer:rec.dealer,sn:rec.sn||''});
+  events.push({id: Date.now()*1000 + ((Math.random()*1000)|0) /* v5.23 (#9): cross-device same-ms collision guard */,title:`Dispatch: ${rec.sn||rec.dealer}`,date:rec.dispatchDate,time:rec.dispatchTime,type:'dispatch',dealer:rec.dealer,sn:rec.sn||''});
   // ── MARRIAGE RECONCILIATION (shared with the Schedule group-dispatch path) ──
   // 1) Any accessory still at the factory → split-dispatch it (auto follow-up
   //    factory request, marriage stays visible as 'split-pending').
@@ -17998,7 +18148,7 @@ function addEvt(){
   const d=document.getElementById('ev-d').value;
   if(!t||!d){toast('Fill in title and date','err');return;}
   const sn=(document.getElementById('ev-sn').value||'').trim();
-  events.push({id:Date.now(),title:t,date:d,time:document.getElementById('ev-h').value,type:document.getElementById('ev-ty').value,dealer:(document.getElementById('ev-dl').value||'').trim(),sn});
+  events.push({id: Date.now()*1000 + ((Math.random()*1000)|0) /* v5.23 (#9): cross-device same-ms collision guard */,title:t,date:d,time:document.getElementById('ev-h').value,type:document.getElementById('ev-ty').value,dealer:(document.getElementById('ev-dl').value||'').trim(),sn});
   toast('Event added','ok');document.getElementById('sched-float').innerHTML='';renderCal();updBadges();
 }
 
@@ -26744,7 +26894,7 @@ async function verifyCloudWrite(expectedTimestamp){
   try {
     // v5.11 — read ONLY the /timestamp child (a few bytes). The old code pulled the
     // FULL shared payload (multi-MB) down on every push just to compare this number.
-    const snap = await _fbDb.ref('state/shared/latest/timestamp').once('value');
+    const snap = await _fbDb.ref(V2_DUAL_WRITE_LEGACY ? 'state/shared/latest/timestamp' : 'state/shared/v2/meta/timestamp').once('value');   // v5.23 (#7): survives dual-write OFF
     const cloudTs = snap.val();
     if(cloudTs == null){
       _fbConsecutiveFailures++;
@@ -27101,6 +27251,25 @@ function snapshot(label){
     console.warn('snapshot failed:', err.message);
   }
 }
+// v5.23 (#2) — after a snapshot restore, any restored record whose delete
+// tombstone still exists in cfg would be dropped by the very next merge
+// (snapshot() captures collections but NOT cfg). Clear the tombstone AND stamp
+// the record fresh — the same dual mechanism proven in trashRestore.
+function _undoReviveTombstoned(){
+  try {
+    const now = editStamp();
+    const tomb = cfg._deletedUnits || {};
+    const touch = (rec, key) => { if(tomb[key]){ delete tomb[key]; rec.updatedAt = now; } };
+    (units||[]).forEach(u => { if(!u) return; const sn = (u.sn != null ? String(u.sn).trim() : ''); touch(u, sn ? ('sn:'+sn) : ('id:'+u.id)); });
+    (factory||[]).forEach(f => { if(!f) return; const sn = (f.sn != null ? String(f.sn).trim() : ''); touch(f, sn ? ('sn:'+sn) : ('id:'+f.id)); });
+    const evt = cfg._deletedEventGroups || {};
+    (events||[]).forEach(ev => { if(ev && ev.groupId != null && evt[String(ev.groupId)]){ delete evt[String(ev.groupId)]; ev.updatedAt = now; } });
+    const qt = cfg._deletedQueueIds || {};
+    (queue||[]).forEach(q => { if(q && q.id != null && qt[String(q.id)]){ delete qt[String(q.id)]; q.updatedAt = now; } });
+  } catch(e){ console.warn('[undo revive]', e); }
+}
+window._undoReviveTombstoned = _undoReviveTombstoned;
+
 function undoLast(){
   if(!_undoStack.length){ toast('Nothing to undo', 'err'); return; }
   const snap = _undoStack.pop();
@@ -27115,7 +27284,10 @@ function undoLast(){
   if(Array.isArray(snap.marriages)) marriages = snap.marriages;
   if(Array.isArray(snap.dispatchRequests)) dispatchRequests = snap.dispatchRequests;
   if(Array.isArray(snap.coverInventory)) coverInventory = snap.coverInventory;
+  _undoReviveTombstoned();   // v5.23 (#2): without this, the delete's tombstone re-kills the restored record on the next merge — "Undone ✓" was a silent lie
   toast(`Undone: ${snap.label}`, 'ok');
+  try { flushSave(); } catch(e){}
+  try { if(typeof fbAutoPush === 'function') fbAutoPush(); } catch(e){}
   // Refresh whatever view is active
   drawMap(); renderQueue(); renderDash(); renderIncoming(); renderMaterials(); renderDispatched();
   if(typeof renderCal === 'function') renderCal();
@@ -27759,20 +27931,24 @@ window.addEventListener('storage', e => {
     // writing tab becomes our newness baseline.
     _fbApplyingRemote = true;
     try {
+      // v5.23 (#5) — route through the SAME merge layer as cloud sync. The old
+      // wholesale replace here could lose this tab's in-debounce edits whenever
+      // another tab of the same device saved (the exact bug class v5.12 killed
+      // for the cloud, alive between tabs).
       if(typeof restored.nid === 'number') nid = Math.max(nid, restored.nid);
-      if(Array.isArray(restored.units)) units = restored.units;
-      if(Array.isArray(restored.dispatched)) dispatched = restored.dispatched;
-      if(Array.isArray(restored.incoming)) incoming = restored.incoming;
-      if(Array.isArray(restored.materials)) materials = restored.materials;
-      if(Array.isArray(restored.matTransfers)) matTransfers = restored.matTransfers;
-      if(Array.isArray(restored.events)) events = restored.events;
+      if(Array.isArray(restored.units)) units = _mergeUnits(units, restored.units, restored);   // (same 3rd arg as the orchestrator: full restored)
+      if(Array.isArray(restored.dispatched)) dispatched = _mergeDispatched(dispatched, restored.dispatched);
+      if(Array.isArray(restored.incoming)) incoming = _mergeIncoming(incoming, restored.incoming);
+      if(Array.isArray(restored.materials)) materials = _mergeMaterials(materials, restored.materials);
+      if(Array.isArray(restored.matTransfers)) matTransfers = _mergeMatTransfers(matTransfers, restored.matTransfers);
+      if(Array.isArray(restored.events)) events = _mergeEvents(events, restored.events, restored.cfg);
       if(Array.isArray(restored.activity)) activity = restored.activity;
-      if(Array.isArray(restored.queue)) queue = restored.queue;
-      if(Array.isArray(restored.factory)) factory = restored.factory;
-      if(Array.isArray(restored.marriages)) marriages = restored.marriages;
-      if(Array.isArray(restored.dispatchRequests)) dispatchRequests = restored.dispatchRequests;
-      if(Array.isArray(restored.coverInventory)) coverInventory = restored.coverInventory;
-      if(restored.colorLibrary && typeof restored.colorLibrary === 'object') colorLibrary = restored.colorLibrary;
+      if(Array.isArray(restored.queue)) queue = _mergeQueue(queue, restored.queue, restored.cfg);
+      if(Array.isArray(restored.factory)) factory = _mergeFactory(factory, restored.factory, incoming, restored.cfg);
+      if(Array.isArray(restored.marriages)) marriages = _mergeMarriages(marriages, restored.marriages);
+      if(Array.isArray(restored.dispatchRequests)) dispatchRequests = _mergeRequests(dispatchRequests, restored.dispatchRequests);
+      if(Array.isArray(restored.coverInventory)) coverInventory = _mergeCovers(coverInventory, restored.coverInventory);
+      if(restored.colorLibrary && typeof restored.colorLibrary === 'object') colorLibrary = _mergeAddWinsMap(colorLibrary, restored.colorLibrary, 'map');
       if(restored.coverModelMapping && typeof restored.coverModelMapping === 'object') coverModelMapping = restored.coverModelMapping;
       if(Array.isArray(restored.movements)) movements = restored.movements;
       if(restored.cfg && typeof restored.cfg === 'object') cfg = mergeCfgPreservingPins(cfg, restored.cfg);
@@ -27833,6 +28009,54 @@ setTimeout(()=>{ try{ reconcileCoverRequests(); }catch(e){} }, 6000);  // clear 
 // so it operates on the merged (true) inventory; idempotent + self-healing on every load.
 setTimeout(()=>{ try{ reconcileDispatchedCovers({auto:true}); }catch(e){ console.warn('[cover reconcile]', e); } }, 7500);
 setTimeout(()=>{ try{ _trashHousekeep(); }catch(e){} }, 8500);   // v5.19: 30-day trash purge (deterministic on every device)
+// v5.23 (#1) — one-time PIN migration: hash any legacy plaintext PIN in place.
+// Bumping rolePasswordsUpdatedAt makes the hashed value win the per-role LWW on
+// every device; after all devices sync once, no plaintext PIN exists anywhere.
+setTimeout(()=>{ try{
+  if(cfg && cfg.rolePasswords){
+    let migrated = 0;
+    cfg.rolePasswordsUpdatedAt = cfg.rolePasswordsUpdatedAt || {};
+    for(const r in cfg.rolePasswords){
+      const v = cfg.rolePasswords[r];
+      if(v != null && !_pinLooksHashed(String(v))){
+        cfg.rolePasswords[r] = _hashPin(r, String(v));
+        cfg.rolePasswordsUpdatedAt[r] = Date.now();
+        migrated++;
+      }
+    }
+    if(migrated){ console.log('[pin migration] hashed', migrated, 'legacy PIN(s)'); try{ flushSave(); }catch(e){} try{ if(typeof fbAutoPush==='function') fbAutoPush(); }catch(e){} }
+  }
+}catch(e){ console.warn('[pin migration]', e); } }, 9500);
+// v5.23 (#6) — DISPATCHED ARCHIVE: records older than 365 days (and no longer
+// 'out') keep growing the live state forever — each with embedded trackingHistory
+// and PDFs. Archive: the FULL record is written once to state/shared/v2/archive
+// (browse/recover from Firebase console or a future Archive view), then the live
+// record is replaced by a light skeleton with a FRESH updatedAt — per-record LWW
+// (v5.14) makes the skeleton beat any stale full copy from a peer, so archived
+// records can never resurrect fat. Batch-capped; deterministic; self-healing.
+async function archiveOldDispatched(){
+  try {
+    if(!Array.isArray(dispatched) || !_fbDb || !_fbAuthorized) return 0;
+    const cut = Date.now() - 365*864e5;
+    const parse = v => { if(!v || typeof v !== 'string') return null; const t = Date.parse(v.length===10 ? v+'T12:00:00' : v); return isNaN(t) ? null : t; };
+    const cand = dispatched.filter(d => d && !d.archived && d.deliveryStatus !== 'out' && (parse(d.dispatchDate || d.dispatchedAt) || 0) < cut && (parse(d.dispatchDate || d.dispatchedAt) != null)).slice(0, 50);
+    if(!cand.length) return 0;
+    const upd = {};
+    for(const d of cand){ upd['state/shared/v2/archive/dispatched/' + (d.id != null ? d.id : ('sn' + d.sn + '@' + (d.dispatchedAt||d.dispatchDate))) ] = JSON.parse(JSON.stringify(d)); }
+    await _fbDb.ref().update(upd);                              // full copies land in the archive FIRST
+    const ids = new Set(cand.map(d => String(d.id)));
+    dispatched = dispatched.map(d => (d && ids.has(String(d.id)))
+      ? { id: d.id, sn: d.sn, dealer: d.dealer, type: d.type, dispatchDate: d.dispatchDate, dispatchedAt: d.dispatchedAt, deliveryStatus: d.deliveryStatus, archived: true, updatedAt: editStamp() }
+      : d);
+    try { addAct(`🗄 Archived ${cand.length} dispatched record(s) >1yr old (full copies kept in cloud archive)`, 'var(--text3)'); } catch(e){}
+    try { flushSave(); } catch(e){}
+    try { if(typeof fbAutoPush === 'function') fbAutoPush(); } catch(e){}
+    console.log('[archive] skeletonized', cand.length, 'dispatched record(s)');
+    return cand.length;
+  } catch(e){ console.warn('[archive]', e); return 0; }
+}
+window.archiveOldDispatched = archiveOldDispatched;
+setTimeout(()=>{ try{ archiveOldDispatched(); }catch(e){} }, 12000);
 setInterval(autoBackupToFirebase, 12 * 60 * 60 * 1000);
 
 // Global hotkeys
