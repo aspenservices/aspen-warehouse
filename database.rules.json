@@ -1,33 +1,30 @@
 {
   "rules": {
-    ".read":  "auth != null && root.child('authorized').child(auth.token.email.replace('.', ',').replace('@', '_at_')).exists()",
-    ".write": "auth != null && root.child('authorized').child(auth.token.email.replace('.', ',').replace('@', '_at_')).exists()",
-
-    "authorized": {
-      ".read":  "auth != null",
-      ".write": "auth != null && root.child('authorized').child(auth.token.email.replace('.', ',').replace('@', '_at_')).child('role').val() == 'admin'"
+    ".read": false,
+    ".write": false,
+    "app_version": {
+      ".read": "auth != null",
+      ".write": "auth != null",
+      "current": { ".validate": "newData.isString() && newData.val().length < 20" }
     },
-
     "state": {
-      "$deviceId": {
-        ".read":  "auth != null && root.child('authorized').child(auth.token.email.replace('.', ',').replace('@', '_at_')).exists()",
-        ".write": "auth != null && root.child('authorized').child(auth.token.email.replace('.', ',').replace('@', '_at_')).exists()",
-        "snapshots": {
-          ".indexOn": ["timestamp"]
+      ".read": "auth != null",
+      ".write": "auth != null",
+      "shared": {
+        "v2": {
+          "meta": {
+            "timestamp": { ".validate": "newData.isNumber()" },
+            "deviceId":  { ".validate": "newData.isString() && newData.val().length < 80" }
+          },
+          "coll": {
+            "$name": {
+              "j": { ".validate": "newData.isString() && newData.val().length < 12000000" },
+              "h": { ".validate": "newData.isString() && newData.val().length < 16" },
+              "t": { ".validate": "newData.isNumber()" }
+            }
+          }
         }
       }
-    },
-
-    "photos-index": {
-      ".read":  "auth != null && root.child('authorized').child(auth.token.email.replace('.', ',').replace('@', '_at_')).exists()",
-      ".write": "auth != null && root.child('authorized').child(auth.token.email.replace('.', ',').replace('@', '_at_')).exists()",
-      ".indexOn": ["itemId", "timestamp", "type"]
-    },
-
-    "audit": {
-      ".read":  "auth != null && root.child('authorized').child(auth.token.email.replace('.', ',').replace('@', '_at_')).exists()",
-      ".write": "auth != null && root.child('authorized').child(auth.token.email.replace('.', ',').replace('@', '_at_')).exists()",
-      ".indexOn": ["timestamp", "user"]
     }
   }
 }
