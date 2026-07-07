@@ -4733,7 +4733,7 @@ let _fbInitAttempts = 0;
 //   /app_version/current  (in Firebase console, manually, OR call
 //   pushVersionToFirebase() from the Admin console at deploy time)
 // ══════════════════════════════════════════════════════════════════
-const APP_VERSION = 'v5.25';
+const APP_VERSION = 'v5.26';
 // v5.23 (#1): paste your reCAPTCHA v3 site key here AFTER enabling App Check in
 // the Firebase console (Build → App Check → Register app → reCAPTCHA v3). Until
 // then it stays '', everything works exactly as before.
@@ -5559,6 +5559,19 @@ async function fbRestoreFromCloud(){
 // verifyCloudWrite/fbRestoreFromCloud at v2/meta.
 const V2_DUAL_WRITE_LEGACY = true;
 const V2_COLLS = ['units','dispatched','incoming','materials','events','activity','queue','cfg','factory','marriages','dispatchRequests','coverInventory','colorLibrary','coverModelMapping','movements','matTransfers'];
+
+// ── MOVEMENTS RETENTION (v5.26) ───────────────────────────────────────────────
+// How many days of movements stay in the LIVE, synced ledger. Older ones are
+// auto-archived to Firebase `movements_archive/*` (a node NOT in the sync path,
+// so it costs cheap storage but ZERO per-change egress) and dropped from the
+// live array. This BOUNDS the movements payload so a busy multi-device warehouse
+// stops re-broadcasting a giant, ever-growing ledger on every scan — the second
+// (usage-scaling) half of the Realtime Database cost. History stays fully in the
+// archive node; reconciliation is unaffected (it uses each S/N's LATEST movement,
+// which stays live). TUNABLE: smaller = cheaper + less live history/recon window;
+// larger = more live coverage + bigger payload. Default matches the ledger view's
+// comfortable window.
+const MOV_LIVE_DAYS = 45;
 let _fbV2CollRef = null, _fbV2MetaRef = null, _fbV2DeferredMeta = null, _fbV2MetaInitial = true;
 const _fbV2Cache = {};        // name → parsed latest cloud value
 const _fbV2Dirty = {};        // name → true (received, not yet applied)
@@ -6398,10 +6411,18 @@ function _mergeMovements(local, remote){
   // newest-first by posting time, re-capped at the same 10,000 safety valve.
   const L = Array.isArray(local) ? local : [];
   const R = Array.isArray(remote) ? remote : [];
+  // v5.26 — retention floor: drop movements older than MOV_LIVE_DAYS on BOTH
+  // sides so auto-archived history never resurrects by unioning with a device
+  // that hasn't swept yet. Server-clock based + deterministic → every device
+  // converges to the same live window. Missing-timestamp docs are KEPT (never
+  // drop data over a missing field).
+  const _now = (typeof fbServerNow === 'function') ? fbServerNow() : Date.now();
+  const _floor = _now - MOV_LIVE_DAYS * 86400000;
+  const _live = m => !(m && typeof m.at === 'number' && m.at < _floor);
   const byId = new Map();
-  for(const m of R){ if(m && m.id != null) byId.set(String(m.id), m); }
+  for(const m of R){ if(m && m.id != null && _live(m)) byId.set(String(m.id), m); }
   let kept = 0;
-  for(const m of L){ if(m && m.id != null && !byId.has(String(m.id))){ byId.set(String(m.id), m); kept++; } }
+  for(const m of L){ if(m && m.id != null && _live(m) && !byId.has(String(m.id))){ byId.set(String(m.id), m); kept++; } }
   _lastMvMergeKept = kept;
   const out = Array.from(byId.values());
   out.sort((a,b) => (b.at||0) - (a.at||0));
@@ -20987,6 +21008,43 @@ function archiveOldMovements(){
     }catch(e){ if(typeof toast==='function')toast('Archive: Firebase error \u2014 nothing purged','err'); }
   }catch(e){ if(typeof toast==='function')toast('Could not archive','err'); console.warn('[archiveOldMovements]',e); }
 }
+// ── AUTO-ARCHIVE MOVEMENTS (v5.26) ────────────────────────────────────────────
+// Silent, automatic sibling of archiveOldMovements: moves movements older than
+// MOV_LIVE_DAYS to Firebase `movements_archive/auto_{ts}` (NOT in the sync path,
+// so it costs cheap storage but ZERO per-change egress), then removes them from
+// the live ledger — but ONLY after the archive write succeeds, so nothing is
+// ever lost. This keeps the synced movements payload small on a busy multi-device
+// warehouse. No CSV, no prompt: it runs on its own. The `old.length` early-return
+// makes it self-deduplicating across the 5 devices (once one archives + pushes
+// the trimmed ledger, the others load it already-small and skip).
+let _autoArchInFlight = false;
+async function _autoArchiveMovements(){
+  try {
+    if(_autoArchInFlight) return;
+    if(typeof firebase === 'undefined' || !firebase.database) return;
+    if(typeof navigator !== 'undefined' && navigator.onLine === false) return;
+    const now = (typeof fbServerNow === 'function') ? fbServerNow() : Date.now();
+    const cutoff = now - MOV_LIVE_DAYS * 86400000;
+    const old = movements.filter(m => m && typeof m.at === 'number' && m.at < cutoff);
+    if(!old.length) return;
+    _autoArchInFlight = true;
+    const ids = new Set(old.map(m => m.id));
+    // Write archive FIRST; only trim the live ledger if it succeeds.
+    await firebase.database().ref('movements_archive/auto_' + now).set({ at: now, count: old.length, docs: old });
+    movements = movements.filter(m => !ids.has(m.id));
+    if(typeof saveState === 'function') saveState();
+    if(typeof fbCloudSync === 'function'){ try { fbCloudSync(false); } catch(e){} }   // propagate the smaller ledger
+    try { if(typeof _curView !== 'undefined' && _curView === 'movements' && typeof renderMovements === 'function') renderMovements(); } catch(e){}
+    console.log('[auto-archive] moved ' + old.length + ' movement(s) older than ' + MOV_LIVE_DAYS + 'd → movements_archive (live ledger now ' + movements.length + ')');
+  } catch(e){
+    console.warn('[auto-archive] failed — nothing purged:', e && e.message);
+  } finally {
+    _autoArchInFlight = false;
+  }
+}
+setTimeout(_autoArchiveMovements, 45000);               // once, shortly after boot
+setInterval(_autoArchiveMovements, 6 * 60 * 60 * 1000); // then every 6 hours
+
 function exportMovementsCSV(){
   try {
     const T = MOVEMENT_TYPES;
