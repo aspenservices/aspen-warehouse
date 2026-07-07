@@ -4733,7 +4733,7 @@ let _fbInitAttempts = 0;
 //   /app_version/current  (in Firebase console, manually, OR call
 //   pushVersionToFirebase() from the Admin console at deploy time)
 // ══════════════════════════════════════════════════════════════════
-const APP_VERSION = 'v5.24';
+const APP_VERSION = 'v5.25';
 // v5.23 (#1): paste your reCAPTCHA v3 site key here AFTER enabling App Check in
 // the Firebase console (Build → App Check → Register app → reCAPTCHA v3). Until
 // then it stays '', everything works exactly as before.
@@ -5988,17 +5988,35 @@ function _syncWatchdog(){
   // technically reattached after backgrounding but missed events during the gap.
   if(Date.now() - _syncWatchdogLastPull > 30000){
     _syncWatchdogLastPull = Date.now();
-    _fbDb.ref('state/shared/latest').once('value').then(snap => {
-      const payload = snap.val();
-      if(!payload || !payload.state) return;
-      if(payload.deviceId === _fbDeviceId) return;
-      if(payload.timestamp <= _fbLastLocalWriteAt) return;
-      // If we have unpushed edits, defer (next push will replay)
-      if(_fbLocalEditCounter > _fbPushedEditCounter){ _fbDeferredRemote = payload; return; }
-      try {
-        fbApplyRemoteState(JSON.parse(payload.state), payload.timestamp);
-        console.log('[watchdog] heartbeat pull → applied missed update from', payload.uploadedBy || payload.deviceId, '(age '+Math.round((Date.now()-payload.timestamp)/1000)+'s)');
-      } catch(e){ console.warn('[watchdog pull apply]', e); }
+    // ── COST FIX (v5.25) ─────────────────────────────────────────────────────
+    // This pull used to download the ENTIRE shared-state blob every 30s on EVERY
+    // device, UNCONDITIONALLY — even when nothing had changed. With a multi-
+    // hundred-KB warehouse state and several devices online all day, that was the
+    // dominant Realtime Database egress cost (~$196/mo). Now we read only the tiny
+    // `timestamp` first and download the full blob ONLY when the cloud genuinely
+    // has something newer than our last write. The safety-net behavior is
+    // unchanged (a real missed update is still pulled); we just stop paying for
+    // the ~99% of pulls where nothing was new.
+    // NOTE: this blob read relies on dual-write keeping state/shared/latest
+    // current. When V2_DUAL_WRITE_LEGACY is turned off, the v2 child listeners
+    // are the sync path and this whole blob pull should be retired.
+    const _tsPath = V2_DUAL_WRITE_LEGACY ? 'state/shared/latest/timestamp' : 'state/shared/v2/meta/timestamp';
+    _fbDb.ref(_tsPath).once('value').then(tsSnap => {
+      const remoteTs = tsSnap.val();
+      if(!remoteTs || remoteTs <= _fbLastLocalWriteAt) return;         // nothing newer → skip the full download
+      if(_fbLocalEditCounter > _fbPushedEditCounter) return;           // unpushed local edits → let the next push replay
+      return _fbDb.ref('state/shared/latest').once('value').then(snap => {
+        const payload = snap.val();
+        if(!payload || !payload.state) return;
+        if(payload.deviceId === _fbDeviceId) return;
+        if(payload.timestamp <= _fbLastLocalWriteAt) return;
+        // If we have unpushed edits, defer (next push will replay)
+        if(_fbLocalEditCounter > _fbPushedEditCounter){ _fbDeferredRemote = payload; return; }
+        try {
+          fbApplyRemoteState(JSON.parse(payload.state), payload.timestamp);
+          console.log('[watchdog] heartbeat pull → applied missed update from', payload.uploadedBy || payload.deviceId, '(age '+Math.round((Date.now()-payload.timestamp)/1000)+'s)');
+        } catch(e){ console.warn('[watchdog pull apply]', e); }
+      });
     }).catch(e => {
       console.warn('[watchdog pull read]', e.code, e.message);
       // PERMISSION_DENIED on the heartbeat = rules are blocking. Surface this.
