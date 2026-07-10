@@ -229,11 +229,16 @@ body.role-viewer .pg-title::after{content:' · Viewer (read-only)';font-size:11p
 
 /* ── TRANSIT ROLE — minimal factory view, scan-only workflow ── */
 /* Hide: tabs (only show Spas Ready), all action buttons except the scanner, the Holding Married card, marriages page entry */
-body.role-transit .fct-acts > button:not([onclick*="openQRScanner"]),
+body.role-transit .fct-acts > button:not([onclick*="openQRScanner"]):not(.manual-load-btn),
 body.role-transit .fct-acts .btn-r,
 body.role-transit button[onclick*="openFactoryAdd"],
 body.role-transit #fct-tabs button[data-tab="acc"],
 body.role-transit .fct-card-acc{display:none !important}
+/* Manual "Load on truck" is a Truck/Admin action — hide it for factory & marriages
+   crews (their Loading Bay is a read-only overview). Truck sees it (exempted above),
+   admin sees it too. */
+body.role-factory .manual-load-btn,
+body.role-marriages .manual-load-btn{display:none !important}
 /* Hide topbar Export/Print on factory page (transit doesn't need to print bulk) */
 body.role-transit .topbar button[onclick*="exportFct"],
 body.role-transit .topbar button[onclick*="printFct"]{display:none !important}
@@ -4550,6 +4555,7 @@ body.dark-mode .mar-card-track {
           <div style="font-size:12px;color:var(--text2);margin-bottom:10px;line-height:1.5">Runs a battery of 18+ tests covering localStorage, Firebase sync, write/read roundtrips, code coverage of mutations, and local-cloud divergence. <strong>Non-destructive</strong> — touches no warehouse data.</div>
           <div style="display:flex;gap:7px;flex-wrap:wrap;margin-bottom:10px">
             <button class="btn btn-sm btn-p" onclick="openDiagnosticPanel()">🔬 Run System Diagnostic</button>
+            <button class="btn btn-sm" onclick="showSelfTests()" style="background:#ecfdf5;border-color:#10b981;color:#065f46;font-weight:700" title="Runs the merge/sync logic tests that guard against the bugs we've hit (reverts, lost movements). Green = the invariants hold.">🧪 Run Logic Self-Tests</button>
           </div>
           <div class="info-box">Run this after every deploy, when something feels off, or weekly as a routine health check. The sync badge in the top-right shows live status; this panel gives you the full breakdown.</div>
         </div>
@@ -4648,6 +4654,8 @@ let _fbWasConnected = false;        // last known WebSocket connection state
 let _fbLastLocalWriteAt = 0;        // ms timestamp of our last successful push (echo guard)
 let _fbAutoPushTimer = null;        // debounce for fbAutoPush
 let _fbApplyingRemote = false;      // flag: we're applying a remote update, don't push back
+let _fbMvRef = null;                 // v5.28 per-child movements channel ref (attach-once)
+let _fbMvAttaching = false;          // guard against a double-attach before the ref is set
 // ── Race-condition prevention ──
 // _fbLocalEditCounter increments synchronously inside saveState() (before its debounce).
 // _fbPushedEditCounter advances in fbCloudSync after a successful push.
@@ -4733,7 +4741,7 @@ let _fbInitAttempts = 0;
 //   /app_version/current  (in Firebase console, manually, OR call
 //   pushVersionToFirebase() from the Admin console at deploy time)
 // ══════════════════════════════════════════════════════════════════
-const APP_VERSION = 'v5.26';
+const APP_VERSION = 'v5.30';
 // v5.23 (#1): paste your reCAPTCHA v3 site key here AFTER enabling App Check in
 // the Firebase console (Build → App Check → Register app → reCAPTCHA v3). Until
 // then it stays '', everything works exactly as before.
@@ -4900,10 +4908,19 @@ async function _saveBeforeReload(){
       // as the cloud. (New dispatches add events, not spas, so they still push.)
       let safe = true;
       try{
-        const snap = await Promise.race([ _fbDb.ref('state/shared/latest').once('value'), new Promise(r=>setTimeout(()=>r(null),1500)) ]);
-        const cloud = snap && snap.val && snap.val();
-        if(cloud && cloud.state && cloud.deviceId !== _fbDeviceId){
-          const remote = JSON.parse(cloud.state);
+        // v5.30 — compare against the LIVE v2 cache when this session runs on the
+        // per-collection channel: it's the current cloud state already in memory
+        // (zero download) and stays fresh after dual-write retirement. The v1 blob
+        // read remains only as the legacy-session fallback (v2 absent in cloud).
+        let remote = null;
+        if(_fbV2CollRef && _fbV2Cache && ['factory','units','incoming','dispatched'].some(k => Array.isArray(_fbV2Cache[k]))){
+          remote = _fbV2Cache;
+        } else {
+          const snap = await Promise.race([ _fbDb.ref('state/shared/latest').once('value'), new Promise(r=>setTimeout(()=>r(null),1500)) ]);
+          const cloud = snap && snap.val && snap.val();
+          if(cloud && cloud.state && cloud.deviceId !== _fbDeviceId) remote = JSON.parse(cloud.state);
+        }
+        if(remote){
           const distinct = (o)=>{ const s=new Set(); ['factory','units','incoming','dispatched'].forEach(k=>{ (Array.isArray(o[k])?o[k]:[]).forEach(it=>{ const sn=String(it&&it.sn||''); if(sn)s.add(sn); }); }); return s.size; };
           if(distinct(remote) > distinct({factory, units, incoming, dispatched})){
             safe = false;
@@ -5058,7 +5075,9 @@ async function showSyncDiagnostic(){
     if(!_fbDb || !_fbAuthorized){
       testHtml = row('Test', 'SKIPPED — not connected', false);
     } else {
-      const before = await _fbDb.ref('state/shared/latest').once('value');
+      // v5.30 — read the tiny v2 meta (live after dual-write retirement) on v2
+      // sessions; the legacy blob only for v1 sessions. Same fields either way.
+      const before = await _fbDb.ref(_fbV2CollRef ? 'state/shared/v2/meta' : 'state/shared/latest').once('value');
       const beforeVal = before.val();
       const beforeTs = beforeVal ? beforeVal.timestamp : 0;
       const beforeWriter = beforeVal ? (beforeVal.uploadedBy || '?') : 'EMPTY';
@@ -5273,7 +5292,13 @@ async function handleAuthChange(user){
   // ══════════════════════════════════════════════════════════════
   setTimeout(() => {
     try {
-      if(_fbDb && _fbAuthorized){
+      if(_fbDb && _fbAuthorized && _fbV2CollRef){
+        // v5.30 — v2 session: the child listeners replay payloads themselves; a tiny
+        // meta read + re-commit closes the race (same pattern as the reconnect pull).
+        _fbDb.ref('state/shared/v2/meta').once('value')
+          .then(sn => { const m = sn.val(); if(m){ _fbV2MetaInitial = false; _fbV2ApplyMeta(m); } })
+          .catch(err => console.warn('[post-signin pull v2]', err));
+      } else if(_fbDb && _fbAuthorized){
         _fbDb.ref('state/shared/latest').once('value').then(snap => {
           const payload = snap.val();
           if(payload && payload.state && payload.deviceId !== _fbDeviceId){
@@ -5408,10 +5433,25 @@ async function _fbCloudSyncInner(showToast){
         // fed only by onChild (real cloud data); aliasing doubled memory and let
         // later local mutations masquerade as "remote" in ordering edge cases.
         console.log('[v2] pushed', v2.changed.length, 'collection(s):', v2.changed.join(','));
+      } else {
+        // v5.30 — no collection content changed, but the push must STILL advance the
+        // v2 meta timestamp: with dual-write retired, verifyCloudWrite, the heartbeat
+        // and the diagnostics all read v2/meta as "last push time". A stale meta after
+        // a successful (no-op) push would count as a verify FAILURE and, after 3, warn
+        // the user falsely. Tiny write (bytes); changed:'' makes it a no-op on every
+        // other device (_fbV2ApplyMeta assembles nothing).
+        await _fbDb.ref('state/shared/v2/meta').set({ timestamp: ts, deviceId: _fbDeviceId, uploadedBy: writerName, nid: state.nid, epoch: (state._epoch || 1), changed: '' });
       }
       if(!_fbV2CollRef && !_fbSharedRef){ /* listeners not yet attached (rare) */ }
       else if(!_fbV2CollRef && _fbSharedRef){ /* legacy session: v2 now seeded; switch happens on next reload */ }
-    } catch(e){ console.warn('[v2 push failed — legacy blob still covers sync]', e); }
+    } catch(e){
+      // v5.30 — dual-write is retired: the v2 write IS the shared push. If it failed,
+      // the push failed. Re-throw so the outer catch counts the failure, the edits
+      // stay PENDING (counter not advanced), and the watchdog force-push retries in
+      // ~10s. (Under dual-write this was only a warn because the v1 blob covered it.)
+      console.warn('[v2 push failed]', e);
+      throw e;
+    }
     _fbLastSyncedAt = ts;
     _fbPushedEditCounter = counterAtPushStart;  // all edits before push are now persisted to cloud
     // v2 deferred commit drained after our push (same rule as v1 below)
@@ -5503,11 +5543,38 @@ async function fbRestoreFromCloud(){
     // devices". The old code downloaded the ENTIRE /state tree — every device's latest
     // PLUS all their accumulated snapshots (potentially hundreds of MB) — and then used
     // only the per-device /latest fields.
-    const sharedSnap = await _fbDb.ref('state/shared/latest').once('value');
-    const bestPayload = sharedSnap.val();
-    const bestTs = bestPayload ? bestPayload.timestamp : 0;
-    if(!bestPayload || !bestPayload.state){ toast('No cloud backup found — try a manual/auto snapshot from the Admin panel', 'err'); return; }
-    const restored = JSON.parse(bestPayload.state);
+    // v5.30 — the v2 channel is the authoritative source now (the v1 blob froze at
+    // dual-write retirement). Do a FRESH read of v2 meta + collections, refresh the
+    // cache, and reuse _fbV2AssembleFull (trash re-attach + photo/PDF rehydration,
+    // unchanged colls from local). Falls back to the legacy blob only if the cloud
+    // has no v2 yet. NOTE: movements deliberately ride their own per-child channel,
+    // so a v2 restore leaves the local ledger as-is (assemble returns the local copy).
+    let bestPayload = null, bestTs = 0, restored = null;
+    const metaSnap = await _fbDb.ref('state/shared/v2/meta').once('value');
+    const meta = metaSnap.val();
+    if(meta && meta.timestamp){
+      const collSnap = await _fbDb.ref('state/shared/v2/coll').once('value');
+      const colls = collSnap.val() || {};
+      const dirty = {};
+      for(const name of Object.keys(colls)){
+        const v = colls[name];
+        if(v && typeof v.j === 'string'){
+          try { _fbV2Cache[name] = JSON.parse(v.j); _fbV2Hash[name] = v.h; dirty[name] = true; }
+          catch(e){ console.warn('[restore v2] parse failed for', name, e); }
+        }
+      }
+      if(!Object.keys(dirty).length){ toast('No cloud backup found — try a manual/auto snapshot from the Admin panel', 'err'); return; }
+      restored = _fbV2AssembleFull(dirty, meta);
+      if(meta.nid) restored.nid = meta.nid;
+      bestTs = meta.timestamp;
+      bestPayload = { uploadedBy: meta.uploadedBy || 'v2', timestamp: bestTs };
+    } else {
+      const sharedSnap = await _fbDb.ref('state/shared/latest').once('value');
+      bestPayload = sharedSnap.val();
+      bestTs = bestPayload ? bestPayload.timestamp : 0;
+      if(!bestPayload || !bestPayload.state){ toast('No cloud backup found — try a manual/auto snapshot from the Admin panel', 'err'); return; }
+      restored = JSON.parse(bestPayload.state);
+    }
     // Apply
     if(restored.nid) nid = restored.nid;
     if(Array.isArray(restored.units)) units = restored.units;
@@ -5557,8 +5624,21 @@ async function fbRestoreFromCloud(){
 // written so not-yet-updated devices keep working (the forced-update system
 // flips everyone fast); a later version sets it false and points
 // verifyCloudWrite/fbRestoreFromCloud at v2/meta.
-const V2_DUAL_WRITE_LEGACY = true;
-const V2_COLLS = ['units','dispatched','incoming','materials','events','activity','queue','cfg','factory','marriages','dispatchRequests','coverInventory','colorLibrary','coverModelMapping','movements','matTransfers'];
+// v5.30 — RETIRED: set to false. Every v1-blob read site was audited and either
+// migrated to v2 (restore, safe-push guard, pre-reload guard, heartbeat,
+// diagnostics, post-signin pull) or already had a v2 branch (reconnect pull,
+// foreground pull). state/shared/latest is now a frozen legacy snapshot: nothing
+// listens to it live, old-version sessions' reads of it are absorbed by the
+// merge guards (updatedAt / union / epoch), and the forced-update banner keeps
+// the mixed-version window short. ROLLBACK: set back to true and redeploy.
+const V2_DUAL_WRITE_LEGACY = false;
+// v5.28 — 'movements' REMOVED from the per-change v2 blob. It was the dominant
+// egress: an append-only ledger (up to MOV_LIVE_DAYS of docs, ~1–3 MB) whose hash
+// changed on EVERY scan, so the whole array re-downloaded to every device each time.
+// It now rides a per-child channel (state/shared/mv/{id}) — see postMovement +
+// _fbAttachMovementsChannel: only the NEW ~300-byte doc downloads. _mergeMovements
+// still unions by id, so a not-yet-updated device's blob copy merges cleanly.
+const V2_COLLS = ['units','dispatched','incoming','materials','events','activity','queue','cfg','factory','marriages','dispatchRequests','coverInventory','colorLibrary','coverModelMapping','matTransfers'];
 
 // ── MOVEMENTS RETENTION (v5.26) ───────────────────────────────────────────────
 // How many days of movements stay in the LIVE, synced ledger. Older ones are
@@ -5572,6 +5652,13 @@ const V2_COLLS = ['units','dispatched','incoming','materials','events','activity
 // larger = more live coverage + bigger payload. Default matches the ledger view's
 // comfortable window.
 const MOV_LIVE_DAYS = 45;
+// v5.29 — how many recent movements the per-child channel loads on a fresh device.
+// Set to the ledger's OWN safety cap (10,000) so the channel window can never be
+// smaller than what the array holds — a fresh device can't miss a live movement
+// even without the frozen baseline blob. Retention (MOV_LIVE_DAYS) keeps the real
+// count well under this, so the practical boot download stays small. Tune here.
+const MV_CHANNEL_LIMIT = 10000;
+const MOV_ARCHIVE_KEEP = 60;   // v5.29 — cap on stored movements_archive nodes (see _pruneMovementsArchive)
 let _fbV2CollRef = null, _fbV2MetaRef = null, _fbV2DeferredMeta = null, _fbV2MetaInitial = true;
 const _fbV2Cache = {};        // name → parsed latest cloud value
 const _fbV2Dirty = {};        // name → true (received, not yet applied)
@@ -5754,10 +5841,51 @@ function _fbAttachV2Listeners(){
   console.log('[v2] per-collection listeners attached');
 }
 
+// ── PER-CHILD MOVEMENTS CHANNEL (v5.28) ────────────────────────────────────────
+// Replaces the movements ledger's whole-array v2 broadcast (the dominant egress).
+// Each movement is its own child under state/shared/mv/{id}. We listen with
+// limitToLast(MV_CHANNEL_LIMIT) so the initial load is bounded, coalesce the boot burst into
+// ONE _mergeMovements pass, and union by id thereafter — so only NEW docs (~300 B)
+// download, never the whole ledger. Idempotent (re-seeing a doc is a no-op via the
+// id-union). The v2-blob merge path in fbApplyRemoteState is left intact, so a
+// not-yet-updated device's movements still land (and self-heal when it reloads).
+// Attach-once, on every boot path (guarded).
+function _fbAttachMovementsChannel(){
+  if(!_fbDb || _fbMvRef || _fbMvAttaching) return;
+  _fbMvAttaching = true;
+  try {
+    const ref = _fbDb.ref('state/shared/mv').limitToLast(MV_CHANNEL_LIMIT);
+    _fbMvRef = ref;
+    let _batch = [], _batchTimer = null;
+    const _flush = () => {
+      _batchTimer = null;
+      if(!_batch.length) return;
+      const b = _batch; _batch = [];
+      try {
+        movements = _mergeMovements(movements, b);   // union by id → dedup, sort, retention, cap
+        if(typeof _curView !== 'undefined' && _curView === 'movements' && typeof renderMovements === 'function') renderMovements();
+        if(typeof updBadges === 'function') updBadges();
+      } catch(e){ console.warn('[mv flush]', e); }
+    };
+    ref.on('child_added', snap => {
+      try {
+        const doc = snap.val();
+        if(!doc || doc.id == null) return;
+        _batch.push(doc);
+        if(_batchTimer) clearTimeout(_batchTimer);
+        _batchTimer = setTimeout(_flush, 120);   // coalesce the initial burst + rapid scans
+      } catch(e){ console.warn('[mv child_added]', e); }
+    }, err => { console.warn('[mv channel error]', err && err.code); });
+    console.log('[v5.29] per-child movements channel attached (limitToLast ' + MV_CHANNEL_LIMIT + ')');
+  } catch(e){ console.warn('[mv attach]', e); _fbMvRef = null; }
+  _fbMvAttaching = false;
+}
+
 // Start listening for remote state updates. Called on successful auth.
 function fbStartRealtimeSync(){
   if(!_fbDb || _fbSharedRef || _fbV2CollRef) return;
   _fbStartConnectionMonitor();   // v5.22: badge/reconnect/server-clock live on BOTH paths
+  _fbAttachMovementsChannel();   // v5.28: per-child movements ledger (kept off the v2 blob)
   // v5.20 — prefer the per-collection v2 channel when the cloud already has it:
   // this device then NEVER downloads the legacy full blob again. If v2 doesn't
   // exist yet (first boot after this deploy), stay on the v1 listener for THIS
@@ -6010,14 +6138,23 @@ function _syncWatchdog(){
     // has something newer than our last write. The safety-net behavior is
     // unchanged (a real missed update is still pulled); we just stop paying for
     // the ~99% of pulls where nothing was new.
-    // NOTE: this blob read relies on dual-write keeping state/shared/latest
-    // current. When V2_DUAL_WRITE_LEGACY is turned off, the v2 child listeners
-    // are the sync path and this whole blob pull should be retired.
-    const _tsPath = V2_DUAL_WRITE_LEGACY ? 'state/shared/latest/timestamp' : 'state/shared/v2/meta/timestamp';
+    // NOTE (v5.30): dual-write is retired — on v2 sessions the branch below reads
+    // only the tiny v2 meta and re-commits via _fbV2ApplyMeta; the legacy blob
+    // pull survives solely for v1-only sessions (cloud without v2).
+    const _tsPath = _fbV2CollRef ? 'state/shared/v2/meta/timestamp' : 'state/shared/latest/timestamp';
     _fbDb.ref(_tsPath).once('value').then(tsSnap => {
       const remoteTs = tsSnap.val();
       if(!remoteTs || remoteTs <= _fbLastLocalWriteAt) return;         // nothing newer → skip the full download
       if(_fbLocalEditCounter > _fbPushedEditCounter) return;           // unpushed local edits → let the next push replay
+      // v5.30 — v2 session: the child listeners already hold the payloads; a tiny
+      // meta read + re-commit (with all its guards) replaces the legacy blob pull,
+      // which would now fetch the FROZEN dual-write snapshot.
+      if(_fbV2CollRef){
+        return _fbDb.ref('state/shared/v2/meta').once('value').then(sn => {
+          const m = sn.val();
+          if(m){ _fbV2MetaInitial = false; _fbV2ApplyMeta(m); console.log('[watchdog] heartbeat v2 meta re-commit (ts ' + m.timestamp + ')'); }
+        });
+      }
       return _fbDb.ref('state/shared/latest').once('value').then(snap => {
         const payload = snap.val();
         if(!payload || !payload.state) return;
@@ -9819,6 +9956,7 @@ function _receiveTubAtFactory(r){
   const transit = factory.find(x => String(x.sn) === key && x.trackingState === 'in-transit' && x.transitDir === 'to-factory');
   if(transit){
     transit.trackingState = 'received-back-at-factory';
+    transit.updatedAt = editStamp();   // v5.27 last-edit-wins: stamp so this state change survives a stale remote on sync
     transit.trackingHistory = [...(transit.trackingHistory||[]), {state:'received-back-at-factory', at, note:'received at factory'}];
     return;
   }
@@ -10732,6 +10870,11 @@ function postMovement(o){
     };
     movements.unshift(doc);            // newest first
     if(movements.length > 10000) movements.length = 10000;   // safety valve (years of activity)
+    // v5.28 — per-child transport: push THIS doc as its own tiny RTDB child instead
+    // of re-broadcasting the whole ledger via the v2 blob (the dominant egress).
+    // Devices union it by id on child_added, so ~300 bytes moves, not 1–3 MB.
+    // Defensive: a sync hiccup here can never break the stock operation.
+    try { if(_fbDb && _fbAuthorized && doc && doc.id != null) _fbDb.ref('state/shared/mv/' + doc.id).set(doc); } catch(e){ console.warn('[postMovement mv-push]', e); }
     try { if(typeof saveState === 'function') saveState(); } catch(e){}
     try { if(typeof _curView !== 'undefined' && _curView === 'movements' && typeof renderMovements === 'function') renderMovements(); } catch(e){}
     return doc;
@@ -16179,6 +16322,7 @@ function adminRevertTransit(factoryId){
     : (() => { for(let i = item.trackingHistory.length-1; i >= 0; i--) if(item.trackingHistory[i].state === 'in-transit') return i; return -1; })();
   if(histTransitIdx >= 0) item.trackingHistory.splice(histTransitIdx, 1);
   item.trackingState = 'ready-to-ship';
+  item.updatedAt = editStamp();   // v5.27 last-edit-wins: stamp so this state change survives a stale remote on sync
   item.trackingHistory.push({state:'ready-to-ship', at:toISO(), by:'Admin', note:'Reverted from in-transit'});
   addAct(`↶ Admin reverted ${item.sn||factoryId} from transit → ready`,'var(--purple)');
   toast(`${item.sn||'Item'} back at factory (ready)`,'ok');
@@ -16200,6 +16344,7 @@ function adminCancelReady(factoryId){
     : (() => { for(let i = item.trackingHistory.length-1; i >= 0; i--) if(item.trackingHistory[i].state === 'ready-to-ship') return i; return -1; })();
   if(idx >= 0) item.trackingHistory.splice(idx, 1);
   item.trackingState = 'created-at-factory';
+  item.updatedAt = editStamp();   // v5.27 last-edit-wins: stamp so this state change survives a stale remote on sync
   item.trackingHistory.push({state:'created-at-factory', at:toISO(), by:'Admin', note:'Ready state cancelled'});
   addAct(`↶ Admin cancelled ready: ${item.sn||factoryId}`,'var(--purple)');
   toast(`${item.sn||'Item'} no longer marked ready`,'ok');
@@ -16215,6 +16360,7 @@ function adminRevertAllTransit(){
   snapshot('admin revert ALL transit');
   items.forEach(item => {
     item.trackingState = 'created-at-factory';
+    item.updatedAt = editStamp();   // v5.27 last-edit-wins: stamp so this state change survives a stale remote on sync
     item.trackingHistory = (item.trackingHistory||[]).filter(h => h.state !== 'in-transit');
     item.trackingHistory.push({state:'created-at-factory', at:toISO(), by:'Admin', note:'Reverted from in-transit (bulk)'});
   });
@@ -16474,6 +16620,7 @@ function truckLoadOne(factoryId){
   }
   snapshot('truck load (no tid)');
   f.trackingState = 'in-transit';
+  f.updatedAt = editStamp();   // v5.27 last-edit-wins: stamp so this state change survives a stale remote on sync
   f.trackingHistory = f.trackingHistory || [];
   f.trackingHistory.push({state:'in-transit', at:toISO(), by: actorName()});
   addAct(`📦 Loaded on truck: ${f.sn||f.dealer}`,'var(--accent)');
@@ -16482,6 +16629,21 @@ function truckLoadOne(factoryId){
   syncMarriageOnAccessoryTransit(f);
   toast(`${f.sn||f.dealer} on truck`,'ok');
   renderTruck(); renderFactory(); renderInTransit(); updBadges();
+}
+
+// Manual "Load on truck" button on a Loading Bay card. Same end state as a QR
+// scan (moves the tub to In Transit) but tapped by hand — for when the QR can't
+// be scanned or a scan didn't take. Confirms first (a button is easier to misfire
+// than a deliberate scan) then delegates to truckLoadOne, which routes through the
+// same handleQRPayload('load') path (or the inline path) — both now stamp
+// updatedAt, so the move survives sync. Reversible from In Transit if needed.
+function truckLoadOneManual(factoryId){
+  const f = factory.find(x => x.id === factoryId);
+  if(!f){ toast('Item not found','err'); return; }
+  if(f.trackingState === 'in-transit'){ toast(`${f.sn||f.dealer} already on truck (in transit)`,'err'); return; }
+  if(f.trackingState === 'ready-for-pickup'){ toast(`🚫 ${f.sn||f.dealer} is DEALER PICKUP — Truck doesn't take it`,'err'); return; }
+  if(!confirm(`🚚 Load ${f.sn||f.dealer} on the truck?\n\nThis moves it to In Transit (leaves the Loading Bay / factory inventory) — the same as scanning its QR. Reversible from In Transit if needed.`)) return;
+  truckLoadOne(factoryId);
 }
 
 // Quick-load by typed S/N (when QR is damaged or operator wants to type)
@@ -20772,7 +20934,7 @@ function buildFactoryCard(f){
       ? `<div class="fct-acts" style="margin-top:8px">
           ${isReadyMarriedAcc
             ? `<button class="btn btn-sm btn-p" onclick="shipFromFactory(${f.id})" title="Complete ship — sends to warehouse, marks marriage delivered">📤 Send to WH Now</button>`
-            : `<span style="font-size:10px;color:var(--text2);font-style:italic;padding:4px 8px">🔒 Waiting for Truck / Transit to scan QR</span>`}
+            : `<button class="btn btn-sm manual-load-btn" style="background:#7c2d12;border-color:#7c2d12;color:#fff;font-weight:700" onclick="truckLoadOneManual(${f.id})" title="Manually load on truck — moves it to In Transit without scanning. Use when the QR can't be scanned or the scan won't take.">🚚 Load on truck</button>`}
           <button class="btn btn-sm" style="background:#f3f4f6;border-color:#d1d5db;color:#374151" onclick="undoFactoryReady(${f.id})" title="Back to factory inventory (Factory/Admin)">↶ Undo</button>
           <button class="btn btn-sm" style="background:#fef9c3;border-color:#f59e0b;color:#78350f" onclick="printQRLabel(${f.id}, 'factory')" title="Print QR shipping label">🏷 Label</button>
           <button class="btn btn-sm tracking-btn" onclick="openTrackingHistory('factory',${f.id})" title="View tracking history (admin only)">📜</button>
@@ -21018,6 +21180,38 @@ function archiveOldMovements(){
 // makes it self-deduplicating across the 5 devices (once one archives + pushes
 // the trimmed ledger, the others load it already-small and skip).
 let _autoArchInFlight = false;
+// v5.29 — bound the movements_archive node so it can't grow forever (each archive
+// write adds an auto_{ts}/batch_{ts} node and nothing ever deleted them). Lists KEYS
+// ONLY via the RTDB shallow REST query (a few bytes) — same trick as
+// cleanupOldSnapshots — so pruning never downloads the archive payloads. If the
+// shallow query isn't available it SKIPS (never falls back to a full download, which
+// would cost more than the leak it's fixing).
+async function _pruneMovementsArchive(keep){
+  try {
+    if(!_fbDb || !_fbAuthorized) return;
+    let keys = null;
+    try {
+      const dbUrl = (_fbDb.app && _fbDb.app.options && _fbDb.app.options.databaseURL) || '';
+      const token = (_fbUser && _fbUser.getIdToken) ? await _fbUser.getIdToken() : '';
+      if(dbUrl){
+        const res = await fetch(`${dbUrl}/movements_archive.json?shallow=true${token ? ('&auth=' + encodeURIComponent(token)) : ''}`);
+        if(res.ok){ const obj = await res.json(); keys = obj ? Object.keys(obj) : []; }
+      }
+    } catch(e){ /* REST unavailable → skip (don't download the whole archive to prune) */ }
+    if(keys === null || keys.length <= keep) return;
+    // Sort by the timestamp embedded in the key (auto_{ts} / batch_{ts}); oldest first.
+    const tsOf = k => { const p = String(k).split('_'); return parseInt(p[p.length - 1], 10) || 0; };
+    keys.sort((a, b) => tsOf(a) - tsOf(b));
+    const toDelete = keys.slice(0, keys.length - keep);
+    const upd = {};
+    for(const k of toDelete) upd['movements_archive/' + k] = null;
+    if(Object.keys(upd).length){
+      await _fbDb.ref().update(upd);
+      console.log('[archive-prune] removed ' + toDelete.length + ' old movements_archive node(s), kept newest ' + keep);
+    }
+  } catch(e){ console.warn('[archive-prune]', e); }
+}
+
 async function _autoArchiveMovements(){
   try {
     if(_autoArchInFlight) return;
@@ -21032,8 +21226,12 @@ async function _autoArchiveMovements(){
     // Write archive FIRST; only trim the live ledger if it succeeds.
     await firebase.database().ref('movements_archive/auto_' + now).set({ at: now, count: old.length, docs: old });
     movements = movements.filter(m => !ids.has(m.id));
+    // v5.28 — also drop the per-child mv nodes we just archived so state/shared/mv
+    // stays bounded to the live window (limitToLast covers it either way). Best-effort.
+    try { const _mvDel = {}; old.forEach(m => { if(m && m.id != null) _mvDel['state/shared/mv/' + m.id] = null; }); if(Object.keys(_mvDel).length) firebase.database().ref().update(_mvDel).catch(()=>{}); } catch(e){ console.warn('[mv prune]', e); }
     if(typeof saveState === 'function') saveState();
     if(typeof fbCloudSync === 'function'){ try { fbCloudSync(false); } catch(e){} }   // propagate the smaller ledger
+    try { _pruneMovementsArchive(MOV_ARCHIVE_KEEP); } catch(e){ console.warn('[archive-prune call]', e); }   // v5.29 — keep the archive bounded
     try { if(typeof _curView !== 'undefined' && _curView === 'movements' && typeof renderMovements === 'function') renderMovements(); } catch(e){}
     console.log('[auto-archive] moved ' + old.length + ' movement(s) older than ' + MOV_LIVE_DAYS + 'd → movements_archive (live ledger now ' + movements.length + ')');
   } catch(e){
@@ -22916,6 +23114,7 @@ function handleQRPayload(raw, mode){
       return;
     }
     item.trackingState = 'in-transit';
+    item.updatedAt = editStamp();   // v5.27 last-edit-wins: stamp so this state change survives a stale remote on sync
     item.trackingHistory.push({state:'in-transit', at, by});
     addAct(`📦 Loaded on truck: ${item.sn||tid} (${item.dealer||''})`,'var(--accent)');
     postMovement({type:'311', sn:item.sn, material:item.type||'', qty:item.qty||1, from:LOC_FACTORY, to:LOC_TRANSIT, stockType:'in-transit', ref:tid, note:'Loaded on truck (scan)'});
@@ -23067,12 +23266,14 @@ function handleQRPayload(raw, mode){
     } else if(found.source === 'units'){
       // Already placed in warehouse — just confirm
       item.trackingState = 'received-at-warehouse';
+      item.updatedAt = editStamp();   // v5.27 last-edit-wins: stamp so this state change survives a stale remote on sync
       item.trackingHistory.push({state:'received-at-warehouse', at, by, note:'Re-scanned'});
       addAct(`📬 Re-confirmed at warehouse: ${item.sn||tid} @ ${item.pos}`,'var(--teal)');
       setScanResult('ok', item.sn||tid, 'already at '+item.pos);
       toast(`${item.sn||'Item'} already placed at ${item.pos}`,'ok');
     } else {
       item.trackingState = 'received-at-warehouse';
+      item.updatedAt = editStamp();   // v5.27 last-edit-wins: stamp so this state change survives a stale remote on sync
       item.trackingHistory.push({state:'received-at-warehouse', at, by});
       addAct(`📬 Re-confirmed at warehouse: ${item.sn||tid}`,'var(--teal)');
       setScanResult('ok', item.sn||tid, 'received');
@@ -23114,6 +23315,7 @@ function handleQRPayload(raw, mode){
       }
     }
     item.trackingState = 'dispatched-out';
+    item.updatedAt = editStamp();   // v5.27 last-edit-wins: stamp so this state change survives a stale remote on sync
     item.trackingHistory.push({state:'dispatched-out', at, by});
     addAct(`🚚 Dispatched: ${item.sn||tid} (${item.dealer||''})`,'var(--accent)');
     setScanResult('ok', item.sn||tid, 'marked as DISPATCHED');
@@ -23136,6 +23338,7 @@ function handleQRPayload(raw, mode){
       toast(`⛔ ${item.sn||tid} is still in the warehouse — not received at factory`,'err');
     } else {
       item.trackingState = 'received-back-at-factory';
+      item.updatedAt = editStamp();   // v5.27 last-edit-wins: stamp so this state change survives a stale remote on sync
       item.trackingHistory.push({state:'received-back-at-factory', at, by, note:'Confirmed return at factory'});
       addAct(`↩ Returned to factory: ${item.sn||tid} (${item.dealer||''})`,'var(--purple)');
       setScanResult('ok', item.sn||tid, 'received back at factory');
@@ -23300,6 +23503,7 @@ function shipFromFactory(id){
     if(!confirm(`Mark "${f.dealer}" as READY for Truck pickup?\n\nThis accessory is married to S/N ${f.marriedSn}. It will:\n• Stay at the factory with a "ready" badge\n• Show up in Loading Bay for the Truck crew to scan\n• Move to In Transit only when Truck/Transit scans the QR\n• The marriage stays in "waiting" state until then`)) return;
     snapshot('mark married accessory ready-to-ship');
     f.trackingState = 'ready-to-ship';
+    f.updatedAt = editStamp();   // v5.27 last-edit-wins: stamp so this state change survives a stale remote on sync
     try{ postMovement({type:'RTS', sn:f.sn||'', material:f.type||'accessory', qty:f.qty||1, from:LOC_FACTORY, to:LOC_WAREHOUSE(''), stockType:'unrestricted', note:'Released \u2014 married accessory ready (S/N '+(f.marriedSn||'?')+')'}); }catch(e){}
     f.trackingId = f.trackingId || makeTrackingId('ACC');
     f.trackingHistory = f.trackingHistory || [];
@@ -23337,6 +23541,7 @@ function shipFromFactory(id){
   if(!confirm(`Mark "${f.sn||f.dealer}" as READY for Truck pickup?\n\nThe spa stays at the factory and shows a "ready" badge. It only leaves factory inventory when Truck / Transit scans the QR to load it on the truck.`)) return;
   snapshot('mark ready-to-ship');
   f.trackingState = 'ready-to-ship';
+  f.updatedAt = editStamp();   // v5.27 last-edit-wins: stamp so this state change survives a stale remote on sync
   try{ postMovement({type:'RTS', sn:f.sn||'', material:f.type||'', qty:f.qty||1, from:LOC_FACTORY, to:LOC_WAREHOUSE(''), stockType:'unrestricted', note:'Released \u2014 Ship to WH (awaiting truck)'}); }catch(e){}
   f.trackingHistory = f.trackingHistory || [];
   f.trackingHistory.push({state:'ready-to-ship', at:toISO(), by: actorName(), note:'Marked ready for truck pickup'});
@@ -23372,6 +23577,7 @@ function markReadyForPickup(id){
   if(!confirm(`Mark "${f.sn||f.dealer}" as READY FOR DEALER PICKUP?\n\n• Stays at the factory in Loading Bay\n• Truck / Transit CANNOT scan it (it's not going to the warehouse)\n• When the dealer collects it, Factory marks it dispatched (button or 🤝 Scan Dealer Pickup)`)) return;
   snapshot('mark ready-for-pickup');
   f.trackingState = 'ready-for-pickup';
+  f.updatedAt = editStamp();   // v5.27 last-edit-wins: stamp so this state change survives a stale remote on sync
   f.trackingId = f.trackingId || makeTrackingId(isAcc ? 'ACC' : 'SPA');
   f.trackingHistory = f.trackingHistory || [];
   f.trackingHistory.push({state:'ready-for-pickup', at:toISO(), by: actorName(), note:'Dealer pickup at factory'});
@@ -23397,6 +23603,7 @@ function undoFactoryReady(id){
   snapshot('undo factory ready');
   f.trackingHistory = (f.trackingHistory||[]).filter(h => h.state !== wasState);
   f.trackingState = 'created-at-factory';
+  f.updatedAt = editStamp();   // v5.27 last-edit-wins: stamp so this state change survives a stale remote on sync
   f.trackingHistory.push({state:'created-at-factory', at:toISO(), by: actorName(), note:`Undo ${wasState}`});
   const lm = marriages.find(m => m.accessoryId === f.id && (m.status === 'ready-to-ship' || m.status === 'ready-for-pickup'));
   if(lm){ lm.status = 'pending'; lm.updatedAt = editStamp(); delete lm.readyAt; }
@@ -24623,6 +24830,7 @@ function shipMarriageFromMarriages(mid){
 
   snapshot('marriage ready-to-ship from marriages');
   acc.trackingState = 'ready-to-ship';
+  acc.updatedAt = editStamp();   // v5.27 last-edit-wins: stamp so this state change survives a stale remote on sync
   acc.trackingId = acc.trackingId || makeTrackingId('ACC');
   acc.trackingHistory = acc.trackingHistory || [];
   acc.trackingHistory.push({state:'ready-to-ship', at:toISO(), by: actorName(), note:'Marked ready by Marriages crew — waiting for Truck'});
@@ -24658,6 +24866,7 @@ function markMarriageReadyForPickup(mid){
   const acc = factory.find(f => f.id === m.accessoryId);
   if(acc){
     acc.trackingState = 'ready-for-pickup';
+    acc.updatedAt = editStamp();   // v5.27 last-edit-wins: stamp so this state change survives a stale remote on sync
     acc.trackingId = acc.trackingId || makeTrackingId('ACC');
     acc.trackingHistory = acc.trackingHistory || [];
     acc.trackingHistory.push({state:'ready-for-pickup', at:toISO(), by: actorName(), note:'Dealer pickup at factory (Marriages crew)'});
@@ -24683,6 +24892,7 @@ function undoMarriageReady(mid){
   if(acc && (acc.trackingState === 'ready-for-pickup' || acc.trackingState === 'ready-to-ship')){
     acc.trackingHistory = (acc.trackingHistory||[]).filter(h => h.state !== acc.trackingState);
     acc.trackingState = 'created-at-factory';
+    acc.updatedAt = editStamp();   // v5.27 last-edit-wins: stamp so this state change survives a stale remote on sync
     acc.trackingHistory.push({state:'created-at-factory', at:toISO(), by: actorName(), note:`Undo ${wasState}`});
   }
   m.status = 'pending'; m.updatedAt = editStamp();
@@ -26960,8 +27170,9 @@ setInterval(checkStateIntegrity, 5000);
 // ══════════════════════════════════════════════════════════════════════════════
 // WRITE CONFIRMATION — verify the cloud actually got what we sent
 // ══════════════════════════════════════════════════════════════════════════════
-// After fbCloudSync resolves, read back state/shared/latest and verify the
-// timestamp matches our push. If not, the write was rejected or got lost.
+// After fbCloudSync resolves, read back the push timestamp (v2 meta now that
+// dual-write is retired; the legacy blob path remains only for rollback) and
+// verify it matches our push. If not, the write was rejected or got lost.
 // We track _fbConsecutiveFailures — after 3 in a row, we warn the user
 // loudly so they know to stop critical operations and investigate.
 // (_fbConsecutiveFailures declared with other _fb* state vars at the top.)
@@ -27106,15 +27317,18 @@ async function runDiagnostics(){
   }
 
   // ── TEST 6: Realtime listener attached ──
-  log('Realtime listener', !!_fbSharedRef, _fbSharedRef ? 'attached on state/shared/latest' : 'not attached');
+  // v5.30 — a v2 session has _fbV2CollRef and NO v1 ref by design; both count.
+  log('Realtime listener', !!(_fbSharedRef || _fbV2CollRef), _fbV2CollRef ? 'attached on state/shared/v2 (per-collection)' : (_fbSharedRef ? 'attached on state/shared/latest' : 'not attached'));
 
   // ── TEST 7: Local-cloud divergence check ──
   if(_fbDb && _fbUser && _fbAuthorized){
     try {
-      const snap = await _fbDb.ref('state/shared/latest').once('value');
+      // v5.30 — read the source that's actually LIVE for this session (the v1 blob
+      // froze at dual-write retirement; on v2 sessions its timestamp is stale).
+      const snap = await _fbDb.ref(_fbV2CollRef ? 'state/shared/v2/meta' : 'state/shared/latest').once('value');
       const payload = snap.val();
       if(!payload){
-        log('Cloud has state', false, 'state/shared/latest is empty');
+        log('Cloud has state', false, (_fbV2CollRef ? 'state/shared/v2/meta' : 'state/shared/latest') + ' is empty');
       } else {
         const cloudTs = payload.timestamp;
         const localTs = _fbLastLocalWriteAt;
@@ -27487,6 +27701,152 @@ try { ensureRolePinsInitialized(); } catch(e){ console.warn('[pins]', e); }
 //
 // Returns the array of human-readable findings strings.
 // ═══════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════
+// SELF-TEST SUITE (v5.28) — the "immune system", part 1
+// ───────────────────────────────────────────────────────────────────────────
+// In-app regression tests for the exact bug CLASSES that have bitten this app:
+// last-edit-wins reverts (the scan/state bug) and movements ledger integrity
+// (the egress refactor). They run the PURE merge functions against crafted inputs
+// and assert the outcome — the same guarantee a CI run gives, but runnable right
+// here so it can be verified without a terminal. READ-ONLY: builds throwaway data,
+// never touches live state. Tap "Run Logic Self-Tests" (System page) after any
+// deploy; all green = the invariants hold, any red = a regression to fix.
+// ═══════════════════════════════════════════════════════════════════════════
+function runSelfTests(){
+  const results = [];
+  const t = (name, fn) => {
+    try { const r = fn(); results.push({ name, pass: r === true, detail: r === true ? '' : String(r) }); }
+    catch(e){ results.push({ name, pass:false, detail: (e && e.message) || 'threw' }); }
+  };
+  const iso = (offsetMs) => new Date(Date.now() + (offsetMs||0)).toISOString();
+
+  // 1 ── THE REVERT BUG (v5.27 fix). A local factory state change carrying a FRESH
+  //      updatedAt must WIN over a stale remote copy in _mergeFactory. If this ever
+  //      goes red, scanned tubs will bounce back to the Loading Bay again.
+  t('factory · fresh local state change beats stale remote', () => {
+    const remote = [{ id:1, sn:'990001', type:'hot', trackingState:'ready-to-ship', updatedAt: iso(-60000) }];
+    const local  = [{ id:1, sn:'990001', type:'hot', trackingState:'in-transit',   updatedAt: iso(0) }];
+    const merged = _mergeFactory(local, remote, [], {});
+    const row = merged.find(f => String(f.sn) === '990001');
+    return (row && row.trackingState === 'in-transit') || `expected in-transit, got ${row && row.trackingState}`;
+  });
+
+  // 2 ── The FAILURE MODE we fixed, pinned so we understand WHY we stamp: without a
+  //      fresher stamp (tied timestamps) the remote wins → the revert.
+  t('factory · unstamped local change loses to remote (why we stamp updatedAt)', () => {
+    const ts = iso(-60000);
+    const remote = [{ id:1, sn:'990002', type:'hot', trackingState:'ready-to-ship', updatedAt: ts }];
+    const local  = [{ id:1, sn:'990002', type:'hot', trackingState:'in-transit',   updatedAt: ts }];  // tied stamp
+    const merged = _mergeFactory(local, remote, [], {});
+    const row = merged.find(f => String(f.sn) === '990002');
+    return (row && row.trackingState === 'ready-to-ship') || `expected remote to win, got ${row && row.trackingState}`;
+  });
+
+  // 3 ── Movements union never drops a doc (the ledger feeds reconciliation = money).
+  t('movements · union keeps docs from BOTH sides (no loss)', () => {
+    const now = Date.now();
+    const out = _mergeMovements([{id:'a',at:now},{id:'b',at:now}], [{id:'b',at:now},{id:'c',at:now}]);
+    const ids = new Set(out.map(m => String(m.id)));
+    return (ids.has('a') && ids.has('b') && ids.has('c') && out.length === 3) || `got ${out.length}: ${[...ids].join(',')}`;
+  });
+
+  // 4 ── Movements dedup by id — the per-child channel re-delivers docs; must not double.
+  t('movements · dedup by id (per-child re-delivery is a no-op)', () => {
+    const now = Date.now();
+    const out = _mergeMovements([{id:'x',at:now}], [{id:'x',at:now}]);
+    return out.length === 1 || `expected 1, got ${out.length}`;
+  });
+
+  // 5 ── Retention floor: old dropped, recent kept, undated KEPT (never drop over a
+  //      missing field). Keeps every device converging to the same live window.
+  t('movements · retention drops old, keeps recent + undated', () => {
+    const now = (typeof fbServerNow === 'function') ? fbServerNow() : Date.now();
+    const out = _mergeMovements([], [
+      { id:'old', at: now - (MOV_LIVE_DAYS + 5) * 86400000 },
+      { id:'new', at: now - 1000 },
+      { id:'undated' }
+    ]);
+    const ids = new Set(out.map(m => String(m.id)));
+    return (!ids.has('old') && ids.has('new') && ids.has('undated')) || `got ${[...ids].join(',')}`;
+  });
+
+  // 6 ── EGRESS FIX invariant: movements must NOT ride the v2 blob (it's per-child
+  //      now), and unchanged collections must not re-upload. If movements shows up
+  //      here, the whole-array re-broadcast (the 47GB leak) is back.
+  t('v2 · movements excluded from blob; unchanged colls skip re-upload', () => {
+    const state = { factory:[{id:1}], movements:[{id:'m1',at:Date.now()}], units:[{id:2,sn:'1'}] };
+    const cache = {};
+    const r1 = _fbV2BuildUpdate(state, Date.now(), 'selftest', cache);
+    const c1 = r1.changed || [];
+    if(c1.includes('movements')) return 'movements is back in the v2 blob (egress regression)';
+    if(!c1.includes('factory')) return 'factory should appear in the first build';
+    Object.assign(cache, r1.newHashes);
+    const r2 = _fbV2BuildUpdate(state, Date.now(), 'selftest', cache);
+    if((r2.changed || []).includes('factory')) return 'unchanged factory should not re-upload';
+    return true;
+  });
+
+  // 7 ── Units last-edit-wins (touchUnit protects a floor edit the same way factory does).
+  t('units · fresh local edit beats stale remote', () => {
+    const remote = [{ id:1, sn:'880001', pos:'A1', updatedAt: iso(-60000) }];
+    const local  = [{ id:1, sn:'880001', pos:'B2', updatedAt: iso(0) }];
+    const merged = _mergeUnits(local, remote, {});
+    const row = merged.find(u => String(u.sn) === '880001');
+    return (row && row.pos === 'B2') || `expected B2, got ${row && row.pos}`;
+  });
+
+  // 8 ── DUAL-WRITE RETIREMENT (v5.30): verify/heartbeat/diagnostics now read the
+  //      v2 meta timestamp as "last push time", so every content-bearing build MUST
+  //      carry a meta node stamped with the push ts. If this goes red, pushes stop
+  //      being verifiable and the failure banner fires falsely.
+  t('v2 · every content push carries meta with the push timestamp', () => {
+    const ts = Date.now();
+    const r = _fbV2BuildUpdate({ factory:[{id:9,sn:'770001'}], units:[] }, ts, 'selftest', {});
+    const meta = r.upd && r.upd['state/shared/v2/meta'];
+    if(!meta) return 'meta missing from a changed build';
+    if(meta.timestamp !== ts) return `meta ts ${meta.timestamp} !== push ts ${ts}`;
+    return true;
+  });
+
+  const passed = results.filter(r => r.pass).length;
+  return { passed, failed: results.length - passed, total: results.length, results };
+}
+window.runSelfTests = runSelfTests;
+
+// UI: run the suite and show a clean pass/fail overlay.
+function showSelfTests(){
+  let out;
+  try { out = runSelfTests(); }
+  catch(e){ alert('Self-tests could not run: ' + ((e && e.message) || e)); return; }
+  const allGreen = out.failed === 0;
+  const rows = out.results.map(r => `
+    <div style="display:flex;gap:9px;align-items:baseline;padding:7px 0;border-bottom:1px solid rgba(0,0,0,.05)">
+      <span style="font-weight:800;color:${r.pass ? '#16a34a' : '#dc2626'};font-size:14px">${r.pass ? '✓' : '✗'}</span>
+      <div style="flex:1">
+        <div style="font-size:12.5px;color:var(--text);font-weight:${r.pass?'500':'700'}">${escapeHTML(r.name)}</div>
+        ${!r.pass && r.detail ? `<div style="font-size:11px;color:#b91c1c;font-family:var(--mono);margin-top:2px">${escapeHTML(r.detail)}</div>` : ''}
+      </div>
+    </div>`).join('');
+  const ov = document.createElement('div');
+  ov.style.cssText = 'position:fixed;inset:0;background:rgba(15,23,42,.55);z-index:10000;display:flex;align-items:center;justify-content:center;padding:18px';
+  ov.onclick = e => { if(e.target === ov) ov.remove(); };
+  ov.innerHTML = `
+    <div style="background:#fff;border-radius:14px;max-width:520px;width:100%;max-height:82vh;overflow:auto;box-shadow:0 20px 60px -12px rgba(0,0,0,.4)">
+      <div style="padding:16px 18px;border-bottom:1px solid rgba(0,0,0,.08);display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;background:#fff">
+        <div>
+          <div style="font-size:15px;font-weight:800;color:var(--text)">🧪 Logic Self-Tests</div>
+          <div style="font-size:12px;font-weight:700;margin-top:2px;color:${allGreen ? '#16a34a' : '#dc2626'}">${out.passed}/${out.total} passing${allGreen ? ' · all invariants hold' : ' · ' + out.failed + ' regression' + (out.failed>1?'s':'') + ' — fix before deploy'}</div>
+        </div>
+        <button onclick="this.closest('div[style*=fixed]').remove()" style="background:rgba(0,0,0,.06);border:0;width:30px;height:30px;border-radius:50%;cursor:pointer;font-size:15px">✕</button>
+      </div>
+      <div style="padding:8px 18px 16px">${rows}
+        <div style="font-size:11px;color:var(--text3);margin-top:12px;line-height:1.5">These guard the bug classes we've hit: scanned-state reverts and movements-ledger integrity. Read-only — no warehouse data was touched.</div>
+      </div>
+    </div>`;
+  document.body.appendChild(ov);
+}
+window.showSelfTests = showSelfTests;
+
 function runIntegrityChecks(){
   const findings = [];
 
@@ -27545,6 +27905,7 @@ function runIntegrityChecks(){
     factory.forEach(f => {
       if(!f.trackingState){
         f.trackingState = 'created-at-factory';
+        f.updatedAt = editStamp();   // v5.27 last-edit-wins: stamp so this state change survives a stale remote on sync
         fixed++;
       }
     });
@@ -27870,6 +28231,43 @@ function runIntegrityChecks(){
       if(moved > 0) findings.push(`Re-seated ${moved} tub${moved>1?'s':''} to fix stack level collisions/gaps on the floor`);
     }
   } catch(e){ console.warn('[check 13]', e); }
+
+  // ─── Check 14 (v5.28): duplicate movement ids in the live ledger ───
+  // _mergeMovements + the per-child channel dedup by id, so a duplicate here means
+  // real corruption (or a legacy double-post). Reconciliation reads this ledger, so
+  // collapse duplicates deterministically (keep the first = newest after the sort).
+  try {
+    if(Array.isArray(movements) && movements.length){
+      const seen = new Set(); const deduped = []; let dropped = 0;
+      for(const m of movements){
+        const k = (m && m.id != null) ? String(m.id) : null;
+        if(k && seen.has(k)){ dropped++; continue; }
+        if(k) seen.add(k);
+        deduped.push(m);
+      }
+      if(dropped > 0){ movements = deduped; findings.push(`Collapsed ${dropped} duplicate movement id(s) in the ledger`); }
+    }
+  } catch(e){ console.warn('[check 14]', e); }
+
+  // ─── Check 15 (v5.28): factory rows in an advanced state missing updatedAt ───
+  // Hardens against the revert class (the scan bug): a factory row that has moved
+  // past 'created-at-factory' but carries no updatedAt can never win last-edit-wins,
+  // so a stale remote could revert it. Backfill the stamp from the row's OWN latest
+  // trackingHistory entry (its real edit time) — NEVER "now", so this can't make a
+  // stale local row beat a legitimately newer remote (a full-ISO editStamp sorts
+  // after a bare date). Idempotent: rows that already have updatedAt are skipped.
+  try {
+    let stamped = 0;
+    (Array.isArray(factory) ? factory : []).forEach(f => {
+      if(!f || f.updatedAt) return;
+      const st = f.trackingState;
+      if(!st || st === 'created-at-factory') return;   // default state doesn't need protection
+      const hist = Array.isArray(f.trackingHistory) ? f.trackingHistory : [];
+      const lastAt = hist.length ? (hist[hist.length - 1].at || '') : '';
+      if(lastAt){ f.updatedAt = lastAt; stamped++; }
+    });
+    if(stamped > 0) findings.push(`Backfilled updatedAt on ${stamped} factory row(s) in an advanced state (revert-proofing)`);
+  } catch(e){ console.warn('[check 15]', e); }
 
   return findings;
 }
@@ -28514,11 +28912,33 @@ document.addEventListener('keydown', e=>{
       // a smaller count is a legitimate change (or we already merged), not stale data.
       if(_initialSyncDone) return true;
       try {
-        const snap = await _fbDb.ref('state/shared/latest').once('value');
-        const cloud = snap.val();
-        if(!cloud || !cloud.state) return true; // cloud empty, OK to seed
-        if(cloud.deviceId === _fbDeviceId) return true; // our own previous push
-        const remote = JSON.parse(cloud.state);
+        // v5.30 — v2-first: the v1 blob froze at dual-write retirement, so comparing
+        // against it could auto-heal a booting device toward STALE data. Read the tiny
+        // v2 meta + only the four spa-bearing collections. Legacy blob path kept only
+        // for a cloud that has no v2 yet.
+        let remote = null, cloud = null;
+        const _vm = await _fbDb.ref('state/shared/v2/meta').once('value');
+        const vmeta = _vm.val();
+        if(vmeta && vmeta.timestamp){
+          if(vmeta.deviceId === _fbDeviceId) return true; // our own previous push
+          remote = { _epoch: vmeta.epoch || 1 };
+          for(const k of ['factory','units','incoming','dispatched']){
+            try {
+              const cs = await _fbDb.ref('state/shared/v2/coll/' + k).once('value');
+              const cv = cs.val();
+              if(cv && typeof cv.j === 'string') remote[k] = JSON.parse(cv.j);
+            } catch(e){ console.warn('[safe-push v2 read]', k, e); }
+          }
+          cloud = { timestamp: vmeta.timestamp, deviceId: vmeta.deviceId };
+        } else {
+          const snap = await _fbDb.ref('state/shared/latest').once('value');
+          const c = snap.val();
+          if(!c || !c.state) return true; // cloud empty, OK to seed
+          if(c.deviceId === _fbDeviceId) return true; // our own previous push
+          remote = JSON.parse(c.state);
+          cloud = c;
+        }
+        if(!remote) return true;
         // Don't auto-heal toward a STALE (old-epoch) cloud — that's junk from an
         // out-of-date device. Allow our own (clean) push instead.
         const cloudEpoch = Number(remote && remote._epoch) || 1;
