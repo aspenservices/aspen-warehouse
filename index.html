@@ -4741,7 +4741,7 @@ let _fbInitAttempts = 0;
 //   /app_version/current  (in Firebase console, manually, OR call
 //   pushVersionToFirebase() from the Admin console at deploy time)
 // ══════════════════════════════════════════════════════════════════
-const APP_VERSION = 'v5.30';
+const APP_VERSION = 'v5.31';
 // v5.23 (#1): paste your reCAPTCHA v3 site key here AFTER enabling App Check in
 // the Firebase console (Build → App Check → Register app → reCAPTCHA v3). Until
 // then it stays '', everything works exactly as before.
@@ -6640,6 +6640,22 @@ function _mergeUnits(local, remote, restored){
         const lt = (u && u.updatedAt) || '';
         const rt = (rem && rem.updatedAt) || '';
         if(lt && lt > rt) merged[idx] = u;   // our edit is newer → ours wins
+        else if(lt && rt && rt > lt){
+          // v5.31 CANARY — remote beat us. If OUR edit was made in the last 3 min,
+          // a human probably just watched their change vanish (the "ghost revert").
+          // Log the full evidence: both stamps + whether the winning stamp is in the
+          // FUTURE vs the server clock (the clock-skew smoking gun).
+          try {
+            const nowMs = (typeof fbServerNow === 'function') ? fbServerNow() : Date.now();
+            const ltMs = Date.parse(lt);
+            if(ltMs && (nowMs - ltMs) < 180000){
+              const rtMs = Date.parse(rt) || 0;
+              const future = rtMs > nowMs + 90000;
+              console.warn('[merge-canary] units: remote overwrote a FRESH local edit', { key: k, localStamp: lt, remoteStamp: rt, serverNow: new Date(nowMs).toISOString(), remoteStampInFuture: future });
+              if(future && typeof addAct === 'function') addAct(`⚠️ Sync overruled a fresh edit on ${String(k).replace(/^(sn|id):/,'')} — another device's clock looks ahead of real time`, 'var(--red)');
+            }
+          } catch(e){}
+        }
       }
       return;
     }
@@ -6987,6 +7003,19 @@ function _mergeFactory(local, remote, localIncoming, remoteCfg){
       const lt = f.updatedAt || '';
       const rt = (rem && rem.updatedAt) || '';
       if(lt && lt > rt) merged[idx] = f;   // our edit is newer → ours wins
+      else if(lt && rt && rt > lt){
+        // v5.31 CANARY — same evidence trap as _mergeUnits (see there for rationale).
+        try {
+          const nowMs = (typeof fbServerNow === 'function') ? fbServerNow() : Date.now();
+          const ltMs = Date.parse(lt);
+          if(ltMs && (nowMs - ltMs) < 180000){
+            const rtMs = Date.parse(rt) || 0;
+            const future = rtMs > nowMs + 90000;
+            console.warn('[merge-canary] factory: remote overwrote a FRESH local edit', { key: k, localStamp: lt, remoteStamp: rt, serverNow: new Date(nowMs).toISOString(), remoteStampInFuture: future });
+            if(future && typeof addAct === 'function') addAct(`⚠️ Sync overruled a fresh scan/edit on ${String(k)} — another device's clock looks ahead of real time`, 'var(--red)');
+          }
+        } catch(e){}
+      }
       return;
     }
     merged.push(f); kept++;            // local-only factory row -> KEEP (never vanish on id collision)
@@ -9552,7 +9581,26 @@ window.toISO = toISO;
 // full ISO ("…T…Z") sorts AFTER a bare date ("YYYY-MM-DD"), so a new edit always
 // beats a legacy date-only stamp. Used for the merge fields (units/factory/cover/
 // request updatedAt|updated|notesUpdatedAt) — NOT for human-facing dates.
-const editStamp = () => { try { return new Date().toISOString(); } catch(e){ return toISO(); } };
+// ── EDIT STAMPS (v5.31) ─────────────────────────────────────────────────────
+// updatedAt stamps decide last-edit-wins merges, so they MUST come from ONE
+// shared clock. Raw device clocks caused the "ghost revert": a tablet with a
+// fast clock stamps rows in the future, and those rows then beat every honest
+// edit until the skew ages out. Fix: stamp with the FIREBASE SERVER clock
+// (fbServerNow — device time + .info/serverTimeOffset), falling back to device
+// time only while offline/pre-connect. A monotonic floor guarantees this
+// session's stamps never go backwards even if the offset arrives mid-session
+// and pulls "now" behind a stamp we already issued.
+let _lastEditStampMs = 0;
+function _editStampFromMs(ms){
+  if(!(ms > 0)) ms = Date.now();
+  if(ms <= _lastEditStampMs) ms = _lastEditStampMs + 1;   // strictly increasing
+  _lastEditStampMs = ms;
+  try { return new Date(ms).toISOString(); } catch(e){ return toISO(); }
+}
+const editStamp = () => {
+  try { return _editStampFromMs((typeof fbServerNow === 'function') ? fbServerNow() : Date.now()); }
+  catch(e){ try { return new Date().toISOString(); } catch(_){ return toISO(); } }
+};
 window.editStamp = editStamp;
 // fmtD: robust to BOTH a bare date ("2026-06-04") and a full ISO timestamp
 // ("2026-06-04T21:45:30.123Z"). Bare dates get a noon time appended (avoids TZ
@@ -10488,6 +10536,7 @@ function migratePositionsToBlueprint(){
     u._legacyStack = u.stack;
     u.pos = newPos;
     u.stack = 1;
+    touchUnit(u);   // v5.31 — a migration's placement must beat any stale pre-migration remote
     // Level stays the same; stack 2 → stack 1 of the adjacent cell preserves level (BTM stays BTM, etc.)
     migrated++;
   });
@@ -10609,6 +10658,7 @@ function autoOrganizeUnits(){
     u.pos = dest.pos;
     u.stack = dest.slot.stack;
     u.level = dest.slot.level;
+    touchUnit(u);   // v5.31 — stamp: an auto-organize relocation must survive a stale remote merge
     addAct(`📦 Auto-organize: ${u.sn||u.dealer} ${oldPos}→${dest.pos}`, 'var(--accent)');
     relocated++;
   });
@@ -11905,7 +11955,7 @@ function setupDropExtended(el,pos){
         toast(`→ ${pos} · S${slot.stack}-${LEVEL_SHORT(slot.level)}`,'ok');
       } else {
         snapshot(`move ${u.sn||u.dealer}`);
-        const old=u.pos;u.pos=pos;
+        const old=u.pos;u.pos=pos; touchUnit(u);   // v5.31 — stamp: non-stacked moves must also beat stale remotes
         addAct(`${u.sn?'S/N '+u.sn:u.dealer} moved: ${old} → ${pos}`,'var(--accent)');
         if(old!==pos) postMovement({type:'309', sn:u.sn, material:u.type||'', qty:1, from:LOC_WAREHOUSE(old), to:LOC_WAREHOUSE(pos), stockType:'unrestricted', note:'Floor relocation'});
         toast(`Unit moved to ${pos}`,'ok');
@@ -27808,6 +27858,18 @@ function runSelfTests(){
     return true;
   });
 
+  // 9 ── CLOCK-SKEW PROTECTION (v5.31): stamps must be strictly increasing even if
+  //      the clock jumps BACKWARDS (server offset arriving mid-session, NTP sync,
+  //      timezone fix). If this goes red, a clock correction could make a device's
+  //      newer edits carry older stamps → they'd lose merges to their own past.
+  t('stamps · monotonic under a backwards clock jump', () => {
+    const base = (((typeof fbServerNow === 'function') ? fbServerNow() : Date.now()) - 600000); // 10 min ago → floor stays in the past
+    const s1 = _editStampFromMs(base);
+    const s2 = _editStampFromMs(base - 3600000);   // clock suddenly reads 1h earlier
+    if(!(s2 > s1)) return `expected monotonic: ${s2} <= ${s1}`;
+    return true;
+  });
+
   const passed = results.filter(r => r.pass).length;
   return { passed, failed: results.length - passed, total: results.length, results };
 }
@@ -28268,6 +28330,32 @@ function runIntegrityChecks(){
     });
     if(stamped > 0) findings.push(`Backfilled updatedAt on ${stamped} factory row(s) in an advanced state (revert-proofing)`);
   } catch(e){ console.warn('[check 15]', e); }
+
+  // ─── Check 16 (v5.31): FUTURE-STAMP QUARANTINE ───
+  // A device with a fast clock stamps rows "in the future"; those rows then beat
+  // every honest edit in last-edit-wins until the skew ages out (the ghost-revert:
+  // a freshly moved tub bounces back seconds later). Clamp any updatedAt more than
+  // 90s ahead of the SERVER clock down to server-now. Content untouched — only the
+  // "when" is corrected, restoring fair merges. Idempotent; needs the server offset,
+  // so it no-ops sanely while offline. Runs after every merge, so the fleet heals
+  // itself as devices sync.
+  try {
+    if(typeof fbServerNow === 'function' && _fbOffsetRef){   // only once the server clock is live
+      const nowMs = fbServerNow();
+      const limit = new Date(nowMs + 90000).toISOString();
+      let clamped = 0;
+      const clampColl = (arr, label) => {
+        (Array.isArray(arr) ? arr : []).forEach(row => {
+          if(row && typeof row.updatedAt === 'string' && row.updatedAt > limit){
+            row.updatedAt = new Date(nowMs).toISOString();
+            clamped++;
+          }
+        });
+      };
+      clampColl(units, 'units'); clampColl(factory, 'factory');
+      if(clamped > 0) findings.push(`Clamped ${clamped} future-dated edit stamp(s) to server time (fast-clock device protection)`);
+    }
+  } catch(e){ console.warn('[check 16]', e); }
 
   return findings;
 }
