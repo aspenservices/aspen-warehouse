@@ -4692,6 +4692,20 @@ function getDeviceId(){
   return id;
 }
 _fbDeviceId = getDeviceId();
+// ── PER-TAB ECHO IDENTITY (v5.33) ───────────────────────────────────────────
+// _fbDeviceId lives in localStorage, so EVERY TAB of the same browser shares it.
+// The sync layer skips pushes whose deviceId matches ours ("own echo") — which
+// meant a second open tab silently DISCARDED the first tab's pushes, went stale,
+// and then pushed its stale state back (ghost desyncs/reverts from the same
+// machine). Fix: echo filtering uses a TAB-scoped id (sessionStorage is per-tab,
+// survives reloads of that tab). Storage PATHS (state/{device}, snapshots,
+// photos-index) intentionally stay device-scoped — no data layout changes.
+let _fbTabId = _fbDeviceId;
+try {
+  let _tabSeed = sessionStorage.getItem('aspen_tab_id');
+  if(!_tabSeed){ _tabSeed = Math.random().toString(36).slice(2, 8); sessionStorage.setItem('aspen_tab_id', _tabSeed); }
+  _fbTabId = _fbDeviceId + '~' + _tabSeed;
+} catch(e){ /* sessionStorage unavailable → device-scoped fallback (old behavior) */ }
 
 // Email → Firebase-safe key (DB doesn't accept . or @ in keys)
 function emailKey(email){
@@ -4741,7 +4755,7 @@ let _fbInitAttempts = 0;
 //   /app_version/current  (in Firebase console, manually, OR call
 //   pushVersionToFirebase() from the Admin console at deploy time)
 // ══════════════════════════════════════════════════════════════════
-const APP_VERSION = 'v5.31';
+const APP_VERSION = 'v5.35';
 // v5.23 (#1): paste your reCAPTCHA v3 site key here AFTER enabling App Check in
 // the Firebase console (Build → App Check → Register app → reCAPTCHA v3). Until
 // then it stays '', everything works exactly as before.
@@ -4918,7 +4932,7 @@ async function _saveBeforeReload(){
         } else {
           const snap = await Promise.race([ _fbDb.ref('state/shared/latest').once('value'), new Promise(r=>setTimeout(()=>r(null),1500)) ]);
           const cloud = snap && snap.val && snap.val();
-          if(cloud && cloud.state && cloud.deviceId !== _fbDeviceId) remote = JSON.parse(cloud.state);
+          if(cloud && cloud.state && cloud.deviceId !== _fbTabId) remote = JSON.parse(cloud.state);
         }
         if(remote){
           const distinct = (o)=>{ const s=new Set(); ['factory','units','incoming','dispatched'].forEach(k=>{ (Array.isArray(o[k])?o[k]:[]).forEach(it=>{ const sn=String(it&&it.sn||''); if(sn)s.add(sn); }); }); return s.size; };
@@ -5301,7 +5315,7 @@ async function handleAuthChange(user){
       } else if(_fbDb && _fbAuthorized){
         _fbDb.ref('state/shared/latest').once('value').then(snap => {
           const payload = snap.val();
-          if(payload && payload.state && payload.deviceId !== _fbDeviceId){
+          if(payload && payload.state && payload.deviceId !== _fbTabId){
             if(payload.timestamp > _fbLastLocalWriteAt){
               console.log('[firebase] Pulling fresh cloud state after sign-in');
               try {
@@ -5421,7 +5435,7 @@ async function _fbCloudSyncInner(showToast){
     // slots + daily + boot, with cleanup) is the real time machine and fully covers it.
     // ── SHARED canonical state for realtime cross-device sync ──
     if(V2_DUAL_WRITE_LEGACY){
-      await _fbDb.ref('state/shared/latest').set({...payload, deviceId: _fbDeviceId});
+      await _fbDb.ref('state/shared/latest').set({...payload, deviceId: _fbTabId});
     }
     // ── v2 PER-COLLECTION PUSH (v5.20) ── only the changed collections travel.
     try {
@@ -5440,7 +5454,7 @@ async function _fbCloudSyncInner(showToast){
         // a successful (no-op) push would count as a verify FAILURE and, after 3, warn
         // the user falsely. Tiny write (bytes); changed:'' makes it a no-op on every
         // other device (_fbV2ApplyMeta assembles nothing).
-        await _fbDb.ref('state/shared/v2/meta').set({ timestamp: ts, deviceId: _fbDeviceId, uploadedBy: writerName, nid: state.nid, epoch: (state._epoch || 1), changed: '' });
+        await _fbDb.ref('state/shared/v2/meta').set({ timestamp: ts, deviceId: _fbTabId, uploadedBy: writerName, nid: state.nid, epoch: (state._epoch || 1), changed: '' });
       }
       if(!_fbV2CollRef && !_fbSharedRef){ /* listeners not yet attached (rare) */ }
       else if(!_fbV2CollRef && _fbSharedRef){ /* legacy session: v2 now seeded; switch happens on next reload */ }
@@ -5457,7 +5471,7 @@ async function _fbCloudSyncInner(showToast){
     // v2 deferred commit drained after our push (same rule as v1 below)
     if(_fbV2DeferredMeta){
       const m2 = _fbV2DeferredMeta; _fbV2DeferredMeta = null;
-      if(m2.timestamp > _fbLastLocalWriteAt && m2.deviceId !== _fbDeviceId){
+      if(m2.timestamp > _fbLastLocalWriteAt && m2.deviceId !== _fbTabId){
         try { _fbV2ApplyMeta(Object.assign({}, m2)); } catch(e){ console.warn('[v2 deferred apply]', e); }
       }
     }
@@ -5465,7 +5479,7 @@ async function _fbCloudSyncInner(showToast){
     if(_fbDeferredRemote){
       const p = _fbDeferredRemote;
       _fbDeferredRemote = null;
-      if(p.timestamp > _fbLastLocalWriteAt && p.deviceId !== _fbDeviceId){
+      if(p.timestamp > _fbLastLocalWriteAt && p.deviceId !== _fbTabId){
         try {
           const restored = JSON.parse(p.state);
           fbApplyRemoteState(restored, p.timestamp);
@@ -5661,6 +5675,10 @@ const MV_CHANNEL_LIMIT = 10000;
 const MOV_ARCHIVE_KEEP = 60;   // v5.29 — cap on stored movements_archive nodes (see _pruneMovementsArchive)
 let _fbV2CollRef = null, _fbV2MetaRef = null, _fbV2DeferredMeta = null, _fbV2MetaInitial = true;
 const _fbV2Cache = {};        // name → parsed latest cloud value
+const _fbV2CacheT = {};       // v5.34 — name → server ts of that cached payload (freshness gate)
+let _fbV2GateRetries = 0;     // v5.34 — bounded re-defers while a claimed child is in flight
+let _fbV2LastMetaTs = 0;      // v5.34 — newest commit ts seen (stale retries yield to it)
+const _fbV2GateFetched = {};  // v5.35 — commits whose stale children we already re-fetched once
 const _fbV2Dirty = {};        // name → true (received, not yet applied)
 const _fbV2Hash = {};         // name → hash of what we last pushed OR last received
 
@@ -5725,7 +5743,7 @@ function _fbV2BuildUpdate(stateObj, ts, writerName, hashCache){
   }
   if(changed.length){
     upd['state/shared/v2/meta'] = {
-      timestamp: ts, deviceId: _fbDeviceId, uploadedBy: writerName,
+      timestamp: ts, deviceId: _fbTabId, uploadedBy: writerName,
       nid: stateObj.nid, epoch: (stateObj._epoch || 1),
       changed: changed.join(',')
     };
@@ -5784,10 +5802,11 @@ function _fbV2AssembleFull(dirty, meta){
 function _fbV2ApplyMeta(meta){
   if(!meta || !meta.timestamp) return;
   const wasInitial = _fbV2MetaInitial; _fbV2MetaInitial = false;
-  if(meta.deviceId === _fbDeviceId){                 // echo of our own commit
+  if(meta.deviceId === _fbTabId){                 // echo of our own commit (tab-scoped, v5.33)
     for(const k in _fbV2Dirty) delete _fbV2Dirty[k];
     return;
   }
+  if(meta.timestamp > _fbV2LastMetaTs) _fbV2LastMetaTs = meta.timestamp;   // v5.34 (gate retry supersession)
   if(wasInitial){                                    // CLOUD WINS on open (v4.16 semantics)
     const full = _fbV2AssembleFull(Object.fromEntries(V2_COLLS.map(n => [n, true])), meta);
     for(const k in _fbV2Dirty) delete _fbV2Dirty[k];
@@ -5807,6 +5826,46 @@ function _fbV2ApplyMeta(meta){
   // one micro-tick so the same-update child batch settles first.
   const claimed = String(meta.changed||'').split(',').filter(Boolean);
   setTimeout(() => {
+    // v5.34 — FRESHNESS GATE (found by multi-device simulation): the union below
+    // used whatever cache was present, so a claimed child that hadn't landed yet
+    // (event reordering / slow delivery) made the assemble run against a STALE or
+    // LOCAL copy of that collection — e.g. units applied against old dispatched →
+    // the elsewhere/supersession guards built from stale data → resurrections.
+    // Require every claimed collection's cached payload to be at least as new as
+    // the commit; otherwise re-defer briefly (bounded), then proceed with what we
+    // have (availability over perfection) and let the guards + next commit heal.
+    const _stale = claimed.filter(n => _fbV2Cache[n] === undefined || (_fbV2CacheT[n] || 0) < meta.timestamp);
+    if(_stale.length && _fbV2GateRetries < 12){
+      _fbV2GateRetries++;
+      setTimeout(() => {
+        try {
+          if(_fbV2LastMetaTs > meta.timestamp) { _fbV2GateRetries = 0; return; }   // superseded by a newer commit — let it drive
+          _fbV2ApplyMeta(meta);
+        } catch(e){ console.error('[v2 gate retry]', e); }
+      }, 120);
+      return;
+    }
+    if(_stale.length){
+      // v5.35 — DIRECT FETCH instead of applying stale data (found by simulation):
+      // proceeding with a stale payload could apply a commit against an OUTDATED
+      // collection array — a lagging device's whole-array push had already clobbered
+      // the cache. Read the missing children straight from the cloud, then re-enter.
+      // One-shot per commit (_fbV2GateFetched) so a failed read can't loop forever;
+      // if the fetch fails we fall through and apply what we have (availability) —
+      // the keep-local merge + anti-clobber re-push still protect the data.
+      if(!_fbV2GateFetched[meta.timestamp]){
+        _fbV2GateFetched[meta.timestamp] = true;
+        console.warn('[v2 gate] children still stale after retries — fetching directly:', _stale.join(','));
+        Promise.all(_stale.map(n => _fbDb.ref('state/shared/v2/coll/' + n).once('value')
+          .then(sn => { const v = sn.val(); if(v && typeof v.j === 'string'){ _fbV2Cache[n] = JSON.parse(v.j); _fbV2CacheT[n] = (typeof v.t === 'number') ? v.t : meta.timestamp; _fbV2Hash[n] = v.h; } })
+          .catch(e => console.warn('[v2 gate fetch]', n, e))))
+          .then(() => { _fbV2GateRetries = 0; try { if(_fbV2LastMetaTs <= meta.timestamp) _fbV2ApplyMeta(meta); } catch(e){ console.error('[v2 gate refetch apply]', e); } });
+        try { for(const k in _fbV2GateFetched){ if(Number(k) < meta.timestamp - 300000) delete _fbV2GateFetched[k]; } } catch(e){}
+        return;
+      }
+      console.warn('[v2 gate] applying with in-flight children after direct fetch:', _stale.join(','));
+    }
+    _fbV2GateRetries = 0;
     const dirty = Object.assign({}, _fbV2Dirty);
     for(const n of claimed){ if(_fbV2Cache[n] !== undefined) dirty[n] = true; }
     for(const k in _fbV2Dirty) delete _fbV2Dirty[k];
@@ -5830,6 +5889,7 @@ function _fbAttachV2Listeners(){
       const name = snap.key, v = snap.val();
       if(!v || typeof v.j !== 'string') return;
       _fbV2Cache[name] = JSON.parse(v.j);
+      _fbV2CacheT[name] = (typeof v.t === 'number') ? v.t : 0;   // v5.34 — payload freshness for the apply gate
       _fbV2Hash[name] = v.h;                          // received = new baseline (don't re-push it)
       _fbV2Dirty[name] = true;
     } catch(e){ console.warn('[v2 child]', snap.key, e); }
@@ -5923,7 +5983,7 @@ function _fbAttachV1Listener(){
       return;
     }
     // Echo guard: ignore writes that came from us
-    if(payload.deviceId === _fbDeviceId) return;
+    if(payload.deviceId === _fbTabId) return;
     // ── CLOUD WINS ON OPEN (v4.16) ──────────────────────────────────────
     // On the FIRST listener event we ALWAYS adopt the cloud state,
     // without comparing timestamps. Before, if the local copy looked "newer"
@@ -6031,7 +6091,7 @@ function _fbStartConnectionMonitor(){
         } else if(_fbAuthorized){
           _fbDb.ref('state/shared/latest').once('value').then(s => {
             const p = s.val();
-            if(!p || !p.state || p.deviceId === _fbDeviceId) return;
+            if(!p || !p.state || p.deviceId === _fbTabId) return;
             if(p.timestamp <= _fbLastLocalWriteAt) return;
             if(_fbLocalEditCounter > _fbPushedEditCounter){ _fbDeferredRemote = p; return; }
             try {
@@ -6115,7 +6175,7 @@ function _syncWatchdog(){
   if(_fbDeferredRemote && _fbLocalEditCounter === _fbPushedEditCounter){
     const p = _fbDeferredRemote;
     _fbDeferredRemote = null;
-    if(p.timestamp > _fbLastLocalWriteAt && p.deviceId !== _fbDeviceId){
+    if(p.timestamp > _fbLastLocalWriteAt && p.deviceId !== _fbTabId){
       try {
         fbApplyRemoteState(JSON.parse(p.state), p.timestamp);
         console.log('[watchdog] applied stale deferred remote from', p.uploadedBy || p.deviceId);
@@ -6158,7 +6218,7 @@ function _syncWatchdog(){
       return _fbDb.ref('state/shared/latest').once('value').then(snap => {
         const payload = snap.val();
         if(!payload || !payload.state) return;
-        if(payload.deviceId === _fbDeviceId) return;
+        if(payload.deviceId === _fbTabId) return;
         if(payload.timestamp <= _fbLastLocalWriteAt) return;
         // If we have unpushed edits, defer (next push will replay)
         if(_fbLocalEditCounter > _fbPushedEditCounter){ _fbDeferredRemote = payload; return; }
@@ -6596,10 +6656,21 @@ function _mergeUnits(local, remote, restored){
   };
   const remoteKeys = new Set(remote.map(keyOf));
   // S/Ns the incoming state already accounts for somewhere else → don't re-add to units.
-  const elsewhere = new Set();
+  // v5.34 — STAMP-AWARE (found by multi-device simulation): this guard used to be a
+  // blind Set, so a LAGGING device's payload (e.g. returning from offline with the
+  // tub still 'ready-to-ship' at the factory) DELETED a just-placed floor row that
+  // was hours fresher. It is now a map sn → newest blocking stamp, and the local-only
+  // branch below only drops the floor row when the blocking evidence is NEWER than
+  // the floor row itself — the same last-edit-wins principle every other guard uses.
+  const elsewhere = new Map();
+  const _blockWith = (sn, st) => {
+    const k = 'sn:' + String(sn).trim();
+    const cur = elsewhere.get(k);
+    if(cur === undefined || String(st||'') > String(cur||'')) elsewhere.set(k, String(st||''));
+  };
   ['dispatched','incoming'].forEach(coll => {
     (Array.isArray(restored && restored[coll]) ? restored[coll] : []).forEach(x => {
-      if(x && x.sn != null && String(x.sn).trim() !== '') elsewhere.add('sn:' + String(x.sn).trim());
+      if(x && x.sn != null && String(x.sn).trim() !== '') _blockWith(x.sn, x.updatedAt);
     });
   });
   // Factory rows normally mean "not on our floor" — EXCEPT an INBOUND in-transit
@@ -6612,23 +6683,90 @@ function _mergeUnits(local, remote, restored){
     if(!x || x.sn == null || String(x.sn).trim() === '') return;
     const inboundTransit = x.trackingState === 'in-transit' && x.transitDir !== 'to-factory';
     if(inboundTransit) return;   // arriving to us → don't block our floor copy
-    elsewhere.add('sn:' + String(x.sn).trim());
+    if(x.trackingState === 'received-at-warehouse') return;   // v5.34 — received = it IS our floor
+    _blockWith(x.sn, x.updatedAt);
   });
   (Array.isArray(restored && restored.marriages) ? restored.marriages : []).forEach(m => {
-    if(m && m.spaSn != null && String(m.spaSn).trim() !== '') elsewhere.add('sn:' + String(m.spaSn).trim());
+    if(m && m.spaSn != null && String(m.spaSn).trim() !== '') _blockWith(m.spaSn, m.updatedAt);
   });
   // Tubs the incoming state shows as shipped/received via a factory request are
   // legitimately en route to (or back at) the factory — never resurrect on the floor.
   (Array.isArray(restored && restored.dispatchRequests) ? restored.dispatchRequests : []).forEach(rq => {
     if(rq && rq.type === 'tub' && rq.sn != null && (rq.status === 'loading-bay' || rq.status === 'shipped' || rq.status === 'received'))
-      elsewhere.add('sn:' + String(rq.sn).trim());
+      _blockWith(rq.sn, rq.updatedAt);
   });
-  const merged = remote.slice();
-  // Index remote-derived rows by key so we can do LAST-EDIT-WINS when the SAME tub
-  // exists on both sides: a tub you just moved/reordered locally must not be reverted
-  // by a stale remote that still holds its old position/level. Mirrors _mergeFactory.
+  // v5.32 — collapse same-key DUPLICATES in the remote array first, keeping the
+  // freshest-stamped row. A duplicated S/N in the cloud let a STALE copy slip past
+  // last-edit-wins (which only updated the first occurrence); the protection layer's
+  // dedup then kept that stale copy and pushed it fleet-wide — a silent revert machine.
+  const merged = [];
   const mergedIdx = new Map();
-  merged.forEach((u, i) => { const k = keyOf(u); if(k && !mergedIdx.has(k)) mergedIdx.set(k, i); });
+  let _dupsCollapsed = 0;
+  remote.forEach(r => {
+    const k = keyOf(r);
+    if(!k){ merged.push(r); return; }
+    if(mergedIdx.has(k)){
+      const i = mergedIdx.get(k);
+      const a = (merged[i] && merged[i].updatedAt) || '';
+      const b = (r && r.updatedAt) || '';
+      if(b > a) merged[i] = r;
+      _dupsCollapsed++;
+      return;
+    }
+    mergedIdx.set(k, merged.length);
+    merged.push(r);
+  });
+  if(_dupsCollapsed > 0){
+    try {
+      console.warn('[merge-canary] units: collapsed ' + _dupsCollapsed + ' duplicate row(s) in the incoming cloud array (kept freshest)');
+      if(typeof addAct === 'function') addAct(`⚠️ Cloud state carried ${_dupsCollapsed} duplicate unit row(s) — collapsed to the freshest copy`, 'var(--red)');
+    } catch(e){}
+  }
+  // v5.32 — plausibility cap for last-edit-wins: any stamp more than 90s ahead of the
+  // SERVER clock is untrustworthy (fast device clock). A plausible stamp must beat a
+  // poisoned one REGARDLESS of their raw ordering — this defends at merge time, even
+  // against pushes from devices still running old code. No server clock → no capping
+  // (identical to previous behavior).
+  const _plausibleCap = (typeof fbServerNow === 'function' && typeof _fbOffsetRef !== 'undefined' && _fbOffsetRef)
+    ? new Date(fbServerNow() + 90000).toISOString() : '\uffff';
+  // v5.34 — DISPATCH SUPERSESSION GUARD (defense-in-depth for the tombstone above,
+  // found by multi-device simulation): a remote-carried floor row whose S/N has a
+  // NEWER dispatch record (local or incoming, not 'returned') is stale by definition
+  // — the tub left the floor after that row was last edited. Drop it instead of
+  // resurrecting a dispatched tub. Rows newer than the dispatch (a genuine return
+  // to the floor) survive; legacy dispatch records without a stamp never drop rows.
+  {
+    const _dispNewest = new Map();   // sn → newest non-returned dispatch stamp
+    const _feed = arr => { (Array.isArray(arr) ? arr : []).forEach(dd => {
+      if(!dd || dd.sn == null || String(dd.sn).trim() === '') return;
+      if(dd.deliveryStatus === 'returned') return;
+      const st = (typeof dd.updatedAt === 'string') ? dd.updatedAt : '';
+      if(!st) return;
+      const k = String(dd.sn).trim();
+      if(!_dispNewest.has(k) || st > _dispNewest.get(k)) _dispNewest.set(k, st);
+    }); };
+    _feed(restored && restored.dispatched);
+    _feed((typeof dispatched !== 'undefined') ? dispatched : null);
+    if(_dispNewest.size){
+      let _dropped = 0;
+      for(let i = merged.length - 1; i >= 0; i--){
+        const r = merged[i]; if(!r || r.sn == null) continue;
+        const st = _dispNewest.get(String(r.sn).trim());
+        if(!st) continue;
+        const ru = r.updatedAt || '';
+        const rowFut = !!ru && ru > _plausibleCap;   // v5.34 — poisoned row stamp can't immunize against an honest dispatch
+        const dispFut = st > _plausibleCap;
+        const drop = (rowFut && !dispFut) ? true : ((dispFut && !rowFut) ? false : (ru < st));
+        if(drop){ merged.splice(i, 1); mergedIdx.delete(keyOf(r)); _dropped++; }
+      }
+      if(_dropped > 0){
+        // rebuild the index — splices shifted positions
+        mergedIdx.clear();
+        merged.forEach((r, i) => { const k = keyOf(r); if(k && !mergedIdx.has(k)) mergedIdx.set(k, i); });
+        try { console.warn('[merge-canary] units: dropped ' + _dropped + ' floor row(s) superseded by a newer dispatch (resurrection guard)'); } catch(e){}
+      }
+    }
+  }
   let kept = 0;
   local.forEach(u => {
     const k = keyOf(u); if(!k) return;
@@ -6639,7 +6777,15 @@ function _mergeUnits(local, remote, restored){
         const rem = merged[idx];
         const lt = (u && u.updatedAt) || '';
         const rt = (rem && rem.updatedAt) || '';
-        if(lt && lt > rt) merged[idx] = u;   // our edit is newer → ours wins
+        // v5.32 — plausibility-aware last-edit-wins: a stamp beyond the server-clock
+        // cap is poison (fast device clock) and must not win against a plausible one.
+        const futL = !!lt && lt > _plausibleCap;
+        const futR = !!rt && rt > _plausibleCap;
+        let oursWins;
+        if(futR && !futL) oursWins = !!lt;        // remote stamp from the future, ours honest → ours wins
+        else if(futL && !futR) oursWins = false;  // ours is the poisoned one → theirs wins
+        else oursWins = !!lt && lt > rt;          // both plausible (or both broken) → normal LEW
+        if(oursWins) merged[idx] = u;
         else if(lt && rt && rt > lt){
           // v5.31 CANARY — remote beat us. If OUR edit was made in the last 3 min,
           // a human probably just watched their change vanish (the "ghost revert").
@@ -6659,8 +6805,15 @@ function _mergeUnits(local, remote, restored){
       }
       return;
     }
-    if(elsewhere.has(k)) return;    // local-only but incoming knows it elsewhere (dispatched/etc) → respect
-    merged.push(u); kept++;         // local-only & unknown to incoming → KEEP (the fix)
+    if(elsewhere.has(k)){
+      // v5.34 — drop only if the blocking evidence is NEWER than our floor row.
+      // A fresher floor row means the tub came BACK (or was placed) after that
+      // record — a stale 'ready-to-ship'/dispatch echo must not delete it.
+      const blockSt = elsewhere.get(k) || '';
+      const mySt = (u && u.updatedAt) || '';
+      if(!mySt || blockSt >= mySt) return;   // no evidence of freshness on our side → respect (legacy behavior)
+    }
+    merged.push(u); kept++;         // local-only & fresher than any elsewhere-claim → KEEP
   });
   // ── HONOR DELETE TOMBSTONES (v4.91) ──────────────────────────────────────
   // Union the tombstone maps from BOTH sides (cfg is merged AFTER units, so the
@@ -6676,7 +6829,16 @@ function _mergeUnits(local, remote, restored){
       for(let i = merged.length - 1; i >= 0; i--){
         const k = keyOf(merged[i]); if(!k) continue;
         const t = _tomb[k];
-        if(t && (merged[i].updatedAt || '') < t) merged.splice(i, 1);
+        if(!t) continue;
+        // v5.34 — plausibility-aware (multi-device simulation found this): a row
+        // stamped in the FUTURE by a fast-clock device was IMMUNE to every honest
+        // tombstone (future > any honest time). Same asymmetric rule as the LEW cap:
+        // a poisoned row stamp cannot beat a plausible tombstone.
+        const ru = merged[i].updatedAt || '';
+        const rowFut = !!ru && ru > _plausibleCap;
+        const tombFut = t > _plausibleCap;
+        const drop = (rowFut && !tombFut) ? true : ((tombFut && !rowFut) ? false : (ru < t));
+        if(drop) merged.splice(i, 1);
       }
     }
   } catch(e){ console.warn('[tombstone merge]', e); }
@@ -6907,13 +7069,19 @@ function _mergeDispatched(local, remote){
   const stamp = d => (d && typeof d.updatedAt === 'string') ? d.updatedAt : '';
   const byKey = new Map();
   remote.forEach(d => { if(!d) return; const k = keyOf(d); if(k != null) byKey.set(k, d); });
+  // v5.32 — plausibility cap (see _mergeUnits): future-stamped rows must not beat honest edits.
+  const _plausibleCap = (typeof fbServerNow === 'function' && typeof _fbOffsetRef !== 'undefined' && _fbOffsetRef)
+    ? new Date(fbServerNow() + 90000).toISOString() : '\uffff';
   let kept = 0;
   local.forEach(d => {
     if(!d) return;
     const k = keyOf(d); if(k == null) return;
     const cur = byKey.get(k);
     if(!cur){ byKey.set(k, d); kept++; return; }        // local-only dispatch -> KEEP
-    if(stamp(d) > stamp(cur)){ byKey.set(k, d); kept++; } // local edit is NEWER -> wins (re-push spreads it)
+    const lt = stamp(d), rt = stamp(cur);
+    const futL = !!lt && lt > _plausibleCap, futR = !!rt && rt > _plausibleCap;
+    const oursWins = (futR && !futL) ? !!lt : ((futL && !futR) ? false : (!!lt && lt > rt));
+    if(oursWins){ byKey.set(k, d); kept++; }             // local edit is NEWER (and plausible) -> wins (re-push spreads it)
   });
   _lastDispMergeKept = kept;
   return Array.from(byKey.values());
@@ -6923,6 +7091,10 @@ function _mergeFactory(local, remote, localIncoming, remoteCfg){
   remote = Array.isArray(remote) ? remote : [];
   local  = Array.isArray(local)  ? local  : [];
   localIncoming = Array.isArray(localIncoming) ? localIncoming : [];
+  // v5.32 — plausibility cap for last-edit-wins (see _mergeUnits for full rationale):
+  // stamps beyond server-now+90s are clock poison and must not win over honest ones.
+  const _plausibleCap = (typeof fbServerNow === 'function' && typeof _fbOffsetRef !== 'undefined' && _fbOffsetRef)
+    ? new Date(fbServerNow() + 90000).toISOString() : '\uffff';
   const receivedSns = new Set(localIncoming
     .filter(i => i && i.sn != null && String(i.sn).trim() !== '' &&
       (i.status === 'arrived' || i.trackingState === 'received-at-warehouse'))
@@ -7002,7 +7174,14 @@ function _mergeFactory(local, remote, localIncoming, remoteCfg){
       const rem = merged[idx];
       const lt = f.updatedAt || '';
       const rt = (rem && rem.updatedAt) || '';
-      if(lt && lt > rt) merged[idx] = f;   // our edit is newer → ours wins
+      // v5.32 — plausibility-aware LEW (mirrors _mergeUnits)
+      const futL = !!lt && lt > _plausibleCap;
+      const futR = !!rt && rt > _plausibleCap;
+      let oursWins;
+      if(futR && !futL) oursWins = !!lt;
+      else if(futL && !futR) oursWins = false;
+      else oursWins = !!lt && lt > rt;
+      if(oursWins) merged[idx] = f;
       else if(lt && rt && rt > lt){
         // v5.31 CANARY — same evidence trap as _mergeUnits (see there for rationale).
         try {
@@ -7038,7 +7217,13 @@ function _mergeFactory(local, remote, localIncoming, remoteCfg){
       for(let i = merged.length - 1; i >= 0; i--){
         const k = keyOf(merged[i]); if(!k) continue;
         const t = _tomb[k];
-        if(t && (merged[i].updatedAt || '') < t) merged.splice(i, 1);
+        if(!t) continue;
+        // v5.34 — plausibility-aware tombstone comparison (see _mergeUnits)
+        const ru = merged[i].updatedAt || '';
+        const rowFut = !!ru && ru > _plausibleCap;
+        const tombFut = t > _plausibleCap;
+        const drop = (rowFut && !tombFut) ? true : ((tombFut && !rowFut) ? false : (ru < t));
+        if(drop) merged.splice(i, 1);
       }
     }
   } catch(e){ console.warn('[factory tombstone merge]', e); }
@@ -7223,6 +7408,9 @@ function _mergeMarriages(local, remote){
   // delivered) on sync. Mirrors _mergeUnits/_mergeFactory/_mergeCovers.
   const idx = new Map();
   merged.forEach((m, i) => { const k = keyOf(m); if(k != null && !idx.has(k)) idx.set(k, i); });
+  // v5.32 — plausibility cap (see _mergeUnits): future-stamped rows must not beat honest edits.
+  const _plausibleCap = (typeof fbServerNow === 'function' && typeof _fbOffsetRef !== 'undefined' && _fbOffsetRef)
+    ? new Date(fbServerNow() + 90000).toISOString() : '\uffff';
   let kept = 0;
   local.forEach(m => {
     if(!m) return;
@@ -7231,7 +7419,9 @@ function _mergeMarriages(local, remote){
       const i = idx.get(k); const rem = merged[i];
       const lt = (m && m.updatedAt) || '';
       const rt = (rem && rem.updatedAt) || '';
-      if(lt && lt > rt) merged[i] = m;   // our marriage edit is newer → keep ours
+      const futL = !!lt && lt > _plausibleCap, futR = !!rt && rt > _plausibleCap;
+      const oursWins = (futR && !futL) ? !!lt : ((futL && !futR) ? false : (!!lt && lt > rt));
+      if(oursWins) merged[i] = m;   // our marriage edit is newer (and plausible) → keep ours
       return;
     }
     merged.push(m); kept++;         // local-only marriage → KEEP (don't vanish on stale remote / id collision)
@@ -14690,6 +14880,7 @@ function confirmDispatch(id){
     catch(e){ console.warn('[cover pull on dispatch]', e); }
   }
   postMovement({type:'601', sn:u.sn, material:u.type||'', qty:1, from:LOC_WAREHOUSE(u.pos), to:LOC_DEALER(u.dealer), stockType:'unrestricted', ref:auth, note:'Dispatch to dealer'});
+  _tombstoneUnitRow(u);   // v5.34 — a concurrent stale push must not resurrect the dispatched tub on the floor
   units=units.filter(x=>x.id!==id);
   addAct(`Unit ${u.sn||u.dealer} dispatched to ${u.dealer}${marPending.length?' (with '+marPending.length+' missing accessor'+(marPending.length>1?'ies':'y')+')':''}`,marPending.length?'var(--red)':'var(--teal)');
   events.push({id: Date.now()*1000 + ((Math.random()*1000)|0) /* v5.23 (#9): cross-device same-ms collision guard */,title:`Dispatch: ${rec.sn||rec.dealer}`,date:rec.dispatchDate,time:rec.dispatchTime,type:'dispatch',dealer:rec.dealer,sn:rec.sn||''});
@@ -14829,6 +15020,7 @@ function addUnit(inIdx){
   const newU = {id:nid++,pos,sn,dealer,type,entry};
   if(slot){ newU.stack=slot.stack; newU.level=slot.level; }
   if(alreadyInWh) newU.alreadyInWh = true;
+  touchUnit(newU);   // v5.32 — a fresh placement must beat any stale same-S/N copy in the cloud
   units.push(newU);
   try{
     if(inIdx>=0){ postMovement({type:'101', sn, material:type||'', qty:1, from:LOC_TRANSIT, to:LOC_WAREHOUSE(pos), stockType:'unrestricted', note:'Received + put-away (manual)'}); }
@@ -18117,6 +18309,7 @@ function dispatchAndDeliverGroup(gid){
       coverPaired:u.coverPaired||null, bolPdf:bol,
       deliveryStatus:'delivered-to-dealer', deliveryConfirmedAt: now+'T'+new Date().toTimeString().slice(0,8), deliveryConfirmedBy: by};
     dispatched.unshift(rec);
+    _tombstoneUnitRow(u);   // v5.34 — same resurrection guard as confirmDispatch
     // ── PULL THE WAREHOUSE COVER (v5.08) ── mirror confirmDispatch: a warehouse-sourced
     // cover sat on the 15A/15B rack for this tub; pull it now that it ships. Factory
     // covers were pulled at creation (skipped by the guard); idempotent per S/N.
@@ -23675,6 +23868,26 @@ function undoFactoryReady(id){
 // guarded tombstone exactly (same cfg._deletedUnits map, same key format, same floor
 // guard + 60-day prune). A later legit re-add survives because its updatedAt is newer
 // than the tombstone (see _mergeFactory's tombstone-drop).
+// v5.34 — DISPATCH TOMBSTONE (found by multi-device simulation, thousands of
+// reproductions): dispatch removed the floor row locally but wrote NO tombstone,
+// so any concurrent push still carrying the old units array resurrected the tub
+// on the floor while it also sat in Dispatched (same ghost class the factory rows
+// already fixed via _tombstoneFactoryRow — units never got the same treatment).
+// A later legit re-add (e.g. a returned tub) survives because its updatedAt is
+// newer than the tombstone; quickAddSpa clears the tombstone on re-add.
+function _tombstoneUnitRow(u){
+  if(!u) return;
+  try{
+    cfg._deletedUnits = cfg._deletedUnits || {};
+    const snStr = (u.sn != null) ? String(u.sn).trim() : '';
+    const _tk = (snStr !== '') ? ('sn:' + snStr) : ('id:' + u.id);
+    cfg._deletedUnits[_tk] = editStamp();
+    const _cut = new Date(Date.now() - 60*864e5).toISOString();
+    for(const k in cfg._deletedUnits){ if(cfg._deletedUnits[k] < _cut) delete cfg._deletedUnits[k]; }
+  }catch(e){ console.warn('[unit tombstone write]', e); }
+}
+window._tombstoneUnitRow = _tombstoneUnitRow;
+
 function _tombstoneFactoryRow(f){
   if(!f) return;
   try{
@@ -27870,6 +28083,46 @@ function runSelfTests(){
     return true;
   });
 
+  // 10 ── CLOCK-POISON DEFENSE (v5.32): a remote row stamped in the FUTURE (fast
+  //      device clock) must NOT beat an honest fresh local edit. This is the exact
+  //      mechanism of the "moved tub bounces back" ghost.
+  t('units · honest fresh edit beats FUTURE-stamped remote (clock poison)', () => {
+    if(!(typeof _fbOffsetRef !== 'undefined' && _fbOffsetRef)) return true;   // offline → cap N/A (defense needs the server clock)
+    const now = (typeof fbServerNow === 'function') ? fbServerNow() : Date.now();
+    const remote = [{ id:1, sn:'660001', pos:'2L', updatedAt: new Date(now + 2*3600000).toISOString() }];
+    const local  = [{ id:1, sn:'660001', pos:'3L', updatedAt: new Date(now - 5000).toISOString() }];
+    const merged = _mergeUnits(local, remote, {});
+    const row = merged.find(u => String(u.sn) === '660001');
+    return (row && row.pos === '3L') || `expected 3L, got ${row && row.pos}`;
+  });
+
+  // 11 ── DUPLICATE-ROW DEFENSE (v5.32): if the cloud array carries the same S/N
+  //      twice, the merge must collapse it to ONE row and a fresh local move must
+  //      survive (a stale duplicate used to slip past LEW and revert the move).
+  t('units · duplicate S/N in remote collapses; fresh move survives', () => {
+    const now = Date.now();
+    const remote = [
+      { id:1,  sn:'550001', pos:'2L', updatedAt: new Date(now - 7200000).toISOString() },
+      { id:77, sn:'550001', pos:'2L', updatedAt: new Date(now - 9800000).toISOString() }
+    ];
+    const local = [{ id:1, sn:'550001', pos:'3L', updatedAt: new Date(now - 2000).toISOString() }];
+    const merged = _mergeUnits(local, remote, {});
+    const rows = merged.filter(u => String(u.sn) === '550001');
+    if(rows.length !== 1) return `expected 1 row, got ${rows.length}`;
+    return rows[0].pos === '3L' || `expected 3L, got ${rows[0].pos}`;
+  });
+
+  // 12 ── factory mirror of #10: scans/tracking edits get the same protection.
+  t('factory · honest fresh state change beats FUTURE-stamped remote', () => {
+    if(!(typeof _fbOffsetRef !== 'undefined' && _fbOffsetRef)) return true;   // offline → cap N/A
+    const now = (typeof fbServerNow === 'function') ? fbServerNow() : Date.now();
+    const remote = [{ id:1, sn:'440001', type:'hot', trackingState:'ready-to-ship', updatedAt: new Date(now + 2*3600000).toISOString() }];
+    const local  = [{ id:1, sn:'440001', type:'hot', trackingState:'in-transit',    updatedAt: new Date(now - 5000).toISOString() }];
+    const merged = _mergeFactory(local, remote, [], {});
+    const row = merged.find(f => String(f.sn) === '440001');
+    return (row && row.trackingState === 'in-transit') || `expected in-transit, got ${row && row.trackingState}`;
+  });
+
   const passed = results.filter(r => r.pass).length;
   return { passed, failed: results.length - passed, total: results.length, results };
 }
@@ -28458,7 +28711,7 @@ document.addEventListener('visibilitychange', () => {
         const payload = snap.val();
         if(!payload || !payload.state) return;
         // Skip if this is our own write
-        if(payload.deviceId === _fbDeviceId) return;
+        if(payload.deviceId === _fbTabId) return;
         // Skip if cloud is older than our local
         if(payload.timestamp <= _fbLastLocalWriteAt) return;
         // Skip if local has unpushed edits (preserve them; they'll push next)
@@ -28858,16 +29111,28 @@ document.addEventListener('keydown', e=>{
 
   // Remove duplicate entries that share the same serial number within ONE
   // collection (each physical spa = one S/N = one entry). Skips entries with
-  // no S/N (accessories/marriages). Keeps the last occurrence. Returns true if
-  // anything was removed.
+  // no S/N (accessories/marriages).
+  // v5.32 — keeps the FRESHEST-stamPED occurrence (was: last in array order,
+  // which could preserve a STALE duplicate over a just-edited row and then
+  // auto-push that stale copy fleet-wide — a silent revert machine). Ties or
+  // stamp-less rows fall back to the later occurrence (old behavior).
   function dedupBySn(arr){
     if(!Array.isArray(arr)) return false;
-    const seen = new Set(); let removed = false;
+    const best = new Map();   // sn → index of the occurrence to keep
+    arr.forEach((it, i) => {
+      const sn = String(it && it.sn || '');
+      if(!sn) return;
+      if(!best.has(sn)){ best.set(sn, i); return; }
+      const cur = arr[best.get(sn)];
+      const a = (cur && cur.updatedAt) || '';
+      const b = (it && it.updatedAt) || '';
+      if(b >= a) best.set(sn, i);
+    });
+    let removed = false;
     for(let i = arr.length - 1; i >= 0; i--){
       const sn = String(arr[i] && arr[i].sn || '');
       if(!sn) continue;
-      if(seen.has(sn)){ arr.splice(i, 1); removed = true; }
-      else seen.add(sn);
+      if(best.get(sn) !== i){ arr.splice(i, 1); removed = true; }
     }
     return removed;
   }
@@ -29008,7 +29273,7 @@ document.addEventListener('keydown', e=>{
         const _vm = await _fbDb.ref('state/shared/v2/meta').once('value');
         const vmeta = _vm.val();
         if(vmeta && vmeta.timestamp){
-          if(vmeta.deviceId === _fbDeviceId) return true; // our own previous push
+          if(vmeta.deviceId === _fbTabId) return true; // our own previous push (any sibling tab counts as us here — safe)
           remote = { _epoch: vmeta.epoch || 1 };
           for(const k of ['factory','units','incoming','dispatched']){
             try {
@@ -29022,7 +29287,7 @@ document.addEventListener('keydown', e=>{
           const snap = await _fbDb.ref('state/shared/latest').once('value');
           const c = snap.val();
           if(!c || !c.state) return true; // cloud empty, OK to seed
-          if(c.deviceId === _fbDeviceId) return true; // our own previous push
+          if(c.deviceId === _fbTabId) return true; // our own previous push (tab-scoped, v5.33)
           remote = JSON.parse(c.state);
           cloud = c;
         }
