@@ -12,6 +12,12 @@ let PASS=0,FAIL=0; const fails=[];
 const chk=(c,l)=>{ if(c)PASS++; else {FAIL++; fails.push(l);} };
 const clone=x=>JSON.parse(JSON.stringify(x));
 
+// v5.36 — pull the REAL V2_COLLS declaration out of index.html so this suite tracks
+// the app's actual sync surface. 'movements' was deliberately removed from the blob in
+// v5.28 (it rides a per-child channel now — it was the 47GB egress driver).
+const V2_COLLS_SRC = (src.match(/const\s+V2_COLLS\s*=\s*\[[^\]]*\];/) || [])[0];
+if(!V2_COLLS_SRC) throw new Error('V2_COLLS declaration not found in index.html');
+
 // ── sandbox con las funciones v2 reales + merges reales para 3 colecciones ──
 function mkDevice(deviceId){
   return new Function('DEVID', `'use strict';
@@ -27,7 +33,7 @@ function mkDevice(deviceId){
     const _fbV2Cache={};
     const _V2_BLOB_FIELDS=['bolPdf','deliveryPhoto','deliveryDoc','photo'];
     ${extractFn('_v2StripBlobs')}
-    const V2_COLLS=['units','dispatched','incoming','materials','events','activity','queue','cfg','factory','marriages','dispatchRequests','coverInventory','colorLibrary','coverModelMapping','movements','matTransfers'];
+    ${V2_COLLS_SRC}   // v5.36 — EXTRACTED from index.html, never hardcoded: a copied config can't catch a config regression (this is how the movements/egress change slipped past T2)
     ${extractFn('_fbV2BuildUpdate')}
     ${extractFn('_mergeEvents')}
     ${extractFn('_mergeQueue')}
@@ -117,7 +123,13 @@ function mkCloud(){
   for(let i=0;i<500;i++) A.addMovement({id:'mvA'+i, type:'601', at:1750000000000+i});
   for(let i=0;i<5;i++) A.addEvent({id:'eA'+i, groupId:'gA'+i, type:'dispatch', dealer:'D', date:'2026-07-01'});
   let b=A.build(1000); cloud.update(b.upd, listeners); A.commitHashes(b.newHashes); cloud.flush(listeners);
-  chk(B.state.movements.length===500 && B.state.events.length===5, 'T2 B did not converge on seed: mv='+B.state.movements.length+' ev='+B.state.events.length);
+  // v5.28+ ARCHITECTURE: 'movements' no longer rides the v2 blob — it has its own
+  // per-child channel (state/shared/mv/{id}). It was THE egress driver: an append-only
+  // ledger whose hash changed on every scan, re-broadcasting 1–3 MB fleet-wide each time.
+  // The blob must therefore carry events but NOT movements; the ledger converges via
+  // _mergeMovements (union by id) fed by the mv channel, which this sandbox doesn't model.
+  chk(!b.changed.includes('movements'), 'T2 movements must NOT ride the v2 blob (egress regression) — changed='+b.changed.join(','));
+  chk(B.state.events.length===5, 'T2 B did not converge on seed events: ev='+B.state.events.length);
   // B agrega 1 evento → push incremental
   const before = cloud.bytesUp;
   B.addEvent({id:'eB1', groupId:'gB1', type:'dispatch', dealer:'Aqua', date:'2026-07-02'});
