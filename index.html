@@ -4756,7 +4756,7 @@ let _fbInitAttempts = 0;
 //   /app_version/current  (in Firebase console, manually, OR call
 //   pushVersionToFirebase() from the Admin console at deploy time)
 // ══════════════════════════════════════════════════════════════════
-const APP_VERSION = 'v5.38';
+const APP_VERSION = 'v5.39';
 // v5.23 (#1): paste your reCAPTCHA v3 site key here AFTER enabling App Check in
 // the Firebase console (Build → App Check → Register app → reCAPTCHA v3). Until
 // then it stays '', everything works exactly as before.
@@ -28285,6 +28285,17 @@ function runSelfTests(){
     } finally { if(typeof units !== 'undefined' && _uBak){ units.length = 0; for(const u of _uBak) units.push(u); } }
   });
 
+  // 16 ── STUCK TRANSIT ROW (v5.39): a factory row still 'in-transit' for a tub the
+  //      warehouse already received must retire on merge (receivedSns) — otherwise it
+  //      duplicates the tub in the arrivals panel and inflates the In Transit count.
+  t('factory · in-transit row retires once the tub is received at the dock', () => {
+    const now = Date.now();
+    const remote = [{ id:1, sn:'770101', type:'hot', trackingState:'in-transit', transitDir:'to-warehouse', updatedAt: new Date(now - 3600000).toISOString() }];
+    const localIncoming = [{ id:'in1', sn:'770101', status:'arrived', trackingState:'received-at-warehouse', updatedAt: new Date(now - 60000).toISOString() }];
+    const merged = _mergeFactory([], remote, localIncoming, {});
+    return !merged.some(f => String(f.sn) === '770101') || 'in-transit row survived past the receive';
+  });
+
   const passed = results.filter(r => r.pass).length;
   return { passed, failed: results.length - passed, total: results.length, results };
 }
@@ -28771,6 +28782,42 @@ function runIntegrityChecks(){
       if(clamped > 0) findings.push(`Clamped ${clamped} future-dated edit stamp(s) to server time (fast-clock device protection)`);
     }
   } catch(e){ console.warn('[check 16]', e); }
+
+  // ─── Check 17 (v5.39): STUCK FACTORY ROWS for tubs already received/placed ───
+  // _mergeFactory retires outbound factory rows (created/ready/in-transit) once the
+  // tub is received at the dock or on the floor — but that predicate only runs when
+  // a factory MERGE arrives. If nothing touches factory, a stuck 'in-transit' row
+  // lives forever: the sidebar counts it, and the arrivals panel synthesizes a
+  // VIRTUAL duplicate card next to the real received one (Alberto's screenshot:
+  // same S/N twice, one 'tap', one IN TRANSIT + ✓Received). Apply the same rules
+  // as isStaleFactoryRow LOCALLY, deterministically, after every merge and on boot.
+  try {
+    const _recvSns = new Set((Array.isArray(incoming) ? incoming : [])
+      .filter(i => i && i.sn != null && String(i.sn).trim() !== '' &&
+        (i.status === 'arrived' || i.trackingState === 'received-at-warehouse'))
+      .map(i => String(i.sn).trim()));
+    const _floorSns = new Set((Array.isArray(units) ? units : [])
+      .filter(u => u && u.sn != null && String(u.sn).trim() !== '')
+      .map(u => String(u.sn).trim()));
+    const _isReturnLeg = f =>
+      (f.trackingState === 'in-transit' && f.transitDir === 'to-factory') ||
+      f.trackingState === 'received-back-at-factory' ||
+      /reject|return/i.test(f.trackingState || '');
+    let _retired = 0;
+    for(let i = (Array.isArray(factory) ? factory.length : 0) - 1; i >= 0; i--){
+      const f = factory[i];
+      if(!f || f.sn == null) continue;
+      if(f.type === 'accessory' || f.type === 'misc') continue;
+      if(_isReturnLeg(f)) continue;
+      const sn = String(f.sn).trim();
+      if(_recvSns.has(sn) || _floorSns.has(sn)){
+        console.warn('[check 17] retiring stuck factory row', { sn, state: f.trackingState, stamp: f.updatedAt || '(none)' });
+        factory.splice(i, 1);
+        _retired++;
+      }
+    }
+    if(_retired > 0) findings.push(`Retired ${_retired} stuck factory row(s) for tub(s) already received/placed (was duplicating them in Arriving + In Transit)`);
+  } catch(e){ console.warn('[check 17]', e); }
 
   return findings;
 }
