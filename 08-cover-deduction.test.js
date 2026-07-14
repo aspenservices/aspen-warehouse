@@ -8,6 +8,7 @@ const SB=new Function(`'use strict';
   let coverInventory=[], nid=1000, dispatchRequests=[];
   const currentRole='admin'; const ROLES={admin:{label:'Admin'}}; function actorName(){return 'Admin';}   // v5.18: records are signed by person
   function toISO(){return '2026-06-25';} function editStamp(){return new Date().toISOString();}
+  function _born(r){ if(r && typeof r === 'object' && !r.updatedAt) r.updatedAt = editStamp(); return r; }   // v5.41 — birth-stamp helper (mirrors index.html)
   function toast(){} function renderRequests(){}
   ${extractFn('decrementCoverStock')}
   // the EXACT guard the fix adds to dispatchPickupFromFactory:

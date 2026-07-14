@@ -48,6 +48,7 @@ const harnessSrc = `
   const console={ log(){}, warn(){} };   // silence extracted-fn logging during bulk runs
   const ROLES=new Proxy({},{get:(_,k)=>({label:String(k)})});
   function editStamp(){ return 'e'+(_clock++); }
+  function _born(r){ if(r && typeof r === 'object' && !r.updatedAt) r.updatedAt = editStamp(); return r; }   // v5.41 — birth-stamp helper (mirrors index.html)
   function toISO(){ return '2026-06-15'; }
   function fmtD(d){ return String(d); }
   function addAct(){}

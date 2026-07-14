@@ -4756,7 +4756,7 @@ let _fbInitAttempts = 0;
 //   /app_version/current  (in Firebase console, manually, OR call
 //   pushVersionToFirebase() from the Admin console at deploy time)
 // ══════════════════════════════════════════════════════════════════
-const APP_VERSION = 'v5.40';
+const APP_VERSION = 'v5.42';
 // v5.23 (#1): paste your reCAPTCHA v3 site key here AFTER enabling App Check in
 // the Firebase console (Build → App Check → Register app → reCAPTCHA v3). Until
 // then it stays '', everything works exactly as before.
@@ -6364,7 +6364,7 @@ function mergeCfgPreservingPins(localCfg, remoteCfg){
   }
   // Delete tombstones (v4.91, extended v5.12): union by LATEST timestamp so neither
   // side's intentional deletes are lost on a shallow cfg overwrite.
-  for(const tk of ['_deletedUnits','_deletedEventGroups','_deletedQueueIds','_deletedIncoming']){   // v5.38 — incoming tombstones union too
+  for(const tk of ['_deletedUnits','_deletedEventGroups','_deletedQueueIds','_deletedIncoming','_deletedMaterials','_deletedMarriages','_deletedEventIds','_deletedCovers']){   // v5.41 — every tombstone map unions, or deletions come back
     const L = (localCfg && typeof localCfg[tk] === 'object') ? localCfg[tk] : null;
     const R = (typeof remoteCfg[tk] === 'object') ? remoteCfg[tk] : null;
     if(L || R){
@@ -6564,9 +6564,13 @@ function _unionTombs(localMap, remoteMap){
   return out;
 }
 
+// MERGE-STRATEGY: lew
 function _mergeEvents(local, remote, remoteCfg){
   const L = Array.isArray(local) ? local : [];
   const R = Array.isArray(remote) ? remote : [];
+  const _plausibleCap = (typeof fbServerNow === 'function' && typeof _fbOffsetRef !== 'undefined' && _fbOffsetRef)
+    ? new Date(fbServerNow() + 90000).toISOString() : '\uffff';   // v5.41 — fast-clock protection
+
   const tombs = _unionTombs(cfg && cfg._deletedEventGroups, remoteCfg && remoteCfg._deletedEventGroups);
   const stamp = e => (e && typeof e.updatedAt === 'string') ? e.updatedAt : '';
   const dead = e => { if(!e || e.groupId == null) return false; const t = tombs[String(e.groupId)]; return !!t && (!stamp(e) || stamp(e) < t); };
@@ -6581,10 +6585,13 @@ function _mergeEvents(local, remote, remoteCfg){
     else if(stamp(e) > stamp(cur)){ byId.set(k, e); kept++; } // local edit is newer (ties → remote)
   }
   _lastEvMergeKept = kept;
-  return Array.from(byId.values());
+  return (typeof _dropTombstonedIn === 'function' ? _dropTombstonedIn('events', Array.from(byId.values()), remoteCfg, _plausibleCap) : Array.from(byId.values()));   // v5.41 — a deleted event must not resurrect
 }
 
+// MERGE-STRATEGY: lew
 function _mergeQueue(local, remote, remoteCfg){
+  const _plausibleCap = (typeof fbServerNow === 'function' && typeof _fbOffsetRef !== 'undefined' && _fbOffsetRef)
+    ? new Date(fbServerNow() + 90000).toISOString() : '\uffff';   // v5.41 — fast-clock protection
   const L = Array.isArray(local) ? local : [];
   const R = Array.isArray(remote) ? remote : [];
   const tombs = _unionTombs(cfg && cfg._deletedQueueIds, remoteCfg && remoteCfg._deletedQueueIds);
@@ -6613,6 +6620,7 @@ function _mergeQueue(local, remote, remoteCfg){
   return Array.from(byId.values());
 }
 
+// MERGE-STRATEGY: union
 function _mergeMovements(local, remote){
   // Append-only ledger (docs are never edited or deleted) → pure union by id,
   // newest-first by posting time, re-capped at the same 10,000 safety valve.
@@ -6637,6 +6645,7 @@ function _mergeMovements(local, remote){
   return out;
 }
 
+// MERGE-STRATEGY: union
 function _mergeAddWinsMap(local, remote, counter){
   // colorLibrary / coverModelMapping: keys are added (never deleted in any code
   // path), values occasionally edited. Union of keys; remote wins shared keys so
@@ -6656,6 +6665,7 @@ function _mergeAddWinsMap(local, remote, counter){
 // ANYWHERE (not in units, dispatched, incoming, factory, or a marriage). If the
 // incoming state shows it elsewhere (e.g. dispatched), we respect that and don't
 // re-add it. Never loses a tub; only honors real progressions.
+// MERGE-STRATEGY: lew
 function _mergeUnits(local, remote, restored){
   remote = Array.isArray(remote) ? remote : [];
   local  = Array.isArray(local)  ? local  : [];
@@ -6861,6 +6871,7 @@ function _mergeUnits(local, remote, restored){
 // request that exists ONLY locally — e.g. one a factory just created that a stale
 // device/tab hasn't seen yet — is KEPT so it can never be auto-deleted by a stale
 // push. Keyed by request id. Mirrors _mergeUnits; safe direction = keep, never drop.
+// MERGE-STRATEGY: rank
 function _mergeMatTransfers(local, remote){
   // Conservation-safe union of staged transfers across devices (last-write-wins
   // would silently drop a transfer that one device created while another synced).
@@ -6870,6 +6881,17 @@ function _mergeMatTransfers(local, remote){
   local  = Array.isArray(local)  ? local  : [];
   remote = Array.isArray(remote) ? remote : [];
   const rank = { 'requested':1, 'in-transit':2, 'arrived':3, 'cancelled':3 };
+  // v5.42 — the same-rank tiebreak below compares updatedAt, so it needs the same
+  // fast-clock protection every other stamp comparison has.
+  const _plausibleCap = (typeof fbServerNow === 'function' && typeof _fbOffsetRef !== 'undefined' && _fbOffsetRef)
+    ? new Date(fbServerNow() + 90000).toISOString() : '\uffff';
+  const _fresher = (a, b) => {   // is a's stamp newer than b's, ignoring clock poison?
+    const la = String(a || ''), lb = String(b || '');
+    const fa = !!la && la > _plausibleCap, fb = !!lb && lb > _plausibleCap;
+    if(fb && !fa) return !!la;
+    if(fa && !fb) return false;
+    return !!la && la > lb;
+  };
   const byId = new Map();
   const consider = t => {
     if(!t || t.id == null) return;
@@ -6880,7 +6902,10 @@ function _mergeMatTransfers(local, remote){
     if(b === a){
       const ta = String(cur.arrivedAt||cur.shippedAt||cur.requestedAt||'');
       const tb = String(t.arrivedAt||t.shippedAt||t.requestedAt||'');
-      if(tb > ta) byId.set(k, t);
+      if(tb > ta){ byId.set(k, t); return; }
+      // v5.41 — equal rank AND equal stage time → last-edit-wins on updatedAt so a
+      // field edit (note, qty) isn't silently clobbered by a stale copy.
+      if(tb === ta && _fresher(t.updatedAt, cur.updatedAt)) byId.set(k, t);
     }
   };
   remote.forEach(consider);
@@ -6888,7 +6913,11 @@ function _mergeMatTransfers(local, remote){
   return Array.from(byId.values());
 }
 
-function _mergeMaterials(local, remote){
+// MERGE-STRATEGY: conservation
+function _mergeMaterials(local, remote, remoteCfg){
+  // v5.41 — plausibility cap: a future-dated stamp (fast device clock) must not win.
+  const _plausibleCap = (typeof fbServerNow === 'function' && typeof _fbOffsetRef !== 'undefined' && _fbOffsetRef)
+    ? new Date(fbServerNow() + 90000).toISOString() : '\uffff';
   // Conservation-safe, per-ITEM union of warehouse/factory materials across devices.
   // The OLD behavior replaced the whole array with the remote copy (last-write-wins),
   // which could DROP an entire item one device created while another was syncing, and
@@ -6946,9 +6975,10 @@ function _mergeMaterials(local, remote){
   };
   remote.forEach(consider);   // remote first → it is 'cur'; ties resolve to remote (shared doc)
   local.forEach(consider);
-  return Array.from(byKey.values());
+  return (typeof _dropTombstonedIn === 'function' ? _dropTombstonedIn('materials', Array.from(byKey.values()), remoteCfg, _plausibleCap) : Array.from(byKey.values()));   // v5.41
 }
 
+// MERGE-STRATEGY: rank
 function _mergeRequests(local, remote){
   remote = Array.isArray(remote) ? remote : [];
   local  = Array.isArray(local)  ? local  : [];
@@ -6982,6 +7012,17 @@ function _mergeRequests(local, remote){
     // Status: keep the more-advanced/terminal side so an approval, ship, or
     // CANCELLATION isn't dragged backward (or resurrected) by a stale remote.
     let base = (rank(mine.status) > rank(r.status)) ? mine : r;
+    // v5.41 — SAME-RANK TIEBREAK: the rank rule protects the workflow status, but at
+    // EQUAL rank the remote copy used to clobber every other field of a request you
+    // had just edited. Fall back to last-edit-wins (plausibility-capped) on a tie.
+    if(rank(mine.status) === rank(r.status)){
+      const _cap = (typeof fbServerNow === 'function' && typeof _fbOffsetRef !== 'undefined' && _fbOffsetRef)
+        ? new Date(fbServerNow() + 90000).toISOString() : '\uffff';
+      const lt = mine.updatedAt || '', rt = r.updatedAt || '';
+      const futL = !!lt && lt > _cap, futR = !!rt && rt > _cap;
+      const oursWins = (futR && !futL) ? !!lt : ((futL && !futR) ? false : (!!lt && lt > rt));
+      if(oursWins) base = mine;
+    }
     // Notes & target date: last edit wins, independent of which status we kept,
     // so a freshly typed note isn't clobbered by a stale remote at equal status.
     // Only override once someone has actually edited (has notesUpdatedAt) — legacy
@@ -7023,6 +7064,7 @@ function _mergeRequests(local, remote){
 // Wholesale-replacing incoming with a stale remote made that item vanish (and the
 // matching factory record reappear in In Transit) -> the "Force Receive bounces back
 // to In Transit" bug. Remote wins for known ids; local-only arrivals are KEPT.
+// MERGE-STRATEGY: lew
 function _mergeIncoming(local, remote, remoteCfg){
   remote = Array.isArray(remote) ? remote : [];
   local  = Array.isArray(local)  ? local  : [];
@@ -7145,6 +7187,7 @@ function _mergeIncoming(local, remote, remoteCfg){
 // (a tub can be dispatched, returned, re-dispatched → distinct events) and fall
 // back to id. Remote wins for known events so status updates (delivered/returned)
 // propagate; local-only dispatches are KEPT.
+// MERGE-STRATEGY: lew
 function _mergeDispatched(local, remote){
   remote = Array.isArray(remote) ? remote : [];
   local  = Array.isArray(local)  ? local  : [];
@@ -7183,6 +7226,7 @@ function _mergeDispatched(local, remote){
   return Array.from(byKey.values());
 }
 
+// MERGE-STRATEGY: lew
 function _mergeFactory(local, remote, localIncoming, remoteCfg){
   remote = Array.isArray(remote) ? remote : [];
   local  = Array.isArray(local)  ? local  : [];
@@ -7374,7 +7418,11 @@ function _mergeFactory(local, remote, localIncoming, remoteCfg){
 // rows so a new color/model never vanishes. (Residual edge case: two devices
 // decrementing the SAME color+model+source within one sync window keep only the
 // newer row — reconcileCovers() still dedups duplicate per-S/N decrements.)
-function _mergeCovers(local, remote){
+// MERGE-STRATEGY: conservation
+function _mergeCovers(local, remote, remoteCfg){
+  // v5.41 — plausibility cap: a future-dated stamp (fast device clock) must not win.
+  const _plausibleCap = (typeof fbServerNow === 'function' && typeof _fbOffsetRef !== 'undefined' && _fbOffsetRef)
+    ? new Date(fbServerNow() + 90000).toISOString() : '\uffff';
   remote = Array.isArray(remote) ? remote : [];
   local  = Array.isArray(local)  ? local  : [];
   const keyOf = c => c ? [String(c.color||'').trim().toLowerCase(), String(c.model||'').trim().toLowerCase(), String(c.source||'warehouse').trim().toLowerCase()].join('|') : null;
@@ -7485,14 +7533,15 @@ function _mergeCovers(local, remote){
     c.base = (typeof c.qty === 'number' ? c.qty : 0) - cred + dec.size;
   });
   _lastCoverMergeKept = kept;
-  return merged;
+  return (typeof _dropTombstonedIn === 'function' ? _dropTombstonedIn('coverInventory', merged, remoteCfg, _plausibleCap) : merged);   // v5.41 — a deleted cover must not resurrect
 }
 
 // Keep-local merge for marriages[]. A marriage created locally must not vanish if
 // a stale remote lacks it (same id-collision / clobber class). Key by spaSn+accessory;
 // remote wins for marriages it already knows (so status updates propagate), local-only
 // marriages are KEPT. (Deletions behave as before — the cloud copy wins on presence.)
-function _mergeMarriages(local, remote){
+// MERGE-STRATEGY: lew
+function _mergeMarriages(local, remote, remoteCfg){
   remote = Array.isArray(remote) ? remote : [];
   local  = Array.isArray(local)  ? local  : [];
   const keyOf = m => {
@@ -7506,7 +7555,7 @@ function _mergeMarriages(local, remote){
   // v5.40 — collapse same-key duplicates arriving from the cloud, keeping the
   // freshest (same defect class as units v5.32: a stale duplicate could survive the
   // last-edit-wins pass below, because only the FIRST occurrence was compared).
-  const merged = [];
+  let merged = [];   // v5.41 — reassigned by the tombstone drop below
   {
     const seen = new Map();
     remote.forEach(r => {
@@ -7547,6 +7596,7 @@ function _mergeMarriages(local, remote){
     }
     merged.push(m); kept++;         // local-only marriage → KEEP (don't vanish on stale remote / id collision)
   });
+  merged = (typeof _dropTombstonedIn === 'function' ? _dropTombstonedIn('marriages', merged, remoteCfg, _plausibleCap) : merged);   // v5.41 — a deleted marriage must not resurrect
   _lastMarMergeKept = kept;
   return merged;
 }
@@ -7566,7 +7616,7 @@ function fbApplyRemoteState(restored, sourceTimestamp){
     if(Array.isArray(restored.units)) units = _mergeUnits(units, restored.units, restored);
     if(Array.isArray(restored.dispatched)) dispatched = _mergeDispatched(dispatched, restored.dispatched);
     if(Array.isArray(restored.incoming)) incoming = _mergeIncoming(incoming, restored.incoming, restored.cfg);
-    if(Array.isArray(restored.materials)) materials = _mergeMaterials(materials, restored.materials);
+    if(Array.isArray(restored.materials)) materials = _mergeMaterials(materials, restored.materials, restored.cfg);
     if(Array.isArray(restored.matTransfers)) matTransfers = _mergeMatTransfers(matTransfers, restored.matTransfers);
     if(Array.isArray(restored.events)) events = _mergeEvents(events, restored.events, restored.cfg);
     // activity stays wholesale ON PURPOSE: it's a cosmetic 30-entry ticker without ids;
@@ -7574,9 +7624,9 @@ function fbApplyRemoteState(restored, sourceTimestamp){
     if(Array.isArray(restored.activity)) activity = restored.activity;
     if(Array.isArray(restored.queue)) queue = _mergeQueue(queue, restored.queue, restored.cfg);
     if(Array.isArray(restored.factory)) factory = _mergeFactory(factory, restored.factory, incoming, restored.cfg);
-    if(Array.isArray(restored.marriages)) marriages = _mergeMarriages(marriages, restored.marriages);
+    if(Array.isArray(restored.marriages)) marriages = _mergeMarriages(marriages, restored.marriages, restored.cfg);
     if(Array.isArray(restored.dispatchRequests)) dispatchRequests = _mergeRequests(dispatchRequests, restored.dispatchRequests);
-    if(Array.isArray(restored.coverInventory)) coverInventory = _mergeCovers(coverInventory, restored.coverInventory);
+    if(Array.isArray(restored.coverInventory)) coverInventory = _mergeCovers(coverInventory, restored.coverInventory, restored.cfg);
     _lastMapMergeKept = 0;
     if(restored.colorLibrary && typeof restored.colorLibrary === 'object') colorLibrary = _mergeAddWinsMap(colorLibrary, restored.colorLibrary, 'map');
     if(restored.coverModelMapping && typeof restored.coverModelMapping === 'object') coverModelMapping = _mergeAddWinsMap(coverModelMapping, restored.coverModelMapping, 'map');
@@ -9997,7 +10047,7 @@ function splitDispatchPendingMarriagesForSn(u, date, auth, meta){
     m.splitDispatchedDate=date;
     m.splitDispatchSpaDealer=u.dealer;
     if(typeof mTrail==='function') mTrail(m, 'split-pending', { via:(meta&&meta.via)||'manual', station:(meta&&meta.station)||'dispatch', mode:'split', note:'Spa shipped WITHOUT this accessory — follow-up factory request auto-created' });
-    dispatchRequests.unshift({
+    dispatchRequests.unshift(_born({
       id: ++nid,
       type:'accessory',
       description:`🔴 SPLIT DISPATCH — Ship "${m.accessoryName}"${m.accessoryQty&&m.accessoryQty>1?` × ${m.accessoryQty}`:''} directly to dealer ${u.dealer}`,
@@ -10011,7 +10061,7 @@ function splitDispatchPendingMarriagesForSn(u, date, auth, meta){
       notes:`Spa S/N ${u.sn} was dispatched on ${fmtD(date)} WITHOUT this accessory. Factory must ship "${m.accessoryName}" directly to dealer ${u.dealer}. Dispatch authorized by ${auth}. This request was auto-created — do NOT mark complete until accessory physically arrives at dealer.`,
       autoCreated:true,
       urgent:true,
-    });
+    }));
     addAct(`🔴 Auto-created follow-up request: ship "${m.accessoryName}" to ${u.dealer}`,'var(--red)');
   });
   if(typeof renderRequests==='function') renderRequests();
@@ -10288,6 +10338,7 @@ function _moveUnitToFactoryTransit(sn, fallbackDealer, fallbackType, note){
       trackingHistory: [{ state: 'in-transit', at, note: 'warehouse \u2192 factory' }]
     }));
   }
+  units.filter(x => !(x.id !== u.id)).forEach(_tombstoneUnitRow);   // v5.41
   if(u) units = units.filter(x => x.id !== u.id);
   return !!u;
 }
@@ -10402,10 +10453,12 @@ function handleFactoryRequestScanByRole(r, role){
     if(r.type === 'tub' && r.sn){
       _snapshotTubOnRequest(r);
       const u = units.find(x => x.sn === r.sn);
+      units.filter(x => !(x.id !== u.id)).forEach(_tombstoneUnitRow);   // v5.41
       if(u) units = units.filter(x => x.id !== u.id);
     }
     if(!r.approvedAt){ r.approvedAt = at; r.approvedBy = 'scan:' + role; }
     r.status = 'loading-bay';
+    r.updatedAt = editStamp();   // v5.41 — LEW: this edit must survive a stale remote merge
     r.bayAt = at;
     r.bayBy = 'scan:' + role;
     addAct(`📦 Scan: ${r.sn||r.description} pulled to loading bay — waiting for truck`, '#7c2d12');
@@ -10420,6 +10473,7 @@ function handleFactoryRequestScanByRole(r, role){
     }
     snapshot('scan: load loading-bay item on truck');
     r.status = 'shipped';
+    r.updatedAt = editStamp();   // v5.41 — LEW: this edit must survive a stale remote merge
     r.shippedAt = at;
     r.shippedBy = 'scan:' + role;
     addAct(`🚚 Scan: ${r.sn||r.description} loaded on truck — in transit to factory`, 'var(--accent)');
@@ -10434,6 +10488,7 @@ function handleFactoryRequestScanByRole(r, role){
     }
     snapshot('scan: receive factory request at factory');
     r.status = 'received';
+    r.updatedAt = editStamp();   // v5.41 — LEW: this edit must survive a stale remote merge
     r.receivedAt = at;
     r.receivedBy = 'scan:' + role;
     // For tub requests: land it in the Factory Warehouse (shared helper).
@@ -10488,6 +10543,7 @@ function markMarriageDelivered(mid){
   const linkedReq = dispatchRequests.find(r => r.autoCreated && r.marriageId === mid && r.status !== 'received' && r.status !== 'rejected');
   if(linkedReq){
     linkedReq.status = 'received';
+    linkedReq.updatedAt = editStamp();   // v5.41 — LEW: this edit must survive a stale remote merge
     linkedReq.receivedAt = toISO();
     linkedReq.notes = (linkedReq.notes ? linkedReq.notes + ' · ' : '') + 'Auto-closed: marriage delivered';
     addAct(`✓ Auto-Factory-Request closed: ${linkedReq.description}`,'var(--teal)');
@@ -10892,6 +10948,7 @@ function addIncomingFromMigrated(u, reason){
     incoming.unshift(_born(inc));
   }
   // Remove from units[]
+  units.filter(x => !(x.id !== u.id)).forEach(_tombstoneUnitRow);   // v5.41
   units = units.filter(x => x.id !== u.id);
 }
 
@@ -11053,9 +11110,11 @@ function migrateUnitsToStacks(){
     unassigned.sort((a,b) => (a.id||0) - (b.id||0));
     for(const u of unassigned){
       u.stack = 1;
+      u.updatedAt = editStamp();   // v5.41 — LEW: this edit must survive a stale remote merge
       const slot = findNextSlot(pos, null, u.type);
       if(slot){ u.level = slot.level; }
       else { u.level = 99; }   // overflow flag
+      u.updatedAt = editStamp();   // v5.41 — LEW: this edit must survive a stale remote merge
     }
   }
 }
@@ -11880,7 +11939,7 @@ function addToQueue(){
     renderMatItemRows([{code:'', boxes:1, perBox:1}]);  // start fresh with 1 row
     updateMatSummary();
   }
-  queue.push(item);
+  queue.push(_born(item));
   const actSuffix = item.items ? ` (${item.items.length} items, ${item.qty} parts)` : '';
   addAct(`Added to queue: ${item.dealer}${item.sn?' ('+item.sn+')':''}${actSuffix}`,'var(--amber)');
   toast(`${item.dealer} added to queue`,'ok');
@@ -11967,7 +12026,7 @@ function renderQueue(){
         // (those don't appear in the floor-map queue — they live in the marriage
         // shelf via the marriage record).
         if(i.type === 'accessory' || i.type === 'misc') return;
-        queue.push({
+        queue.push(_born({
           id: i.id,
           sn: i.sn || '',
           dealer: i.dealer || '',
@@ -11975,7 +12034,7 @@ function renderQueue(){
           qty: 1,
           entry: i.date || i.arrivedAt ? toDateStr(i.arrivedAt||i.date) : toISO(),
           _fromIncoming: true
-        });
+        }));
       });
     }
   } catch(e){ console.warn('[renderQueue backfill]', e); }
@@ -12180,11 +12239,11 @@ function setupDropExtended(el,pos){
         qi.items.forEach(it=>{
           const matId = nid++;
           const unitId = nid++;
-          materials.unshift({
+          materials.unshift(_born({
             id: matId, linkedUnitId: unitId, name: it.code, qty: it.total,
             cat: qi.cat||'other', pos, date: qi.entry, notes: `${it.boxes} box${it.boxes>1?'es':''} × ${it.perBox}`,
             palletId, palletNote: qi.dealer, boxes: it.boxes, perBox: it.perBox
-          });
+          }));
           units.push(_born({
             id: unitId, linkedMatId: matId, pos, sn:'', dealer: it.code, type:'material',
             entry: qi.entry, qty: it.total, notes: `${it.boxes}×${it.perBox} (${qi.dealer})`,
@@ -12216,7 +12275,7 @@ function setupDropExtended(el,pos){
           delete newUnit.items;
           units.push(_born(newUnit));
           if(qi.type==='material'){
-            materials.unshift({id:nid++,name:qi.dealer,qty:qi.qty,cat:qi.cat||'other',pos,date:qi.entry,notes:''});
+            materials.unshift(_born({id:nid++,name:qi.dealer,qty:qi.qty,cat:qi.cat||'other',pos,date:qi.entry,notes:''}));
           }
           addAct(`${qi.dealer} placed at ${pos} from queue`,'var(--teal)');
           toast(`${qi.dealer} placed at ${pos}`,'ok');
@@ -13449,6 +13508,7 @@ function unstageUnit(unitId){
   const u = units.find(x => x.id === unitId); if(!u) return;
   snapshot(`unstage ${u.sn||u.dealer}`);
   const id = u.pos;
+  units.filter(x => !(x.id !== unitId)).forEach(_tombstoneUnitRow);   // v5.41
   units = units.filter(x => x.id !== unitId);
   incoming.unshift(_born({ id: nid++, sn:u.sn||'', dealer:u.dealer||'', type:u.type||'hot', status:'arrived', entry:u.entry||(typeof toISO==='function'?toISO():''), notes:u.notes||'' }));
   addAct(`${u.sn?'S/N '+u.sn:u.dealer} unstaged from ${id} \u2192 Incoming`, 'var(--amber)');
@@ -13974,12 +14034,14 @@ function confirmMoveSection(fromRow){
     const oldPos=u.pos;
     if(specificPos && isValidPosFormat(specificPos)){
       u.pos=specificPos;
+      u.updatedAt = editStamp();   // v5.41 — LEW: this edit must survive a stale remote merge
     } else {
       // Keep column letter, change row number. Handle both standard
       // ("4C" → "<target>C") and cover ("15A-N" → unsupported here).
       const m = (u.pos||'').match(/^\d{1,2}([A-P])$/);
       if(m){
         u.pos = targetRow + m[1];
+        u.updatedAt = editStamp();   // v5.41 — LEW: this edit must survive a stale remote merge
       } else {
         // skip unrecognized format
         return;
@@ -14462,7 +14524,7 @@ function quickAddMaterial(pos){
   const date=document.getElementById('q-mat-date').value;
   if(!name){toast('Enter item description','err');return;}
   const mat={id:nid++,name,qty,cat,pos,date,notes,photo:quickPhotoData};
-  materials.unshift(mat);
+  materials.unshift(_born(mat));
   units.push(_born({id:nid++,pos,sn:'',dealer:name,type:'material',entry:date,qty,notes,photo:quickPhotoData}));
   quickPhotoData=null;
   addAct(`Material "${name}" (${qty}) received at ${pos}`,'var(--orange)');
@@ -15008,7 +15070,7 @@ function confirmDispatch(id){
   _tombstoneUnitRow(u);   // v5.34 — a concurrent stale push must not resurrect the dispatched tub on the floor
   units=units.filter(x=>x.id!==id);
   addAct(`Unit ${u.sn||u.dealer} dispatched to ${u.dealer}${marPending.length?' (with '+marPending.length+' missing accessor'+(marPending.length>1?'ies':'y')+')':''}`,marPending.length?'var(--red)':'var(--teal)');
-  events.push({id: Date.now()*1000 + ((Math.random()*1000)|0) /* v5.23 (#9): cross-device same-ms collision guard */,title:`Dispatch: ${rec.sn||rec.dealer}`,date:rec.dispatchDate,time:rec.dispatchTime,type:'dispatch',dealer:rec.dealer,sn:rec.sn||''});
+  events.push(_born({id: Date.now()*1000 + ((Math.random()*1000)|0) /* v5.23 (#9): cross-device same-ms collision guard */,title:`Dispatch: ${rec.sn||rec.dealer}`,date:rec.dispatchDate,time:rec.dispatchTime,type:'dispatch',dealer:rec.dealer,sn:rec.sn||''}));
   // ── MARRIAGE RECONCILIATION (shared with the Schedule group-dispatch path) ──
   // 1) Any accessory still at the factory → split-dispatch it (auto follow-up
   //    factory request, marriage stays visible as 'split-pending').
@@ -15236,6 +15298,7 @@ function saveEdit(id){
   }
   snapshot(`edit ${u.sn||u.dealer}`);
   u.pos=pos;u.sn=(document.getElementById('e-sn').value||'').trim();
+  u.updatedAt = editStamp();   // v5.41 — LEW: this edit must survive a stale remote merge
   u.dealer=(document.getElementById('e-dealer').value||'').trim();
   u.type=newType;
   if(willBeStacked){ u.stack=newStack; u.level=newLevel; }
@@ -15358,9 +15421,12 @@ function rmUnit(id){
     const _cut = new Date(Date.now() - 60*864e5).toISOString();
     for(const k in cfg._deletedUnits){ if(cfg._deletedUnits[k] < _cut) delete cfg._deletedUnits[k]; }
   } catch(e){ console.warn('[tombstone write]', e); }
+  units.filter(x => !(x.id!==id)).forEach(_tombstoneUnitRow);   // v5.41
   units=units.filter(x=>x.id!==id);
   if(u.linkedMatId){
-    materials = materials.filter(m=>m.id !== u.linkedMatId);
+    materials.filter(m => !(m.id !== u.linkedMatId)).forEach(_r => _tombstoneRowIn('materials', _r));   // v5.41
+    materials.filter(m=>m.id === u.linkedMatId).forEach(_r => _tombstoneRowIn('materials', _r));   // v5.41
+  materials = materials.filter(m=>m.id !== u.linkedMatId);
   }
   let msg = `Unit ${u.sn||u.dealer} removed${above.length?` (${above.length} dropped down)`:''}`;
   if(credited) msg += ' · cover credited back to inventory';
@@ -15624,7 +15690,7 @@ function receiveTransitItem(factoryId){
   // the unit and allows drag-drop / click-to-place onto a cell. Without this
   // mirror, the panel reads empty even though the unit clearly arrived.
   // Use the same id so quickPlaceFromQueue / drag-drop can remove it cleanly.
-  queue.push({
+  queue.push(_born({
     id: incomingId,
     sn: item.sn || '',
     dealer: item.dealer || '',
@@ -15632,7 +15698,7 @@ function receiveTransitItem(factoryId){
     qty: 1,
     entry: toDateStr(at),
     _fromIncoming: true
-  });
+  }));
   addAct(`📬 Received at warehouse: ${item.sn||item.trackingId} (${item.dealer||''})`,'var(--teal)');
   toast(`${item.sn||'Item'} received — assign position`,'ok');
   renderIncoming(); renderFactory?.(); renderInTransit?.(); renderQueue?.(); updBadges();
@@ -15752,7 +15818,7 @@ function sendOrphanAccessoryToMINV(id){
   snapshot('orphan accessory → MINV');
   const info = (typeof findSpaBySn === 'function') ? findSpaBySn(sn) : null;
   const loc = (typeof suggestMarriageLocation === 'function') ? suggestMarriageLocation() : 'MINV';
-  marriages.push({
+  marriages.push(_born({
     id: ++nid,
     spaSn: sn,
     spaDealer: info ? info.dealer : (it.dealer || ''),
@@ -15763,9 +15829,10 @@ function sendOrphanAccessoryToMINV(id){
     created: toISO(),
     location: loc || 'MINV',
     notes: 'Reconciled from a stray Incoming accessory'
-  });
+  }));
   _tombstoneIncomingRow(it);   // v5.38
   incoming = incoming.filter(x => x.id !== id);
+  _tombstoneQueueItem(id);   // v5.41
   queue = queue.filter(q => q.id !== id);
   addAct(`💍 Orphan accessory paired: ${it.dealer||'accessory'} → S/N ${sn} · staged at ${loc||'MINV'}`,'var(--teal)');
   toast(`Paired with S/N ${sn} — at Marriage Shelf`,'ok');
@@ -15788,6 +15855,7 @@ function rmFromIncoming(id){
   }
   _tombstoneIncomingRow(it);   // v5.38
   incoming = incoming.filter(i => i.id !== id);
+  _tombstoneQueueItem(id);   // v5.41
   queue = queue.filter(q => q.id !== id);
   renderIncoming(); renderQueue(); renderBanner(); updBadges();
 }
@@ -15819,7 +15887,9 @@ function rejectIncoming(id){
         plasticWrap: it.plasticWrap, cover: it.cover, looseAccessories: it.looseAccessories,
         trackingHistory: [...(it.trackingHistory||[]), {state:'in-transit', at:toISO(), by: actorName(), note: noteText, reasonCode, photo: photo||null}]
       }));
+      incoming.filter(i => !(i.id !== id)).forEach(_tombstoneIncomingRow);   // v5.41
       incoming = incoming.filter(i => i.id !== id);
+      _tombstoneQueueItem(id);   // v5.42
       queue = queue.filter(q => q.id !== id);
       let logMsg = `✗ Rejected ${it.sn||it.dealer} → returning to factory: ${reasonLabel}${notes?' · '+notes:''}`;
       if(credited) logMsg += ' · cover credited back';
@@ -15840,7 +15910,7 @@ function addIncoming(){
   const id = ++nid;
   incoming.push(_born({id, sn, dealer, type, date, status:'pending'}));
   // Mirror into queue so it shows on the Floor Map's "Arriving to Warehouse" panel
-  queue.push({id, sn, dealer, type, qty:1, entry:date, _fromIncoming:true});
+  queue.push(_born({id, sn, dealer, type, qty:1, entry:date, _fromIncoming:true}));
   document.getElementById('in-sn').value='';document.getElementById('in-dealer').value='';
   addAct(`Incoming: ${sn||dealer}`,'var(--amber)');
   toast(`${sn||dealer} added to incoming list & queue`,'ok');
@@ -16123,6 +16193,7 @@ function confirmPosition(incomingId, posRaw){
   // Remove from incoming + queue
   _tombstoneIncomingRow(incoming.find(x => x.id === incomingId));   // v5.38
   incoming = incoming.filter(x => x.id !== incomingId);
+  _tombstoneQueueItem(incomingId);   // v5.41
   queue = queue.filter(q => q.id !== incomingId);
   const slotTag = slot ? ` (S${slot.stack}-${LEVEL_SHORT(slot.level)})` : '';
   addAct(`Placed ${it.sn||it.dealer} at ${v.pos}${slotTag}`,'var(--teal)');
@@ -17084,7 +17155,7 @@ function loadCSV(e){
       if(p[0]||p[1]){
         const id = ++nid;
         incoming.push(_born({id, sn:p[0]||'', dealer:p[1]||'', type:p[2]||'hot', date:p[3]||toISO(), status:'pending'}));
-        queue.push({id, sn:p[0]||'', dealer:p[1]||'', type:p[2]||'hot', qty:1, entry:p[3]||toISO(), _fromIncoming:true});
+        queue.push(_born({id, sn:p[0]||'', dealer:p[1]||'', type:p[2]||'hot', qty:1, entry:p[3]||toISO(), _fromIncoming:true}));
         n++;
       }
     }
@@ -17212,6 +17283,7 @@ function reconcileCoverRequests(){
     const stock = getCoverStockFor(r.coverModel, r.coverColor);
     if(stock.available >= (r.qty || 1)){
       r.status = 'fulfilled';
+      r.updatedAt = editStamp();   // v5.41 — LEW: this edit must survive a stale remote merge
       r.fulfilledAt = toISO();
       r.notes = (r.notes ? r.notes + ' \u00b7 ' : '') + `Auto-closed: ${stock.available} now in stock at Warehouse`;
       addAct(`\u2713 Cover request closed \u2014 back in stock at Warehouse: ${r.description}`, 'var(--teal)');
@@ -17247,7 +17319,7 @@ function addMaterial(){
   const matId = nid++;
   const unitId = pos ? nid++ : null;
   const matRecord = {id:matId, linkedUnitId:unitId, name, qty, cat, pos, date, notes, photo:matPhotoData, coverModel, coverColor, coverShipped: 0};
-  materials.unshift(matRecord);
+  materials.unshift(_born(matRecord));
   if(pos) units.push(_born({id:unitId, linkedMatId:matId, pos,sn:'',dealer:name,type:'material',entry:date,qty,notes,photo:matPhotoData}));
   addAct(`Material received: ${name} (qty: ${qty})${pos?' @ '+pos:''}${cat==='covers'&&coverModel?` · ${coverModel} ${coverColor}`:''}`,'var(--orange)');
 
@@ -17278,6 +17350,7 @@ function addMaterial(){
       const effectiveAvailable = stock.available - reserved;
       if(effectiveAvailable >= r.qty){
         r.status = 'pending';
+        r.updatedAt = editStamp();   // v5.41 — LEW: this edit must survive a stale remote merge
         r.notes = (r.notes ? r.notes + ' · ' : '') + `Auto-promoted: ${qty}x cover stock arrived ${toISO()}`;
         promoted++;
       } else {
@@ -17497,6 +17570,7 @@ function saveMaterialEdit(id){
   m.perBox = perBox || undefined;
   m.qty = qty;
   m.pos = validatedPos || undefined;
+  m.updatedAt = editStamp();   // v5.41 — LEW: this edit must survive a stale remote merge
   m.notes = notes || undefined;
   m.editedAt = toISO();
   // If on a pallet and palletNote changed, update ALL items on that pallet
@@ -17537,6 +17611,7 @@ function saveMaterialEdit(id){
     linkedUnit.entry = m.date;
   } else if(!validatedPos && linkedUnit){
     // Case 3: position removed → delete the unit
+    units.filter(u => !(u.id !== m.linkedUnitId)).forEach(_tombstoneUnitRow);   // v5.41
     units = units.filter(u => u.id !== m.linkedUnitId);
     m.linkedUnitId = undefined;
   }
@@ -17565,14 +17640,18 @@ function rmMaterial(id){
   let removedFromMap = 0;
   if(m.linkedUnitId){
     const before = units.length;
+    units.filter(u => !(u.id !== m.linkedUnitId)).forEach(_tombstoneUnitRow);   // v5.41
     units = units.filter(u => u.id !== m.linkedUnitId);
     removedFromMap = before - units.length;
   }
   // Fallback: any unit that points back to this material id via linkedMatId
   const before2 = units.length;
+  units.filter(u => !(u.linkedMatId !== id)).forEach(_tombstoneUnitRow);   // v5.41
   units = units.filter(u => u.linkedMatId !== id);
   removedFromMap += (before2 - units.length);
 
+  materials.filter(x => !(x.id !== id)).forEach(_r => _tombstoneRowIn('materials', _r));   // v5.41
+  materials.filter(x => x.id === id).forEach(_r => _tombstoneRowIn('materials', _r));   // v5.41
   materials = materials.filter(x => x.id !== id);
 
   addAct(`Material removed: ${m.name}${removedFromMap > 0 ? ' (and cleaned from floor map)' : ''}`,'var(--orange)');
@@ -17723,7 +17802,7 @@ function confirmReturnUnit(recId, sn){
     }));
     // Mirror into the floor-map "Arriving to Warehouse" queue for drag/click-place.
     if(typeof queue !== 'undefined' && Array.isArray(queue)){
-      queue.push({ id: incId, sn: rec.sn||'', dealer: rec.dealer||'', type: rec.type||'hot', qty:1, entry: at, _fromIncoming:true });
+      queue.push(_born({ id: incId, sn: rec.sn||'', dealer: rec.dealer||'', type: rec.type||'hot', qty:1, entry: at, _fromIncoming:true }));
     }
     addAct(`↩ Returned to WAREHOUSE: S/N ${rec.sn||'—'} from ${rec.dealer||'—'} — ${reasonText}`, 'var(--orange)');
     toast(`${rec.sn||'Unit'} returned — assign it a position`, 'ok');
@@ -18471,6 +18550,7 @@ function dispatchAndDeliverGroup(gid){
       try { decrementCoverStock(_cp.color, _cp.model, 'warehouse', u.sn); }
       catch(e){ console.warn('[cover pull on schedule dispatch]', e); }
     }
+    units.filter(x => !(x.id!==u.id)).forEach(_tombstoneUnitRow);   // v5.41
     units = units.filter(x=>x.id!==u.id);
     // Close out this spa's marriages exactly like confirmDispatch: ship-with-spa
     // accessories (delivered) → completed/cleared; anything still pending → split.
@@ -18633,6 +18713,7 @@ function rmDispatchGroup(groupId){
   snapshot('delete dispatch');
   _trashAdd('event-group', `Dispatch · ${grp[0].dealer||''} · ${grp.length} S/N · ${grp[0].date||''}`, grp);   // v5.19: 30-day restore
   _tombstoneEventGroup(groupId);   // v5.12: block stale-remote resurrection of this dispatch
+  events.filter(e => String(e.groupId) === String(groupId)).forEach(_r => _tombstoneRowIn('events', _r));   // v5.41
   events = events.filter(e => String(e.groupId) !== String(groupId));
   toast('Dispatch deleted','ok');
   renderCal();
@@ -18745,7 +18826,7 @@ function addEvt(){
   const d=document.getElementById('ev-d').value;
   if(!t||!d){toast('Fill in title and date','err');return;}
   const sn=(document.getElementById('ev-sn').value||'').trim();
-  events.push({id: Date.now()*1000 + ((Math.random()*1000)|0) /* v5.23 (#9): cross-device same-ms collision guard */,title:t,date:d,time:document.getElementById('ev-h').value,type:document.getElementById('ev-ty').value,dealer:(document.getElementById('ev-dl').value||'').trim(),sn});
+  events.push(_born({id: Date.now()*1000 + ((Math.random()*1000)|0) /* v5.23 (#9): cross-device same-ms collision guard */,title:t,date:d,time:document.getElementById('ev-h').value,type:document.getElementById('ev-ty').value,dealer:(document.getElementById('ev-dl').value||'').trim(),sn}));
   toast('Event added','ok');document.getElementById('sched-float').innerHTML='';renderCal();updBadges();
 }
 
@@ -19602,7 +19683,7 @@ function saveCreateDispatch(){
   const missingSns = spaRows.filter(r => r.status === 'missing').map(r => r.sn);
   // Spa events
   spaRows.forEach((r,i)=>{
-    events.push({
+    events.push(_born({
       id: groupId + i,
       groupId,
       title: `Dispatch: ${r.sn}`,
@@ -19617,11 +19698,11 @@ function saveCreateDispatch(){
       _initialLocation: r.location,
       bolPdf: i === 0 ? _dispBolPdf : null,
       notes: i === 0 ? notes : ''
-    });
+    }));
   });
   // Cover events (same group, separate type)
   coverRows.forEach((r,i)=>{
-    events.push({
+    events.push(_born({
       id: groupId + 1000 + i,
       groupId,
       title: `Cover: ${r.dealer}`,
@@ -19635,12 +19716,12 @@ function saveCreateDispatch(){
       _initialStatus: 'cover-needed',
       _initialLocation: 'Pick from warehouse cover stock',
       notes: ''
-    });
+    }));
   });
   // Accessory events (panels, lifters, steps, etc.) — same group, separate type
   // Each accessory becomes a marriage record so factory knows it must ship with the spa.
   accessoryRows.forEach((r,i)=>{
-    events.push({
+    events.push(_born({
       id: groupId + 2000 + i,
       groupId,
       title: `${r.dealer.split('(')[0].trim()}: ${r.partNum||'—'}`,
@@ -19655,11 +19736,11 @@ function saveCreateDispatch(){
       _initialStatus: 'accessory-needed',
       _initialLocation: 'NOT IN STOCK — factory must ship',
       notes: ''
-    });
+    }));
     // Auto-create a marriage record so the factory request system tracks it
     if(r.marriedTo){
       const suggestedLoc = (typeof suggestMarriageLocation === 'function') ? suggestMarriageLocation() : null;
-      marriages.push({
+      marriages.push(_born({
         id: ++nid,
         spaSn: r.marriedTo,
         accessoryName: r.dealer,
@@ -19671,7 +19752,7 @@ function saveCreateDispatch(){
         groupId,
         location: suggestedLoc,   // auto-place in marriage inventory (13A or 14A)
         locationSuggested: !!suggestedLoc
-      });
+      }));
     }
   });
   // Activity log
@@ -22122,7 +22203,7 @@ function decrementCoverStock(color, model, source, spaSn){
   // Create row if it doesn't exist (with 0 stock — will go to pending)
   if(!row){
     row = {id:++nid, color, model: model||'', qty:0, lowThreshold:1, location:'', source, updated:toISO(), history:[], pending:[]};
-    coverInventory.push(row);
+    coverInventory.push(_born(row));
     toast(`New cover row created for ${color}${model?' ('+model+')':''} at ${srcLabel} — see Cover Inventory`,'info');
   }
   row.pending = row.pending || [];
@@ -22153,7 +22234,7 @@ function decrementCoverStock(color, model, source, spaSn){
       (r.status === 'pending' || r.status === 'approved')
     );
     if(!existingReq && typeof dispatchRequests !== 'undefined'){
-      dispatchRequests.unshift({
+      dispatchRequests.unshift(_born({
         id: ++nid,
         type: 'cover',
         description: `Cover ${color}${model?' '+model:''} — out of stock at ${srcLabel}, needed for pending spa(s)`,
@@ -22165,7 +22246,7 @@ function decrementCoverStock(color, model, source, spaSn){
         status: 'pending',
         notes: `Auto-created when stock hit 0. Pending S/Ns: ${spaSn||'(unknown)'}`,
         autoCreated: true,
-      });
+      }));
       if(typeof renderRequests === 'function') renderRequests();
     }
     return true; // allow spa creation — cover is queued, not blocked
@@ -22222,7 +22303,7 @@ function reconcileDispatchedCovers(opts){
       // No row for this cover model → the cover already shipped, so seed a 0 row and
       // record the pull as history (it represents a real deficit, kept explicit).
       row = {id:++nid, color:cov.color, model:cov.model||'', qty:0, lowThreshold:1, location:'', source:'warehouse', updated:editStamp(), history:[], pending:[]};
-      coverInventory.push(row);
+      coverInventory.push(_born(row));
     }
     row.qty = Math.max(0, (row.qty||0) - 1);                    // correction only reduces; never negative
     row.updated = editStamp();
@@ -22330,7 +22411,7 @@ function incrementCoverStock(color, model, source, spaSn, reason){
   );
   if(!row){
     row = {id:++nid, color, model: model||'', qty:0, lowThreshold:1, location:'', source, updated:toISO(), history:[]};
-    coverInventory.push(row);
+    coverInventory.push(_born(row));
   }
   row.qty += 1;
   row.updated = editStamp();
@@ -22436,6 +22517,7 @@ async function printQRLabel(itemId, source){
     // Backfill: this older item doesn't have a tracking ID yet — generate one now
     item.trackingId = makeTrackingId(source === 'materials' ? 'MAT' : 'SPA');
     item.trackingState = item.trackingState || 'created-at-factory';
+    item.updatedAt = editStamp();   // v5.41 — LEW: this edit must survive a stale remote merge
     item.trackingHistory = item.trackingHistory || [{state:'created-at-factory', at: toISO(), by: actorName()}];
     // CRITICAL: persist the backfill so the QR we're about to print actually
     // resolves back to a known item next time someone scans it. Without this
@@ -23297,7 +23379,7 @@ function handleQRPayload(raw, mode){
         createdBy: 'recovered from QR scan',
         deliveredDate: null
       };
-      marriages.unshift(m);
+      marriages.unshift(_born(m));
       addAct(`🔄 Recovered marriage record from QR scan: ${m.accessoryName} for S/N ${m.spaSn}`, 'var(--accent)');
       console.log('[marriage scan] Marriage', parsedMid, 'was NOT in local data — created locally from QR payload');
     } else {
@@ -23629,7 +23711,7 @@ function handleQRPayload(raw, mode){
         dupExisting.updatedAt = editStamp();   // v5.37
         dupExisting.arrivedAt = dupExisting.arrivedAt || at;
         if(!queue.some(q => String(q.sn) === String(item.sn) && q._fromIncoming)){
-          queue.push({ id: dupExisting.id, sn: item.sn || '', dealer: item.dealer || '', type: item.type, qty: 1, entry: toDateStr(at), _fromIncoming: true });
+          queue.push(_born({ id: dupExisting.id, sn: item.sn || '', dealer: item.dealer || '', type: item.type, qty: 1, entry: toDateStr(at), _fromIncoming: true }));
         }
         addAct(`📬 Re-scan: ${item.sn||tid} was already received — no duplicate`,'var(--teal)');
         setScanResult('ok', item.sn||tid, 'already received · assign position…');
@@ -23650,7 +23732,7 @@ function handleQRPayload(raw, mode){
       // Mirror into queue so the Floor Map's "Arriving to Warehouse" panel
       // surfaces this unit for drag-drop / click-to-place. Without this
       // mirror, the panel reads empty even after a successful scan.
-      queue.push({
+      queue.push(_born({
         id: incomingId,
         sn: item.sn || '',
         dealer: item.dealer || '',
@@ -23658,7 +23740,7 @@ function handleQRPayload(raw, mode){
         qty: 1,
         entry: toDateStr(at),
         _fromIncoming: true
-      });
+      }));
       addAct(`📬 Received at warehouse: ${item.sn||tid} (${item.dealer||''})`,'var(--teal)');
       setScanResult('ok', item.sn||tid, 'received · assigning position…');
       toast(`${item.sn||'Item'} received — assign position`,'ok');
@@ -23780,7 +23862,7 @@ function addFactoryAccessory(){
   if(marsn){
     const spa = findSpaBySn(marsn);
     const suggestedLoc = (typeof suggestMarriageLocation === 'function') ? suggestMarriageLocation() : null;
-    marriages.push({
+    marriages.push(_born({
       id: ++nid,
       spaSn: marsn,
       spaDealer: spa ? spa.dealer : '',
@@ -23793,7 +23875,7 @@ function addFactoryAccessory(){
       created: toISO(),
       location: suggestedLoc,    // auto-place in marriage inventory (MINV)
       locationSuggested: !!suggestedLoc
-    });
+    }));
     addAct(`Marriage created: ${name} → S/N ${marsn}${spa?` (${spa.dealer})`:''}${suggestedLoc?` · auto-staged at ${suggestedLoc}`:''}`,'var(--red)');
   } else {
     addAct(`Added accessory "${name}" to factory`,'var(--orange)');
@@ -23884,7 +23966,7 @@ function shipFromFactory(id){
     if(!f.marriedSn){
       if(!confirm(`Ship "${f.dealer}" from factory?\n\nThis is a loose accessory — it will be logged to Materials immediately.`)) return;
       snapshot('ship loose accessory from factory');
-      materials.unshift({id:++nid, name:f.dealer, qty:f.qty||1, cat:'parts', date:toISO(), notes:f.notes||'From factory'});
+      materials.unshift(_born({id:++nid, name:f.dealer, qty:f.qty||1, cat:'parts', date:toISO(), notes:f.notes||'From factory'}));
       try{ postMovement({type:'101', sn:f.sn||'', material:f.type||'accessory', qty:f.qty||1, from:LOC_FACTORY, to:LOC_WAREHOUSE(''), stockType:'unrestricted', note:'Loose accessory shipped to Materials'}); }catch(e){}
       _tombstoneFactoryRow(f);         // v5.05: block stale-remote resurrection (S/N-less accessory)
       factory = factory.filter(x => x.id !== id);
@@ -23914,6 +23996,7 @@ function shipFromFactory(id){
     const linkedMarriage = marriages.find(m => m.accessoryId === f.id && m.status === 'pending');
     if(linkedMarriage){
       linkedMarriage.status = 'ready-to-ship';
+      linkedMarriage.updatedAt = editStamp();   // v5.41 — LEW: this edit must survive a stale remote merge
       linkedMarriage.readyAt = toISO();
       addAct(`📦 Marriage ready to ship: ${f.dealer} → S/N ${f.marriedSn}`, 'var(--amber)');
       if(typeof mTrail==='function') mTrail(linkedMarriage, 'ready-to-ship', { via:'manual', station:'factory', note:'Factory marked ready — waiting for Truck scan' });
@@ -23985,6 +24068,7 @@ function markReadyForPickup(id){
   if(isAcc && f.marriedSn){
     const lm = marriages.find(m => m.accessoryId === f.id && m.status === 'pending');
     if(lm){ lm.status = 'ready-for-pickup'; lm.readyAt = toISO(); }
+    lm.updatedAt = editStamp();   // v5.41 — LEW: this edit must survive a stale remote merge
   }
   addAct(`🤝 Ready for dealer pickup at factory: ${f.sn||f.dealer}`,'var(--purple)');
   toast(`${f.sn||f.dealer} ready for dealer pickup — Truck can't scan it`,'ok');
@@ -24052,6 +24136,50 @@ function _born(row){
   return row;
 }
 window._born = _born;
+
+// ── v5.41 — GENERIC TOMBSTONE MECHANISM ─────────────────────────────────────
+// A DELETION cannot win last-edit-wins: there is no row left to carry a stamp.
+// So every synced collection needs tombstones, or a stale remote re-adds the row.
+// units/factory/incoming/queue had bespoke ones; materials, marriages, events and
+// coverInventory had NONE — meaning a deleted cover, material, marriage or event
+// could silently come back. One implementation, used by all of them.
+const _TOMB_MAP = { materials:'_deletedMaterials', marriages:'_deletedMarriages',
+                    events:'_deletedEventIds', coverInventory:'_deletedCovers' };
+function _tombstoneRowIn(coll, row){
+  if(!row) return;
+  try{
+    const map = _TOMB_MAP[coll]; if(!map) return;
+    cfg[map] = cfg[map] || {};
+    cfg[map]['id:' + row.id] = editStamp();
+    const _cut = new Date(Date.now() - 60*864e5).toISOString();
+    for(const k in cfg[map]){ if(cfg[map][k] < _cut) delete cfg[map][k]; }
+  }catch(e){ console.warn('[tombstone ' + coll + ']', e); }
+}
+window._tombstoneRowIn = _tombstoneRowIn;
+
+// Honor those tombstones inside a merge. Plausibility-aware: a future-stamped row
+// (fast device clock) must not be immune to an honest deletion.
+function _dropTombstonedIn(coll, merged, remoteCfg, cap){
+  try{
+    const map = _TOMB_MAP[coll]; if(!map) return merged;
+    const t = {};
+    const absorb = src => { if(src && typeof src === 'object') for(const k in src){ const v = src[k]; if(typeof v === 'string' && (!t[k] || v > t[k])) t[k] = v; } };
+    absorb(typeof cfg === 'object' && cfg ? cfg[map] : null);
+    absorb(remoteCfg ? remoteCfg[map] : null);
+    if(!Object.keys(t).length) return merged;
+    const C = cap || '\uffff';
+    return merged.filter(row => {
+      if(!row || row.id == null) return true;
+      const ts = t['id:' + row.id];
+      if(!ts) return true;
+      const ru = (typeof row.updatedAt === 'string') ? row.updatedAt : '';
+      const rowFut = !!ru && ru > C, tombFut = ts > C;
+      const drop = (rowFut && !tombFut) ? true : ((tombFut && !rowFut) ? false : (ru < ts));
+      return !drop;
+    });
+  }catch(e){ console.warn('[drop tombstoned ' + coll + ']', e); return merged; }
+}
+window._dropTombstonedIn = _dropTombstonedIn;
 
 function _tombstoneIncomingRow(it){
   if(!it) return;
@@ -24156,6 +24284,7 @@ function rmFromFactory(id){
   // marriages are NOT cleaned up here because by then the accessory has
   // already left the factory list anyway.
   const wasMarried = marriages.some(m => m.accessoryId === id && (m.status === 'pending' || m.status === 'ready-to-ship'));
+  marriages.filter(m => (m.accessoryId === id && (m.status === 'pending' || m.status === 'ready-to-ship'))).forEach(_r => _tombstoneRowIn('marriages', _r));   // v5.41
   marriages = marriages.filter(m => !(m.accessoryId === id && (m.status === 'pending' || m.status === 'ready-to-ship')));
   // ── DELETE TOMBSTONE (v4.97) ──────────────────────────────────────────────
   // _mergeFactory is keep-local ("never lose a tub") and rebuilds from the remote
@@ -24181,6 +24310,7 @@ function rmFromFactory(id){
       for(const k in cfg._deletedUnits){ if(cfg._deletedUnits[k] < _cut) delete cfg._deletedUnits[k]; }
     }
   } catch(e){ console.warn('[factory tombstone write]', e); }
+  factory.filter(x => !(x.id !== id)).forEach(_tombstoneFactoryRow);   // v5.41
   factory = factory.filter(x => x.id !== id);
   addAct(`🗑 Removed from factory: ${f.sn||f.dealer}${wasMarried ? ' (+ orphaned marriages)' : ''}`, 'var(--red)');
   toast('Removed','ok');
@@ -24799,7 +24929,7 @@ function addMarriage(){
     locationSuggested: mountType === 'shelf'
   };
   if(status === 'delivered') newMarriage.deliveredDate = toISO();
-  marriages.push(newMarriage);
+  marriages.push(_born(newMarriage));
   addAct(`Marriage created (${mountType === 'inside' ? 'inside tub' : 'shelf'}): ${name} → S/N ${sn}${resolvedDealer?` (${resolvedDealer})`:''}${stagedMsg}`,'var(--red)');
   toast(mountType === 'inside' ? 'Marriage created — inside the tub' : 'Marriage created','ok');
   try { flushSave(); } catch(e){}
@@ -24818,6 +24948,8 @@ function rmMarriage(mid){
   // Unlink from factory accessory
   const acc = factory.find(f => f.id === m.accessoryId);
   if(acc) acc.marriedSn = null;
+  marriages.filter(x => !(x.id !== mid)).forEach(_r => _tombstoneRowIn('marriages', _r));   // v5.41
+  marriages.filter(x => x.id === mid).forEach(_r => _tombstoneRowIn('marriages', _r));   // v5.41
   marriages = marriages.filter(x => x.id !== mid);
   addAct(`🗑 Marriage removed: ${m.accessoryName} ↔ S/N ${m.spaSn}`, 'var(--red)');
   toast('Marriage removed','ok');
@@ -24954,6 +25086,7 @@ function saveMarriageEdit(mid){
       }
       if(!m.location) m.location = (typeof suggestMarriageLocation === 'function') ? suggestMarriageLocation() : 'MINV';
       if(m.status === 'delivered'){ m.status = 'pending'; delete m.deliveredDate; }  // was inside-only → must ship now
+      m.updatedAt = editStamp();   // v5.41 — LEW: this edit must survive a stale remote merge
     }
     m.mountType = newMount;
   }
@@ -25387,6 +25520,7 @@ function undoMarriageDelivered(mid){
   const linkedReq = dispatchRequests.find(r => r.autoCreated && r.marriageId === mid && r.status === 'received');
   if(linkedReq){
     linkedReq.status = 'pending';
+    linkedReq.updatedAt = editStamp();   // v5.41 — LEW: this edit must survive a stale remote merge
     delete linkedReq.receivedAt;
     linkedReq.notes = (linkedReq.notes ? linkedReq.notes + ' \u00b7 ' : '') + 'Reopened: delivery undone';
   }
@@ -25656,7 +25790,7 @@ async function submitCoverArrival(){
     (c.model||'').toLowerCase() === model.toLowerCase());
   if(!row){
     row = {id:++nid, color, model, qty:0, lowThreshold:1, location:'', source:'warehouse', updated:editStamp(), history:[], pending:[]};
-    coverInventory.push(row);
+    coverInventory.push(_born(row));
   }
   row.qty = (row.qty||0) + qty;
   // Soft capacity check per floor position (default 30, configurable). Warn but never block.
@@ -26040,12 +26174,13 @@ function invDoMove(kind, cat, src, matId){
     if(m){
       m.qty = (+m.qty||0) + qty;
       if(loc) m.pos = loc;
+      m.updatedAt = editStamp();   // v5.41 — LEW: this edit must survive a stale remote merge
       m.source = m.source || src;
       m.date = date;
       m.history = Array.isArray(m.history) ? m.history : [];
     } else {
       m = {id:(typeof nid!=='undefined'?nid++:Date.now()), name, qty, cat, source:src, pos:loc, date, notes, history:[]};
-      if(Array.isArray(materials)) materials.unshift(m);
+      if(Array.isArray(materials)) materials.unshift(_born(m));
     }
     m.history.push({action:'arrival', qty, at:_invNow(), when:date, where:loc||'—', by:_invWho(), notes});
     _invPost({type:'101', material:name, qty, to:{org:sideOrg, bin:loc||''}, note:'Hub receive'+(notes?': '+notes:'')});
@@ -26120,7 +26255,7 @@ function matTransferRequest(cat, from, name, qty, note){
   const tx = { id:(typeof nid!=='undefined'?nid++:Date.now()), cat, item:name, qty:qty,
     from:from, to:_invTransferOther(from), status:'requested',
     requestedAt:_invNow(), requestedBy:_invWho(), shippedAt:null, arrivedAt:null, note:note||'' };
-  matTransfers.unshift(tx);
+  matTransfers.unshift(_born(tx));
   if(typeof addAct === 'function') addAct(`🔄 Transfer requested: ${qty} × ${name} (${cat}) ${_invOrg(from)}→${_invOrg(tx.to)}`,'var(--accent)');
   if(typeof saveState === 'function') saveState();
   return tx;
@@ -26136,6 +26271,7 @@ function matTransferShip(id){
   m.history = Array.isArray(m.history) ? m.history : [];
   m.history.push({action:'issue', qty:tx.qty, at:_invNow(), when:(new Date()).toISOString().slice(0,10), by:_invWho(), notes:'transfer ship → '+tx.to});
   tx.status = 'in-transit'; tx.shippedAt = _invNow(); tx.shippedBy = _invWho();
+  tx.updatedAt = editStamp();   // v5.41 — LEW: this edit must survive a stale remote merge
   _invPost({type:'601', material:tx.item, qty:tx.qty, from:{org:_invOrg(tx.from), bin:m.pos||''}, note:'Transfer ship → '+_invOrg(tx.to)});
   if(typeof addAct === 'function') addAct(`🚚 In transit: ${tx.qty} × ${tx.item} ${_invOrg(tx.from)}→${_invOrg(tx.to)}`,'var(--orange)');
   if(typeof saveState === 'function') saveState();
@@ -26147,11 +26283,12 @@ function matTransferReceive(id){
   const tx = _matTxFind(id); if(!tx){ toast('Transfer not found','err'); return; }
   if(tx.status !== 'in-transit'){ toast('Only in-transit transfers can be received','err'); return; }
   let m = _invFindMat(tx.cat, tx.to, tx.item);
-  if(!m){ m = {id:(typeof nid!=='undefined'?nid++:Date.now()), name:tx.item, qty:0, cat:tx.cat, source:tx.to, pos:'', date:(new Date()).toISOString().slice(0,10), notes:'', history:[]}; if(Array.isArray(materials)) materials.unshift(m); }
+  if(!m){ m = {id:(typeof nid!=='undefined'?nid++:Date.now()), name:tx.item, qty:0, cat:tx.cat, source:tx.to, pos:'', date:(new Date()).toISOString().slice(0,10), notes:'', history:[]}; if(Array.isArray(materials)) materials.unshift(_born(m)); }
   m.qty = (+m.qty||0) + tx.qty;
   m.history = Array.isArray(m.history) ? m.history : [];
   m.history.push({action:'arrival', qty:tx.qty, at:_invNow(), when:(new Date()).toISOString().slice(0,10), where:'transfer from '+_invOrg(tx.from), by:_invWho(), notes:tx.note});
   tx.status = 'arrived'; tx.arrivedAt = _invNow(); tx.arrivedBy = _invWho();
+  tx.updatedAt = editStamp();   // v5.41 — LEW: this edit must survive a stale remote merge
   _invPost({type:'101', material:tx.item, qty:tx.qty, to:{org:_invOrg(tx.to), bin:m.pos||''}, note:'Transfer arrived from '+_invOrg(tx.from)});
   if(typeof addAct === 'function') addAct(`📥 Transfer arrived: ${tx.qty} × ${tx.item} at ${_invOrg(tx.to)}`,'var(--teal)');
   if(typeof saveState === 'function') saveState();
@@ -26164,13 +26301,14 @@ function matTransferCancel(id){
   if(tx.status === 'arrived' || tx.status === 'cancelled'){ toast('Cannot cancel a closed transfer','err'); return; }
   if(tx.status === 'in-transit'){
     let m = _invFindMat(tx.cat, tx.from, tx.item);
-    if(!m){ m = {id:(typeof nid!=='undefined'?nid++:Date.now()), name:tx.item, qty:0, cat:tx.cat, source:tx.from, pos:'', date:(new Date()).toISOString().slice(0,10), notes:'', history:[]}; if(Array.isArray(materials)) materials.unshift(m); }
+    if(!m){ m = {id:(typeof nid!=='undefined'?nid++:Date.now()), name:tx.item, qty:0, cat:tx.cat, source:tx.from, pos:'', date:(new Date()).toISOString().slice(0,10), notes:'', history:[]}; if(Array.isArray(materials)) materials.unshift(_born(m)); }
     m.qty = (+m.qty||0) + tx.qty;
     m.history = Array.isArray(m.history) ? m.history : [];
     m.history.push({action:'arrival', qty:tx.qty, at:_invNow(), when:(new Date()).toISOString().slice(0,10), where:'transfer cancelled (returned)', by:_invWho()});
     _invPost({type:'101', material:tx.item, qty:tx.qty, to:{org:_invOrg(tx.from)}, note:'Transfer cancelled — returned to '+_invOrg(tx.from)});
   }
   tx.status = 'cancelled'; tx.cancelledAt = _invNow();
+  tx.updatedAt = editStamp();   // v5.41 — LEW: this edit must survive a stale remote merge
   if(typeof addAct === 'function') addAct(`✖ Transfer cancelled: ${tx.qty} × ${tx.item}`,'var(--red)');
   if(typeof saveState === 'function') saveState();
   if(document.getElementById('inv-cat-wrap')) renderInventoryHub();
@@ -26325,12 +26463,12 @@ function saveCoverAdd(){
   snapshot('add cover stock');
   learnFromInput('cover', color);
   learnFromInput('coverModel', model);
-  coverInventory.push({
+  coverInventory.push(_born({
     id: ++nid,
     color, model, location, qty, lowThreshold, source,
     updated: toISO(),
     history: [{at: toISO(), action:'created', by: actorName(), qty}]
-  });
+  }));
   addAct(`Added cover stock: ${color}${model?' '+model:''} × ${qty} at ${source==='factory'?'Factory':'Warehouse'}`, '#6366f1');
   toast(`${color} added to ${source==='factory'?'Factory':'Warehouse'} inventory`, 'ok');
   document.getElementById('cover-float-panel').innerHTML = '';
@@ -26462,6 +26600,8 @@ function rmCover(id){
   if(!confirm(`Remove "${c.color}" from cover inventory?\n\nCurrent qty: ${c.qty}\n\nThis only removes the inventory row — any spas already assigned this cover keep their record.`)) return;
   snapshot('remove cover row');
   _trashAdd('cover', `Cover · ${c.color}${c.model?' '+c.model:''} · qty ${c.qty}`, c);   // v5.19: 30-day restore
+  coverInventory.filter(x => !(x.id !== id)).forEach(_r => _tombstoneRowIn('coverInventory', _r));   // v5.41
+  coverInventory.filter(x => x.id === id).forEach(_r => _tombstoneRowIn('coverInventory', _r));   // v5.41
   coverInventory = coverInventory.filter(x => x.id !== id);
   addAct(`🗑 Removed cover row: ${c.color}${c.model?' ('+c.model+')':''} — was qty ${c.qty}`, 'var(--red)');
   toast('Cover row removed','ok');
@@ -26570,7 +26710,7 @@ function saveCoverTransfer(fromId){
       updated: toISO(),
       history: []
     };
-    coverInventory.push(toRow);
+    coverInventory.push(_born(toRow));
   }
   toRow.qty += qty;
   toRow.updated = editStamp();
@@ -26959,7 +27099,7 @@ function submitRequest(){
   }
 
   snapshot('new factory request');
-  dispatchRequests.push({
+  dispatchRequests.push(_born({
     id: ++nid,
     type, sn, description: desc, qty,
     coverModel, coverColor,
@@ -26970,7 +27110,7 @@ function submitRequest(){
     approvedAt: null,
     shippedAt: null,
     receivedAt: null
-  });
+  }));
   addAct(`Factory requested: ${desc}${sn?` (S/N ${sn})`:''}${initialStatus==='awaiting-stock'?' [awaiting stock]':''}`, initialStatus === 'awaiting-stock' ? 'var(--red)' : 'var(--amber)');
   toast(initialStatus === 'awaiting-stock'
     ? 'Request queued — will auto-ship when cover stock arrives'
@@ -26994,6 +27134,7 @@ function markRequestShipped(rid){
       if(!confirm(`Ship tub ${r.sn} to factory?\n\nThis will REMOVE the tub from position ${u.pos} in the warehouse.`)) return;
       snapshot('ship tub to factory');
       const fromPos = u.pos;
+      units.filter(x => !(x.id !== u.id)).forEach(_tombstoneUnitRow);   // v5.41
       units = units.filter(x => x.id !== u.id);
       drawMap();
       extraNote = ` · Outbound from ${fromPos}`;
@@ -27042,6 +27183,7 @@ function markRequestShipped(rid){
     snapshot('ship factory request');
   }
   r.status = 'shipped';
+  r.updatedAt = editStamp();   // v5.41 — LEW: this edit must survive a stale remote merge
   r.shippedAt = toISO();
   addAct(`Shipped to factory: ${r.description}${extraNote}`,'var(--accent)');
   toast('Marked as shipped — Factory will receive notification','ok');
@@ -27055,6 +27197,7 @@ function forcePromote(rid){
   if(r.status !== 'awaiting-stock'){ toast('Request not awaiting stock','err'); return; }
   snapshot('promote request');
   r.status = 'pending';
+  r.updatedAt = editStamp();   // v5.41 — LEW: this edit must survive a stale remote merge
   r.notes = (r.notes ? r.notes + ' · ' : '') + `Manually promoted ${toISO()}`;
   addAct(`Promoted to pending: ${r.description}`,'var(--teal)');
   toast('Request promoted — warehouse can now approve','ok');
@@ -27077,6 +27220,7 @@ function approveRequest(rid){
   }
   snapshot('approve factory request');
   r.status = 'approved';
+  r.updatedAt = editStamp();   // v5.41 — LEW: this edit must survive a stale remote merge
   r.approvedAt = toISO();
   addAct(`Approved factory request: ${r.description}`,'#0891b2');
   toast('Approved — ready to ship when you are','ok');
@@ -27091,6 +27235,7 @@ function markRequestReceived(rid){
   if(!confirm(`Mark "${r.description}" as received at factory?`)) return;
   snapshot('receive factory request');
   r.status = 'received';
+  r.updatedAt = editStamp();   // v5.41 — LEW: this edit must survive a stale remote merge
   r.receivedAt = toISO();
   // If this is a cover request, auto-increment the factory cover inventory.
   // Creates a new factory row if none exists for that color×model combo.
@@ -27118,7 +27263,7 @@ function markRequestReceived(rid){
         updated: toISO(),
         history: []
       };
-      coverInventory.push(invRow);
+      coverInventory.push(_born(invRow));
     }
     invRow.qty += r.qty;
     invRow.updated = editStamp();
@@ -27154,6 +27299,7 @@ function rejectRequest(rid){
   if(reason === null) return;
   snapshot('reject factory request');
   r.status = 'rejected';
+  r.updatedAt = editStamp();   // v5.41 — LEW: this edit must survive a stale remote merge
   if(reason) r.notes = (r.notes ? r.notes + ' · ' : '') + 'REJECTED: ' + reason;
   addAct(`Rejected request: ${r.description}`,'var(--red)');
   toast('Request rejected','ok');
@@ -27168,6 +27314,7 @@ function cancelRequest(rid){
   // a device that still has the request re-adds it ("cancelled requests reappear").
   // 'cancelled' is a terminal status the merge preserves and the views hide.
   r.status = 'cancelled';
+  r.updatedAt = editStamp();   // v5.41 — LEW: this edit must survive a stale remote merge
   r.cancelledAt = toISO();
   toast('Request cancelled','ok');
   renderRequests(); updBadges();
@@ -27271,6 +27418,7 @@ function toggleReceived(rid){
   if(r.status === 'shipped'){
     snapshot('factory receive (checkbox)');
     r.status = 'received';
+    r.updatedAt = editStamp();   // v5.41 — LEW: this edit must survive a stale remote merge
     r.receivedAt = toISO();
     // Land tubs in the Factory Warehouse so they wait there for new movements.
     if(r.type === 'tub' && r.sn) _receiveTubAtFactory(r);
@@ -27280,6 +27428,7 @@ function toggleReceived(rid){
     // Allow un-checking in case of mistake
     if(!confirm('Mark this as NOT received yet?')) return;
     r.status = 'shipped';
+    r.updatedAt = editStamp();   // v5.41 — LEW: this edit must survive a stale remote merge
     r.receivedAt = null;
     toast('Reverted to in-transit','ok');
   }
@@ -27320,6 +27469,7 @@ function pullToLoadingBay(rid){
       if(!confirm(`Pull tub ${r.sn} to the loading bay?\n\nIt leaves position ${u.pos} and waits in the bay for the truck to the factory.`)) return;
       snapshot('pull tub to loading bay');
       _snapshotTubOnRequest(r);
+      units.filter(x => !(x.id !== u.id)).forEach(_tombstoneUnitRow);   // v5.41
       units = units.filter(x => x.id !== u.id);
       drawMap();
       extraNote = ` \u00b7 Pulled from ${u.pos}`;
@@ -27329,6 +27479,7 @@ function pullToLoadingBay(rid){
     }
   }
   r.status = 'loading-bay';
+  r.updatedAt = editStamp();   // v5.41 — LEW: this edit must survive a stale remote merge
   r.bayAt = toISO();
   addAct(`\u{1F4E6} To loading bay: ${r.description}${extraNote}`,'#7c2d12');
   toast('In loading bay \u2014 load on truck when ready','ok');
@@ -27343,6 +27494,7 @@ function shipFromLoadingBay(rid){
   if(!confirm(`Load "${r.description}" on the truck to the factory?`)) return;
   snapshot('ship from loading bay');
   r.status = 'shipped';
+  r.updatedAt = editStamp();   // v5.41 — LEW: this edit must survive a stale remote merge
   r.shippedAt = toISO();
   addAct(`\u{1F69A} Loaded on truck: ${r.description} \u2014 in transit to factory`,'var(--accent)');
   toast('On truck \u2014 in transit to factory','ok');
@@ -29229,15 +29381,15 @@ window.addEventListener('storage', e => {
       if(Array.isArray(restored.units)) units = _mergeUnits(units, restored.units, restored);   // (same 3rd arg as the orchestrator: full restored)
       if(Array.isArray(restored.dispatched)) dispatched = _mergeDispatched(dispatched, restored.dispatched);
       if(Array.isArray(restored.incoming)) incoming = _mergeIncoming(incoming, restored.incoming, restored.cfg);
-      if(Array.isArray(restored.materials)) materials = _mergeMaterials(materials, restored.materials);
+      if(Array.isArray(restored.materials)) materials = _mergeMaterials(materials, restored.materials, restored.cfg);
       if(Array.isArray(restored.matTransfers)) matTransfers = _mergeMatTransfers(matTransfers, restored.matTransfers);
       if(Array.isArray(restored.events)) events = _mergeEvents(events, restored.events, restored.cfg);
       if(Array.isArray(restored.activity)) activity = restored.activity;
       if(Array.isArray(restored.queue)) queue = _mergeQueue(queue, restored.queue, restored.cfg);
       if(Array.isArray(restored.factory)) factory = _mergeFactory(factory, restored.factory, incoming, restored.cfg);
-      if(Array.isArray(restored.marriages)) marriages = _mergeMarriages(marriages, restored.marriages);
+      if(Array.isArray(restored.marriages)) marriages = _mergeMarriages(marriages, restored.marriages, restored.cfg);
       if(Array.isArray(restored.dispatchRequests)) dispatchRequests = _mergeRequests(dispatchRequests, restored.dispatchRequests);
-      if(Array.isArray(restored.coverInventory)) coverInventory = _mergeCovers(coverInventory, restored.coverInventory);
+      if(Array.isArray(restored.coverInventory)) coverInventory = _mergeCovers(coverInventory, restored.coverInventory, restored.cfg);
       if(restored.colorLibrary && typeof restored.colorLibrary === 'object') colorLibrary = _mergeAddWinsMap(colorLibrary, restored.colorLibrary, 'map');
       if(restored.coverModelMapping && typeof restored.coverModelMapping === 'object') coverModelMapping = restored.coverModelMapping;
       if(Array.isArray(restored.movements)) movements = restored.movements;
