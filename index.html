@@ -4756,7 +4756,7 @@ let _fbInitAttempts = 0;
 //   /app_version/current  (in Firebase console, manually, OR call
 //   pushVersionToFirebase() from the Admin console at deploy time)
 // ══════════════════════════════════════════════════════════════════
-const APP_VERSION = 'v5.37';
+const APP_VERSION = 'v5.38';
 // v5.23 (#1): paste your reCAPTCHA v3 site key here AFTER enabling App Check in
 // the Firebase console (Build → App Check → Register app → reCAPTCHA v3). Until
 // then it stays '', everything works exactly as before.
@@ -6364,7 +6364,7 @@ function mergeCfgPreservingPins(localCfg, remoteCfg){
   }
   // Delete tombstones (v4.91, extended v5.12): union by LATEST timestamp so neither
   // side's intentional deletes are lost on a shallow cfg overwrite.
-  for(const tk of ['_deletedUnits','_deletedEventGroups','_deletedQueueIds']){
+  for(const tk of ['_deletedUnits','_deletedEventGroups','_deletedQueueIds','_deletedIncoming']){   // v5.38 — incoming tombstones union too
     const L = (localCfg && typeof localCfg[tk] === 'object') ? localCfg[tk] : null;
     const R = (typeof remoteCfg[tk] === 'object') ? remoteCfg[tk] : null;
     if(L || R){
@@ -7014,7 +7014,7 @@ function _mergeRequests(local, remote){
 // Wholesale-replacing incoming with a stale remote made that item vanish (and the
 // matching factory record reappear in In Transit) -> the "Force Receive bounces back
 // to In Transit" bug. Remote wins for known ids; local-only arrivals are KEPT.
-function _mergeIncoming(local, remote){
+function _mergeIncoming(local, remote, remoteCfg){
   remote = Array.isArray(remote) ? remote : [];
   local  = Array.isArray(local)  ? local  : [];
   // Key by S/N when present (one physical spa = one S/N), fall back to id for
@@ -7074,6 +7074,52 @@ function _mergeIncoming(local, remote){
     }
     merged.push(it); kept++;           // local-only arrival -> KEEP (never vanish on stale remote / id collision)
   });
+  // v5.38 — HONOR DELETE TOMBSTONES: a placed/removed arrival must not resurrect
+  // from a stale remote array (removal has no row to win LEW with). Plausibility-
+  // aware like every other tombstone comparison (a future-stamped row can't be immune).
+  try {
+    const _tomb = {};
+    const _absorb = src => { if(src && typeof src === 'object') for(const k in src){ const t = src[k]; if(typeof t === 'string' && (!_tomb[k] || t > _tomb[k])) _tomb[k] = t; } };
+    _absorb(typeof cfg === 'object' && cfg ? cfg._deletedIncoming : null);
+    _absorb(remoteCfg ? remoteCfg._deletedIncoming : null);
+    if(Object.keys(_tomb).length){
+      for(let i = merged.length - 1; i >= 0; i--){
+        const k = keyOf(merged[i]); if(!k) continue;
+        const t = _tomb[k]; if(!t) continue;
+        const ru = (merged[i] && merged[i].updatedAt) || '';
+        const rowFut = !!ru && ru > _plausibleCap;
+        const tombFut = t > _plausibleCap;
+        const drop = (rowFut && !tombFut) ? true : ((tombFut && !rowFut) ? false : (ru < t));
+        if(drop) merged.splice(i, 1);
+      }
+    }
+  } catch(e){ console.warn('[incoming tombs]', e); }
+  // v5.38 — FLOOR SUPERSESSION (covers arrivals placed BEFORE tombstones existed):
+  // if the tub already sits on the floor with a NEWER stamp than this arrival row,
+  // the arrival is history — drop it instead of re-asking for a position.
+  try {
+    const _floorNewest = new Map();
+    (Array.isArray((typeof units !== 'undefined') ? units : null) ? units : []).forEach(u => {
+      if(!u || u.sn == null || String(u.sn).trim() === '') return;
+      const st = (typeof u.updatedAt === 'string') ? u.updatedAt : '';
+      if(!st) return;
+      const k = String(u.sn).trim();
+      if(!_floorNewest.has(k) || st > _floorNewest.get(k)) _floorNewest.set(k, st);
+    });
+    if(_floorNewest.size){
+      let _dropped = 0;
+      for(let i = merged.length - 1; i >= 0; i--){
+        const r = merged[i]; if(!r || r.sn == null) continue;
+        const st = _floorNewest.get(String(r.sn).trim()); if(!st) continue;
+        const ru = (r.updatedAt || '');
+        const rowFut = !!ru && ru > _plausibleCap;
+        const stFut = st > _plausibleCap;
+        const drop = (rowFut && !stFut) ? true : ((stFut && !rowFut) ? false : (ru < st));
+        if(drop){ merged.splice(i, 1); _dropped++; }
+      }
+      if(_dropped > 0) console.warn('[merge-canary] incoming: dropped ' + _dropped + ' arrival row(s) already placed on the floor (resurrection guard)');
+    }
+  } catch(e){ console.warn('[incoming floor-guard]', e); }
   _lastIncMergeKept = kept;
   return merged;
 }
@@ -7485,7 +7531,7 @@ function fbApplyRemoteState(restored, sourceTimestamp){
     if(typeof restored.nid === 'number') nid = Math.max(nid, restored.nid);
     if(Array.isArray(restored.units)) units = _mergeUnits(units, restored.units, restored);
     if(Array.isArray(restored.dispatched)) dispatched = _mergeDispatched(dispatched, restored.dispatched);
-    if(Array.isArray(restored.incoming)) incoming = _mergeIncoming(incoming, restored.incoming);
+    if(Array.isArray(restored.incoming)) incoming = _mergeIncoming(incoming, restored.incoming, restored.cfg);
     if(Array.isArray(restored.materials)) materials = _mergeMaterials(materials, restored.materials);
     if(Array.isArray(restored.matTransfers)) matTransfers = _mergeMatTransfers(matTransfers, restored.matTransfers);
     if(Array.isArray(restored.events)) events = _mergeEvents(events, restored.events, restored.cfg);
@@ -10927,6 +10973,7 @@ function autoOrganizeUnits(){
       units.push(newU);
       // Placed → drop from incoming AND the arriving queue mirror so it doesn't
       // reappear asking for a position.
+      _tombstoneIncomingRow(it);   // v5.38
       incoming = incoming.filter(x => x.id !== it.id);
       _tombstoneQueueItem(it.id);   // v5.12
       if(typeof queue !== 'undefined' && Array.isArray(queue)) queue = queue.filter(q => q.id !== it.id);
@@ -12038,6 +12085,7 @@ function removeFromQueue(id){
   // Also remove the linked incoming row (if this queue item came from incoming)
   const qi = queue.find(i=>i.id===id);
   if(qi && qi._fromIncoming){
+    _tombstoneIncomingRow(incoming.find(i => i.id === id));   // v5.38
     incoming = incoming.filter(i => i.id !== id);
   }
   _tombstoneQueueItem(id);   // v5.12
@@ -12149,6 +12197,7 @@ function setupDropExtended(el,pos){
         postMovement({type:_arrived?'309':'101', sn:qi.sn||'', material:qi.type||'', qty:qi.qty||1, from:_arrived?LOC_WAREHOUSE(''):LOC_TRANSIT, to:LOC_WAREHOUSE(pos), stockType:'unrestricted', note:_arrived?('Put-away to '+pos):('Received + put-away at '+pos)});
       }catch(e){}
       if(qi._fromIncoming){
+        _tombstoneIncomingRow(incoming.find(i => i.id === qi.id));   // v5.38
         incoming = incoming.filter(i => i.id !== qi.id);
       }
       _tombstoneQueueItem(qi.id);   // v5.12
@@ -13262,7 +13311,7 @@ window.setupStagingDrop = function(cell, id){
       const newUnit = {...qi, pos:id, id:nid++, stack:1, level:1};
       delete newUnit.cat; delete newUnit.items;
       units.push(newUnit);
-      if(qi._fromIncoming) incoming = incoming.filter(i => i.id !== qi.id);
+      if(qi._fromIncoming){ _tombstoneIncomingRow(incoming.find(i => i.id === qi.id)); incoming = incoming.filter(i => i.id !== qi.id); }   // v5.38
       _tombstoneQueueItem(qi.id);   // v5.12
       queue = queue.filter(i => i.id !== qi.id);
       if(qi.sn) postMovement({type:'101', sn:qi.sn, material:qi.type||'', qty:1, from:LOC_TRANSIT, to:LOC_WAREHOUSE(id), stockType:'unrestricted', note:'Received into '+label});
@@ -15072,6 +15121,7 @@ function addUnit(inIdx){
   // incoming AND the arriving queue so it no longer shows as awaiting a position.
   if(inIdx>=0 && incoming[inIdx]){
     const placedId = incoming[inIdx].id;
+    _tombstoneIncomingRow(incoming[inIdx]);   // v5.38 — a stale remote must not resurrect the placed arrival
     incoming.splice(inIdx, 1);
     _tombstoneQueueItem(placedId);   // v5.12
     queue = queue.filter(q => q.id !== placedId);
@@ -15678,6 +15728,7 @@ function sendOrphanAccessoryToMINV(id){
     location: loc || 'MINV',
     notes: 'Reconciled from a stray Incoming accessory'
   });
+  _tombstoneIncomingRow(it);   // v5.38
   incoming = incoming.filter(x => x.id !== id);
   queue = queue.filter(q => q.id !== id);
   addAct(`💍 Orphan accessory paired: ${it.dealer||'accessory'} → S/N ${sn} · staged at ${loc||'MINV'}`,'var(--teal)');
@@ -15699,6 +15750,7 @@ function rmFromIncoming(id){
     if(cleaned) msg += ` · ${cleaned} pending cover cleaned`;
     addAct(msg,'var(--red)');
   }
+  _tombstoneIncomingRow(it);   // v5.38
   incoming = incoming.filter(i => i.id !== id);
   queue = queue.filter(q => q.id !== id);
   renderIncoming(); renderQueue(); renderBanner(); updBadges();
@@ -16033,6 +16085,7 @@ function confirmPosition(incomingId, posRaw){
   touchUnit(newUnit);
   units.push(newUnit);
   // Remove from incoming + queue
+  _tombstoneIncomingRow(incoming.find(x => x.id === incomingId));   // v5.38
   incoming = incoming.filter(x => x.id !== incomingId);
   queue = queue.filter(q => q.id !== incomingId);
   const slotTag = slot ? ` (S${slot.stack}-${LEVEL_SHORT(slot.level)})` : '';
@@ -23922,6 +23975,25 @@ function undoFactoryReady(id){
 // already fixed via _tombstoneFactoryRow — units never got the same treatment).
 // A later legit re-add (e.g. a returned tub) survives because its updatedAt is
 // newer than the tombstone; quickAddSpa clears the tombstone on re-add.
+// v5.38 — INCOMING TOMBSTONE (found from Alberto's screen recording + code audit):
+// placing/removing an arrival deleted the incoming row with NO tombstone, so any
+// device that hadn't seen the placement pushed its stale array and the arrival
+// RESURRECTED in "Arriving to Warehouse". Deletions can't win last-edit-wins —
+// they have no row to carry a stamp — so they need tombstones, exactly like
+// units (v5.34) and queue (v5.12) already have.
+function _tombstoneIncomingRow(it){
+  if(!it) return;
+  try{
+    cfg._deletedIncoming = cfg._deletedIncoming || {};
+    const snStr = (it.sn != null) ? String(it.sn).trim() : '';
+    const _tk = (snStr !== '') ? ('sn:' + snStr) : ('id:' + it.id);
+    cfg._deletedIncoming[_tk] = editStamp();
+    const _cut = new Date(Date.now() - 60*864e5).toISOString();
+    for(const k in cfg._deletedIncoming){ if(cfg._deletedIncoming[k] < _cut) delete cfg._deletedIncoming[k]; }
+  }catch(e){ console.warn('[incoming tombstone write]', e); }
+}
+window._tombstoneIncomingRow = _tombstoneIncomingRow;
+
 function _tombstoneUnitRow(u){
   if(!u) return;
   try{
@@ -28184,6 +28256,35 @@ function runSelfTests(){
     return row.status === 'arrived' || `expected arrived, got ${row.status}`;
   });
 
+  // 14 ── ARRIVAL RESURRECTION (v5.38): a placed arrival (tombstoned) must NOT come
+  //      back from a stale remote array that still carries it.
+  t('incoming · tombstoned arrival does not resurrect from stale remote', () => {
+    const now = (typeof fbServerNow === 'function') ? fbServerNow() : Date.now();
+    const tombAt = new Date(now - 5000).toISOString();
+    const _cfgBak = (typeof cfg !== 'undefined') ? cfg._deletedIncoming : undefined;
+    try {
+      if(typeof cfg !== 'undefined') cfg._deletedIncoming = { 'sn:220001': tombAt };
+      const remote = [{ id:1, sn:'220001', status:'arrived', updatedAt: new Date(now - 3600000).toISOString() }];
+      const merged = _mergeIncoming([], remote, {});
+      if(merged.some(x => String(x.sn) === '220001')) return 'placed arrival resurrected';
+      return true;
+    } finally { if(typeof cfg !== 'undefined') cfg._deletedIncoming = _cfgBak; }
+  });
+
+  // 15 ── FLOOR SUPERSESSION (v5.38): an arrival row for a tub ALREADY on the floor
+  //      with a fresher stamp is history — it must not re-appear asking for a position.
+  t('incoming · arrival superseded by a fresher floor placement is dropped', () => {
+    const now = (typeof fbServerNow === 'function') ? fbServerNow() : Date.now();
+    const _uBak = (typeof units !== 'undefined') ? units.slice() : undefined;
+    try {
+      if(typeof units !== 'undefined'){ units.length = 0; units.push({ id:9, sn:'110001', pos:'3L', updatedAt: new Date(now - 2000).toISOString() }); }
+      const remote = [{ id:1, sn:'110001', status:'arrived', updatedAt: new Date(now - 7200000).toISOString() }];
+      const merged = _mergeIncoming([], remote, {});
+      if(merged.some(x => String(x.sn) === '110001')) return 'arrival not dropped despite fresher floor row';
+      return true;
+    } finally { if(typeof units !== 'undefined' && _uBak){ units.length = 0; for(const u of _uBak) units.push(u); } }
+  });
+
   const passed = results.filter(r => r.pass).length;
   return { passed, failed: results.length - passed, total: results.length, results };
 }
@@ -28820,7 +28921,7 @@ window.addEventListener('storage', e => {
       if(typeof restored.nid === 'number') nid = Math.max(nid, restored.nid);
       if(Array.isArray(restored.units)) units = _mergeUnits(units, restored.units, restored);   // (same 3rd arg as the orchestrator: full restored)
       if(Array.isArray(restored.dispatched)) dispatched = _mergeDispatched(dispatched, restored.dispatched);
-      if(Array.isArray(restored.incoming)) incoming = _mergeIncoming(incoming, restored.incoming);
+      if(Array.isArray(restored.incoming)) incoming = _mergeIncoming(incoming, restored.incoming, restored.cfg);
       if(Array.isArray(restored.materials)) materials = _mergeMaterials(materials, restored.materials);
       if(Array.isArray(restored.matTransfers)) matTransfers = _mergeMatTransfers(matTransfers, restored.matTransfers);
       if(Array.isArray(restored.events)) events = _mergeEvents(events, restored.events, restored.cfg);
