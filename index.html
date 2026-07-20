@@ -4756,7 +4756,7 @@ let _fbInitAttempts = 0;
 //   /app_version/current  (in Firebase console, manually, OR call
 //   pushVersionToFirebase() from the Admin console at deploy time)
 // ══════════════════════════════════════════════════════════════════
-const APP_VERSION = 'v5.52';
+const APP_VERSION = 'v5.53';
 // v5.23 (#1): paste your reCAPTCHA v3 site key here AFTER enabling App Check in
 // the Firebase console (Build → App Check → Register app → reCAPTCHA v3). Until
 // then it stays '', everything works exactly as before.
@@ -32233,11 +32233,33 @@ document.addEventListener('keydown', e=>{
   var WATCHED = ['units','factory','incoming','marriages','materials','coverInventory'];
   var blocked = [];        // audit trail of every deletion we put back
 
+  // v5.53 — CRITICAL FIX. These collections are declared with `let` at the top
+  // level of a classic script. Unlike `var`, a top-level `let` binding lives in
+  // the global LEXICAL environment and never becomes a property of `window`, so
+  // window['units'] is undefined. The previous version read window[name], got
+  // undefined, failed the Array.isArray() test and returned early — meaning this
+  // guard silently did nothing at all from v5.47 through v5.52.
+  // Lexical bindings cannot be reached by dynamic key, so each one is resolved
+  // explicitly. Referencing them from a separate <script> block is fine: classic
+  // scripts share one global lexical environment.
+  function coll(name){
+    try {
+      switch(name){
+        case 'units':          return (typeof units          !== 'undefined') ? units          : null;
+        case 'factory':        return (typeof factory        !== 'undefined') ? factory        : null;
+        case 'incoming':       return (typeof incoming       !== 'undefined') ? incoming       : null;
+        case 'marriages':      return (typeof marriages      !== 'undefined') ? marriages      : null;
+        case 'materials':      return (typeof materials      !== 'undefined') ? materials      : null;
+        case 'coverInventory': return (typeof coverInventory !== 'undefined') ? coverInventory : null;
+      }
+    } catch(e){}
+    return null;
+  }
+
   function snapshotRows(){
     var snap = {};
     WATCHED.forEach(function(name){
-      var a = null;
-      try { a = window[name]; } catch(e){}
+      var a = coll(name);
       if (!Array.isArray(a)) return;
       var byId = {}, order = [];
       for (var i = 0; i < a.length; i++){
@@ -32256,8 +32278,7 @@ document.addEventListener('keydown', e=>{
     WATCHED.forEach(function(name){
       var before = snap[name];
       if (!before) return;
-      var now = null;
-      try { now = window[name]; } catch(e){}
+      var now = coll(name);
       if (!Array.isArray(now)) return;
 
       var present = {};
