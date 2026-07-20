@@ -4756,7 +4756,7 @@ let _fbInitAttempts = 0;
 //   /app_version/current  (in Firebase console, manually, OR call
 //   pushVersionToFirebase() from the Admin console at deploy time)
 // ══════════════════════════════════════════════════════════════════
-const APP_VERSION = 'v5.51';
+const APP_VERSION = 'v5.52';
 // v5.23 (#1): paste your reCAPTCHA v3 site key here AFTER enabling App Check in
 // the Firebase console (Build → App Check → Register app → reCAPTCHA v3). Until
 // then it stays '', everything works exactly as before.
@@ -31087,13 +31087,20 @@ document.addEventListener('keydown', e=>{
     'received-at-warehouse':   {view:'loadingbay', group:'bay',      label:'Loading bay'},
     'received-at-wh':          {view:'loadingbay', group:'bay',      label:'Loading bay'},
     'placed-in-warehouse':     {view:'map',        group:'floor',    label:'On the floor'},
-    'ready-to-ship':           {view:'map',        group:'floor',    label:'On the floor'},
+    // v5.52 — corrected. 'ready-to-ship' does NOT mean a tub is on the warehouse
+    // floor ready for a customer. Per the app's own note at the trackingState
+    // definition: "Factory pressed Ship to WH, waiting for Truck". The tub is
+    // still AT THE FACTORY and is shown in the Loading Bay - Factory view.
+    // Mapping it to the floor made reconcile() report every one of them as a
+    // missing floor row.
+    'ready-to-ship':           {view:'truck',      group:'bayfactory', label:'Loading bay - Factory'},
     'returned-to-warehouse':   {view:'map',        group:'floor',    label:'On the floor'},
     'received-back-at-factory':{view:'factory',    group:'factory',  label:'Back at factory'}
   };
   var GROUP_META = {
     floor:   {label:'On the floor',  color:'#1a56db', bg:'#eff4ff', order:1},
     bay:     {label:'Loading bay',   color:'#ea580c', bg:'#fff7ed', order:2},
+    bayfactory:{label:'Loading bay - Factory', color:'#c2410c', bg:'#fff7ed', order:4},
     transit: {label:'In transit',    color:'#d97706', bg:'#fffbeb', order:3},
     factory: {label:'At factory',    color:'#7c3aed', bg:'#f5f3ff', order:4},
     incoming:{label:'Incoming',      color:'#0891b2', bg:'#ecfeff', order:5},
@@ -31489,7 +31496,10 @@ document.addEventListener('keydown', e=>{
     F.forEach(function(f){
       if (!f || !f.sn) return;
       var ts = f.trackingState;
-      if (ts !== 'placed-in-warehouse' && ts !== 'ready-to-ship') return;
+      // Only 'placed-in-warehouse' asserts the tub is physically on the floor.
+      // 'ready-to-ship' means it is still at the factory waiting for a truck,
+      // so having no floor row is the correct state, not a contradiction.
+      if (ts !== 'placed-in-warehouse') return;
       if (!floorSns[norm(f.sn)])
         issues.push({sev:'med', kind:'State without a place', sn:f.sn,
           detail:'trackingState is "' + ts + '" but no floor row exists'});
