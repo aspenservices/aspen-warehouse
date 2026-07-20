@@ -4756,7 +4756,7 @@ let _fbInitAttempts = 0;
 //   /app_version/current  (in Firebase console, manually, OR call
 //   pushVersionToFirebase() from the Admin console at deploy time)
 // ══════════════════════════════════════════════════════════════════
-const APP_VERSION = 'v5.42';
+const APP_VERSION = 'v5.50';
 // v5.23 (#1): paste your reCAPTCHA v3 site key here AFTER enabling App Check in
 // the Firebase console (Build → App Check → Register app → reCAPTCHA v3). Until
 // then it stays '', everything works exactly as before.
@@ -4781,12 +4781,15 @@ window.ASPEN_ENFORCE_BASELINE = false;
 
 let _updateBannerShown = false;
 let _versionCheckTimer = null;
+let _versionWatcherOn = false;   // v5.43 — guard so the app_version listener attaches once
 
 // Listen for version changes on Firebase. As soon as another device
 // (the deployer's machine) writes a newer version, we get notified
 // and show the banner immediately.
 function startVersionWatcher(){
   if(!_fbDb) return;
+  if(_versionWatcherOn) return;   // v5.43 — don't stack .on('value') on each auth/token refresh
+  _versionWatcherOn = true;
   try {
     _fbDb.ref('app_version/current').on('value', (snap) => {
       const remoteVer = snap.val();
@@ -5397,8 +5400,10 @@ async function _fbCloudSyncInner(showToast){
     return;
   }
   // ═══ ASPEN PROTECTION LAYER — SAFE-PUSH GUARD ═══
-  // Block pushes that would delete >50% of items in factory/units/marriages.
-  // Triggered when a device with stale or seed-default state would clobber a fuller cloud state.
+  // Guards ONLY the pre-initial-sync window: a device that booted with seed/stale
+  // localStorage and would clobber a fuller cloud BEFORE it has pulled real state.
+  // After the first successful sync this returns early (local is trusted) — so this
+  // is NOT a general >50%-deletion block. (v5.43: comment corrected to match behavior.)
   if(typeof window.__aspenSafePushCheck === 'function'){
     try {
       const allowed = await window.__aspenSafePushCheck();
@@ -6124,6 +6129,11 @@ function fbStopRealtimeSync(){
     try { _fbOffsetRef.off('value'); } catch(e){}
     _fbOffsetRef = null;
   }
+  // v5.43 — also detach the v2 per-collection + meta + movements channels.
+  // Without this, "stop" left the PRIMARY data listeners running after sign-out.
+  if(_fbV2CollRef){ try { _fbV2CollRef.off('child_added'); _fbV2CollRef.off('child_changed'); } catch(e){} _fbV2CollRef = null; }
+  if(_fbV2MetaRef){ try { _fbV2MetaRef.off('value'); } catch(e){} _fbV2MetaRef = null; }
+  if(_fbMvRef){ try { _fbMvRef.off('child_added'); } catch(e){} _fbMvRef = null; }
   _stopSyncWatchdog();
 }
 
@@ -6706,8 +6716,18 @@ function _mergeUnits(local, remote, restored){
     if(x.trackingState === 'received-at-warehouse') return;   // v5.34 — received = it IS our floor
     _blockWith(x.sn, x.updatedAt);
   });
+  // v5.43 — FOUND BY MULTI-DEVICE SIMULATION (300 devices, 1M ops). A marriage is NOT
+  // evidence that the spa left the floor — a PENDING marriage means the exact opposite:
+  // the tub is ON our floor waiting for its accessory. Creating a marriage (or flipping
+  // it to delivered) never touches the unit row, so the marriage stamp is almost always
+  // NEWER than the floor row's — and this blanket block then DELETED live floor rows.
+  // Simulation: 3-11 spas permanently lost from the cloud AND every device per run;
+  // with this guard, zero. Only a marriage that has shipped/closed counts as elsewhere.
+  const _MAR_GONE = ['delivered','completed','fulfilled'];
   (Array.isArray(restored && restored.marriages) ? restored.marriages : []).forEach(m => {
-    if(m && m.spaSn != null && String(m.spaSn).trim() !== '') _blockWith(m.spaSn, m.updatedAt);
+    if(!m || m.spaSn == null || String(m.spaSn).trim() === '') return;
+    if(_MAR_GONE.indexOf(m.status) === -1) return;   // pending/active → the tub is still here
+    _blockWith(m.spaSn, m.updatedAt);
   });
   // Tubs the incoming state shows as shipped/received via a factory request are
   // legitimately en route to (or back at) the factory — never resurrect on the floor.
@@ -7195,6 +7215,21 @@ function _mergeDispatched(local, remote){
     if(!d) return null;
     const sn = (d.sn != null && String(d.sn).trim() !== '') ? String(d.sn).trim() : null;
     if(sn && d.dispatchedAt) return 'd:' + sn + '@' + d.dispatchedAt;
+    // v5.43 — FOUND BY SIMULATION. The MAIN dispatch path builds rec={id:u.id,...} and sets
+    // NO dispatchedAt, so this fell back to the row id — and that id comes from the UNIT,
+    // which differs across devices when the same tub was received on two devices. Two
+    // devices dispatching the same tub then produced two records that could NEVER dedupe
+    // (duplicate dealer shipments in the list forever). Same S/N + same dispatch DAY is
+    // one physical event.
+    //
+    // The key deliberately does NOT look at deliveryStatus. A first attempt excluded
+    // 'returned' rows and that CAUSED a stable 46/300-device divergence in simulation:
+    // deliveryStatus is mutable, so the same record keyed differently depending on whether
+    // a device had seen the return yet. Merge keys must be immutable — sn + dispatchDate.
+    // Cost of this choice: a dispatch AND a re-dispatch of the same tub on the SAME DAY
+    // collapse to one row (last-edit-wins). Different days key separately, so normal
+    // dispatch → return → re-dispatch history is preserved.
+    if(sn && d.dispatchDate) return 'd:' + sn + '@' + d.dispatchDate;
     return d.id != null ? ('id:' + d.id) : null;
   };
   // v5.14 — per-record LWW on shared keys. The old rule was "remote copy wins"
@@ -7783,6 +7818,13 @@ function saveAdminRolePins(){
 }
 
 // Upload a photo to Firebase Storage. Returns {url, path} or null on failure.
+// v5.43 — anonymous auth means _fbUser.email is ALWAYS null, so every photo was
+// attributed to null (and Storage can reject a null metadata value). Mirror the
+// push-attribution logic: in-app Welcome name @ device, else anon@device.
+function _fbWriterLabel(){
+  try { if(typeof currentUser !== 'undefined' && currentUser && currentUser.name) return `${currentUser.name}@${(_fbDeviceId||'').slice(-6)}`; } catch(e){}
+  return (_fbUser && _fbUser.email) || `anon@${(_fbDeviceId||'').slice(-6)}`;
+}
 async function fbUploadPhoto(file, type, itemId){
   if(!_fbStorage || !_fbUser || !_fbAuthorized){ toast('Sign in first', 'err'); return null; }
   if(!file){ return null; }
@@ -7795,13 +7837,13 @@ async function fbUploadPhoto(file, type, itemId){
     const ref = _fbStorage.ref(path);
     const snap = await ref.put(file, {
       contentType: file.type,
-      customMetadata: { uploadedBy: _fbUser.email, itemId: String(itemId), type }
+      customMetadata: { uploadedBy: _fbWriterLabel(), itemId: String(itemId), type }
     });
     const url = await snap.ref.getDownloadURL();
     // Index entry for cross-referencing
     await _fbDb.ref(`photos-index/${ts}_${_fbDeviceId}`).set({
       url, path, type, itemId: String(itemId),
-      uploadedBy: _fbUser.email, timestamp: ts
+      uploadedBy: _fbWriterLabel(), timestamp: ts
     });
     return { url, path, timestamp: ts };
   } catch(err){
@@ -7892,7 +7934,7 @@ function pickAndUploadPhoto(type, item, onDone){
     const r = await fbUploadPhoto(file, type, item.id || item.sn || 'unknown');
     if(r){
       item.photos = item.photos || [];
-      item.photos.push({ url: r.url, path: r.path, ts: r.timestamp, by: _fbUser.email });
+      item.photos.push({ url: r.url, path: r.path, ts: r.timestamp, by: _fbWriterLabel() });
       saveState(); updBadges();
       if(typeof onDone === 'function') onDone();
       toast('✓ Photo uploaded', 'ok');
@@ -8034,7 +8076,7 @@ function addDamagePhoto(itemType, itemId){
     toast('Uploading damage photo…');
     const r = await fbUploadPhoto(file, 'damages', `${itemType}_${itemId}`);
     if(r){
-      item.damagePhotos.push({ url: r.url, path: r.path, ts: r.timestamp, by: _fbUser.email });
+      item.damagePhotos.push({ url: r.url, path: r.path, ts: r.timestamp, by: _fbWriterLabel() });
       saveState(); updBadges();
       toast('✓ Damage photo uploaded', 'ok');
     }
@@ -14226,7 +14268,7 @@ function showCellPanel(pos,cu){
             <button onclick="event.stopPropagation();adjustQtyId(${u.id},1)" style="width:22px;height:22px;border-radius:50%;border:1.5px solid #7dd3fc;background:#fff;font-size:14px;cursor:pointer;color:#0369a1;font-weight:700;display:flex;align-items:center;justify-content:center;line-height:1">+</button>
             <span style="font-size:10px;color:var(--text3)">in stock</span>
           </div>
-          ${u.color?`<div style="font-size:10px;color:var(--text2)">Color: <strong>${u.color}</strong></div>`:''}
+          ${u.color?`<div style="font-size:10px;color:var(--text2)">Color: <strong>${escapeHTML(u.color)}</strong></div>`:''}
          `
         :isMaterial
         ?`<div style="font-size:10px;color:var(--text2);margin:3px 0">
@@ -14248,7 +14290,7 @@ function showCellPanel(pos,cu){
         <button class="btn btn-sm" onclick="openEditUnit(${u.id})">Edit</button>
         <button class="btn btn-sm" onclick="openMoveUnit(${u.id})">Move</button>
         ${!isCover&&!isMaterial?`<button class="btn btn-sm btn-g" data-readonly-keep onclick="openDispForm(${u.id})">Dispatch</button>`:''}
-        ${!isCover&&!isMaterial&&u.sn?`<button class="btn btn-sm uc-marry-btn" data-readonly-keep style="background:#fef2f2;border-color:#fecaca;color:#991b1b" onclick="openMarriageAdd('${u.sn}','${(u.dealer||'').replace(/'/g,'')}')">+ Marry</button>`:''}
+        ${!isCover&&!isMaterial&&u.sn?`<button class="btn btn-sm uc-marry-btn" data-readonly-keep style="background:#fef2f2;border-color:#fecaca;color:#991b1b" onclick="openMarriageAdd('${String(u.sn||'').replace(/['"\\]/g,'')}','${(u.dealer||'').replace(/['"\\]/g,'')}')">+ Marry</button>`:''}
         ${!isCover&&!isMaterial?`<button class="btn btn-sm tracking-btn" onclick="openTrackingHistory('unit',${u.id})" title="View tracking history (admin only)">📜</button>`:''}
         <button class="btn btn-sm" style="background:#f0fdf4;border-color:#bbf7d0;color:#166534" onclick="printQRLabel(${u.id},'units')" title="View / print this tub's QR label">🏷 Label</button>
         <button class="btn btn-sm btn-r" onclick="rmUnit(${u.id})">Remove</button>
@@ -15253,10 +15295,10 @@ function openEditUnit(id){
     <div class="dp-hd"><div class="dp-pos">Edit Unit ${u.sn||u.dealer}</div><button class="btn btn-sm" onclick="document.getElementById('float-panel').innerHTML=''">✕</button></div>
     <div class="fgrid fgrid3">
       <div class="fg"><label class="fl">Position</label><input class="fi" id="e-pos" value="${u.pos}" style="text-transform:uppercase"></div>
-      <div class="fg"><label class="fl">Serial No.</label><input class="fi" id="e-sn" value="${u.sn}"></div>
+      <div class="fg"><label class="fl">Serial No.</label><input class="fi" id="e-sn" value="${escapeHTML(u.sn)}"></div>
       <div class="fg"><label class="fl">Type</label><select class="fsel" id="e-type"><option value="hot" ${u.type==='hot'?'selected':''}>Hot Tub</option><option value="swim" ${u.type==='swim'?'selected':''}>Swim Spa</option><option value="extra" ${u.type==='extra'?'selected':''}>Extra/Stock</option></select></div>
     </div>
-    <div class="fg" style="margin-bottom:10px"><label class="fl">Dealer</label><input class="fi" id="e-dealer" value="${u.dealer}"></div>
+    <div class="fg" style="margin-bottom:10px"><label class="fl">Dealer</label><input class="fi" id="e-dealer" value="${escapeHTML(u.dealer)}"></div>
     ${stackBlock}
     <label style="display:flex;align-items:center;gap:8px;cursor:pointer;padding:8px 12px;background:#fef3c7;border:1px solid #fbbf24;border-radius:7px;margin-bottom:12px;font-size:12px;font-weight:600;color:#854d0e">
       <input type="checkbox" id="e-already" ${u.alreadyInWh?'checked':''} style="width:15px;height:15px;cursor:pointer;accent-color:#d97706">
@@ -15334,6 +15376,16 @@ function doMove(id){
   const v = validatePos(raw);
   if(!v.ok){ toast(v.reason, 'err'); return; }
   const u=units.find(x=>x.id===id);
+  // v5.48 — the row can vanish between opening this dialog and confirming it:
+  // another device may have dispatched or deleted the unit in the meantime.
+  // Without this guard the next line throws, the handler dies silently, and the
+  // panel is left open with no toast — the user cannot tell the move failed.
+  if(!u){
+    toast('That unit no longer exists — another device may have moved or dispatched it','err');
+    try{ document.getElementById('float-panel').innerHTML=''; closePanel(); }catch(e){}
+    drawMap(); updBadges();
+    return;
+  }
   // Stack capacity check at destination
   if(isStackedType(u.type) && v.pos !== u.pos){
     const blockers = unitsAbove(u);
@@ -27641,7 +27693,7 @@ function saveState(){
   if(_saveTimer) clearTimeout(_saveTimer);
   _saveTimer = setTimeout(()=>{
     const now = fbServerNow();   // server-consistent clock
-    const state = {nid, units, dispatched, incoming, materials, events, activity, queue, cfg, factory, marriages, dispatchRequests, coverInventory, colorLibrary, coverModelMapping, movements, _saved: now};
+    const state = {nid, units, dispatched, incoming, materials, events, activity, queue, cfg, factory, marriages, dispatchRequests, coverInventory, colorLibrary, coverModelMapping, movements, matTransfers, _saved: now};
     const payload = JSON.stringify(state, _blobReplacer);
     let saved = false;
     try{
@@ -27685,7 +27737,7 @@ function flushSave(){
   if(_saveTimer){ clearTimeout(_saveTimer); _saveTimer = null; }
   try{
     const now = fbServerNow();   // server-consistent clock
-    const state = {nid, units, dispatched, incoming, materials, events, activity, queue, cfg, factory, marriages, dispatchRequests, coverInventory, colorLibrary, coverModelMapping, movements, _saved: now};
+    const state = {nid, units, dispatched, incoming, materials, events, activity, queue, cfg, factory, marriages, dispatchRequests, coverInventory, colorLibrary, coverModelMapping, movements, matTransfers, _saved: now};
     const payload = JSON.stringify(state, _blobReplacer);
     try{
       localStorage.setItem(LS_KEY, payload);
@@ -28089,6 +28141,7 @@ function loadState(){
     if(s.colorLibrary && typeof s.colorLibrary === 'object') colorLibrary = Object.assign(colorLibrary, s.colorLibrary);
     if(s.coverModelMapping && typeof s.coverModelMapping === 'object') coverModelMapping = s.coverModelMapping;
     if(Array.isArray(s.movements)) movements = s.movements;
+    if(Array.isArray(s.matTransfers)) matTransfers = s.matTransfers;   // v5.43 — was synced to cloud but never persisted/restored locally
     if(s.cfg && typeof s.cfg === 'object') cfg = mergeCfgPreservingPins(cfg, s.cfg);
     // ── MOBILE SYNC FIX ──
     // Remember when localStorage was last written. The realtime listener's
@@ -30621,6 +30674,1670 @@ document.addEventListener('keydown', e=>{
 #tour-next-btn:active { transform: scale(.97); }
 #tour-prev-btn:hover { background: #e2e8f0; }
 </style>
+
+<!-- ════════════════════════════════════════════════════════════════════════
+     ASPEN FLOW VIEW · v5.43 — additive, read-only pipeline of every spa by stage.
+     PASTE THIS ENTIRE BLOCK once, immediately BEFORE the closing </body> tag.
+     • It touches NO existing view, writes NO state, and reassigns nothing except
+       wrapping goV() to render itself. If it ever misbehaves, delete this block —
+       the rest of the app is untouched.
+     • Reads your live arrays (units / factory / marriages / dispatched). Card taps
+       only navigate (goV + existing map search) — never mutate.
+     • Stage buckets use your real trackingState / status values. See NOTE below.
+     ════════════════════════════════════════════════════════════════════════ -->
+<style>
+#view-flow .flw-wrap{padding:2px}
+#view-flow .flw-eyebrow{font-size:11px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--text3);margin:0 2px 12px}
+#view-flow .flw-search{display:flex;align-items:center;gap:9px;background:var(--bg2);border:1px solid var(--line);border-radius:var(--r-lg);padding:10px 13px;margin:0 2px 12px;box-shadow:var(--sh)}
+#view-flow .flw-search svg{width:16px;height:16px;color:var(--text3);flex:0 0 auto}
+#view-flow .flw-search input{flex:1;border:none;background:none;color:var(--text1);font-size:14px;outline:none;font-family:inherit}
+#view-flow .flw-pipe{display:flex;gap:12px;overflow-x:auto;padding:2px 2px 10px;-webkit-overflow-scrolling:touch}
+#view-flow .flw-col{flex:0 0 250px;background:var(--bg2);border:1px solid var(--line);border-radius:var(--r-lg);padding:12px;box-shadow:var(--sh)}
+#view-flow .flw-ch{display:flex;align-items:center;gap:8px;margin-bottom:11px}
+#view-flow .flw-cd{width:9px;height:9px;border-radius:3px;flex:0 0 auto}
+#view-flow .flw-ch b{font-size:13px;font-weight:700;color:var(--text1)}
+#view-flow .flw-n{margin-left:auto;font-size:11px;font-weight:700;color:var(--text2);background:var(--bg3);border-radius:20px;padding:2px 9px}
+#view-flow .flw-row{position:relative;overflow:hidden;border-radius:9px;margin-bottom:8px}
+#view-flow .flw-bg{position:absolute;inset:0;display:flex;align-items:center;justify-content:space-between;padding:0 13px;border-radius:9px;font-size:12px;font-weight:800;color:#fff;background:var(--teal)}
+#view-flow .flw-bg span{opacity:0;transition:opacity .08s;white-space:nowrap}
+#view-flow .flw-card{background:var(--bg3);border:1px solid var(--line);border-radius:9px;padding:10px 11px;margin-bottom:8px;cursor:pointer;transition:transform .1s}
+#view-flow .flw-row .flw-card{margin-bottom:0;position:relative;touch-action:pan-y;will-change:transform;-webkit-user-select:none;user-select:none}
+#view-flow .flw-hint{font-size:11.5px;color:var(--text3);margin:0 2px 11px;opacity:.9}
+#view-flow .flw-card:active{transform:scale(.98)}
+#view-flow .flw-sn{font-weight:700;font-size:14px;display:flex;align-items:center;gap:7px;color:var(--text1)}
+#view-flow .flw-tag{font-size:9px;font-weight:800;padding:2px 6px;border-radius:5px;text-transform:uppercase;letter-spacing:.04em}
+#view-flow .flw-meta{font-size:12px;color:var(--text2);margin-top:3px}
+#view-flow .flw-pos{font-weight:700;color:var(--accent);background:var(--accent-lt);border-radius:5px;padding:1px 6px;font-size:11px}
+#view-flow .flw-hold{font-size:9px;font-weight:800;color:var(--amber);background:var(--amber-lt);border-radius:4px;padding:1px 5px;margin-left:auto}
+#view-flow .flw-empty{font-size:12px;color:var(--text3);text-align:center;padding:14px 0;opacity:.65}
+#view-flow .flw-note{font-size:11px;color:var(--text3);margin:14px 2px 0;line-height:1.5}
+</style>
+<script>
+(function(){
+  if(window.__aspenFlowInstalled) return;
+  window.__aspenFlowInstalled = true;
+
+  function boot(){
+    if(typeof goV !== 'function' || typeof PAGES === 'undefined'){ return setTimeout(boot, 200); }
+
+    // 1) Register the page (title/sub shown in the topbar)
+    try { PAGES.flow = ['Flow', 'Every spa by stage · factory → dealer']; } catch(e){}
+
+    // 2) Make it visible for roles that don't already use the '*' wildcard
+    try {
+      if(typeof ROLES === 'object'){
+        Object.keys(ROLES).forEach(function(rk){
+          var pg = ROLES[rk] && ROLES[rk].pages;
+          if(Array.isArray(pg) && pg.indexOf('*') === -1 && pg.indexOf('flow') === -1) pg.push('flow');
+        });
+      }
+    } catch(e){}
+
+    // 3) Inject the nav item right after "Floor Map"
+    try {
+      var mapNi = document.querySelector('.ni[data-page="map"]');
+      if(mapNi && !document.querySelector('.ni[data-page="flow"]')){
+        var ni = document.createElement('div');
+        ni.className = 'ni'; ni.setAttribute('data-page','flow');
+        ni.setAttribute('data-section', mapNi.getAttribute('data-section') || 'main');
+        ni.setAttribute('onclick', "goV('flow')");
+        ni.innerHTML = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M2 3h12M2 8h8M2 13h5"/></svg> Flow';
+        mapNi.parentNode.insertBefore(ni, mapNi.nextSibling);
+      }
+    } catch(e){}
+
+    // 4) Inject the view container next to the other views
+    try {
+      var anchor = document.getElementById('view-map') || document.getElementById('view-dashboard');
+      if(anchor && !document.getElementById('view-flow')){
+        var v = document.createElement('div');
+        v.id = 'view-flow'; v.className = 'view';
+        v.innerHTML = '<div class="flw-wrap"><div class="flw-eyebrow">Where every spa is right now</div><div class="flw-search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg><input id="flw-q" placeholder="Search S/N, dealer, position\u2026" oninput="renderFlow()" autocomplete="off"></div><div class="flw-hint">Swipe a card for its quick action \u2014 you still confirm in the dialog. Tap to open.</div><div class="flw-pipe" id="flw-pipe"></div><div class="flw-note" id="flw-note"></div></div>';
+        anchor.parentNode.insertBefore(v, anchor.nextSibling);
+      }
+    } catch(e){}
+
+    // 5) Wrap goV so the Flow view renders on navigation (no edit to your goV needed)
+    try {
+      var _origGoV = goV;
+      goV = function(v){ _origGoV.apply(this, arguments); if(v === 'flow') { try { renderFlow(); } catch(e){ console.warn('[flow]', e); } } };
+      window.goV = goV;
+    } catch(e){}
+
+    console.log('[flow] view installed (additive, read-only)');
+  }
+
+  // ── Stage buckets, using your real field values ──
+  var TERMINAL_MARRIAGE = ['delivered','completed','fulfilled','cancelled','rejected','purged','missing'];
+  function G(v){ return Array.isArray(v) ? v : []; }
+
+  function stages(){
+    var F = (typeof factory  !== 'undefined') ? G(factory)  : [];
+    var U = (typeof units     !== 'undefined') ? G(units)     : [];
+    var M = (typeof marriages !== 'undefined') ? G(marriages) : [];
+    var D = (typeof dispatched!== 'undefined') ? G(dispatched): [];
+    var atFactory = F.filter(function(f){ return f && ['created-at-factory','ready-to-ship','ready-for-pickup'].indexOf(f.trackingState) !== -1; });
+    var inTransit = F.filter(function(f){ return f && (f.trackingState === 'in-transit' || f.trackingState === 'dispatched-from-factory') && f.transitDir !== 'to-factory'; });
+    var onFloor   = U.filter(function(u){ return u && ['hot','swim','extra'].indexOf(u.type) !== -1; });
+    var married   = M.filter(function(m){ return m && m.spaSn && TERMINAL_MARRIAGE.indexOf(m.status) === -1; });
+    var out       = D.filter(function(d){ return d; });
+    return [
+      {key:'factory',   label:'At factory',  color:'#B5733A', to:'factory',    items:atFactory},
+      {key:'transit',   label:'In-transit',  color:'#D99A2B', to:'factory',    items:inTransit},
+      {key:'floor',     label:'On floor',    color:'#1C8FA8', to:'__map__',    items:onFloor},
+      {key:'married',   label:'Married',     color:'#7A4B8C', to:'marriages',  items:married},
+      {key:'dispatched',label:'Dispatched',  color:'#2E8B57', to:'dispatched', items:out}
+    ];
+  }
+
+  function tagColor(t){ return t === 'swim' ? 'var(--teal)' : t === 'extra' ? 'var(--purple)' : 'var(--accent)'; }
+  function tagBg(t){ return t === 'swim' ? 'var(--teal-lt)' : t === 'extra' ? 'var(--purple-lt)' : 'var(--accent-lt)'; }
+  function E(s){ return (typeof escapeHTML === 'function') ? escapeHTML(s) : String(s == null ? '' : s).replace(/[&<>"']/g, function(c){ return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]; }); }
+
+  window.flowOpen = function(kind, sn){
+    if(kind === '__map__'){
+      goV('map');
+      setTimeout(function(){ var el = document.getElementById('map-srch'); if(el){ el.value = sn || ''; if(typeof locateUnit === 'function') locateUnit(); } }, 150);
+    } else { goV(kind); }
+  };
+
+  // Swipe actions call the EXACT functions your existing buttons call, and each one
+  // opens a dialog the user still confirms. No new write path is introduced.
+  // NOTE: floor "Dispatch" is deliberately absent — openDispatchChecklist() requires the
+  // dispatch form to be open (it reads #d-auth) and would only toast an error from here.
+  var FLOW_SWIPE = {
+    floor: {
+      right:{t:'Move',  ic:'\u21C4', fn:function(d){ if(typeof openMoveUnit==='function') openMoveUnit(Number(d.id)); else goV('map'); }},
+      left: {t:'Marry', ic:'\u{1F517}', fn:function(d){ if(typeof openMarriageAdd==='function') openMarriageAdd(d.sn, d.dealer); else goV('marriages'); }}
+    },
+    dispatched: {
+      right:{t:'Confirm delivery', ic:'\u2713', fn:function(d){ if(typeof openConfirmDelivery==='function') openConfirmDelivery(Number(d.id), d.sn); else goV('dispatched'); }},
+      left: {t:'Return',           ic:'\u21A9', fn:function(d){ if(typeof openReturnUnit==='function') openReturnUnit(Number(d.id), d.sn); else goV('dispatched'); }}
+    },
+    married: {
+      right:{t:'Open marriage', ic:'\u{1F517}', fn:function(d){ if(typeof openMarriageEdit==='function') openMarriageEdit(Number(d.id)); else goV('marriages'); }},
+      left: null
+    }
+  };
+  var FSW = null, FSW_TRIGGER = 70, FSW_MAX = 130;
+  document.addEventListener('pointerdown', function(e){
+    if(!e.target || !e.target.closest) return;
+    var card = e.target.closest('#view-flow .flw-row .flw-card'); if(!card) return;
+    var row = card.closest('.flw-row');
+    FSW = {card:card, row:row, d:{k:row.dataset.k, to:row.dataset.to, id:row.dataset.id, sn:row.dataset.sn, dealer:row.dataset.dealer},
+           x0:e.clientX, y0:e.clientY, dx:0, lock:null};
+    card.style.transition = 'none';
+  });
+  document.addEventListener('pointermove', function(e){
+    if(!FSW) return;
+    var dx = e.clientX - FSW.x0, dy = e.clientY - FSW.y0;
+    if(!FSW.lock){
+      if(Math.abs(dx) > 7 && Math.abs(dx) > Math.abs(dy)) FSW.lock = 'x';
+      else if(Math.abs(dy) > 7) FSW.lock = 'y';
+      else return;
+    }
+    if(FSW.lock !== 'x') return;
+    var cfg = FLOW_SWIPE[FSW.d.k] || {}, act = dx > 0 ? cfg.right : cfg.left;
+    FSW.dx = act ? Math.max(-FSW_MAX, Math.min(FSW_MAX, dx)) : dx * 0.14;
+    FSW.card.style.transform = 'translateX(' + FSW.dx + 'px)';
+    var bg = FSW.row.querySelector('.flw-bg'); if(!bg) return;
+    bg.style.background = dx > 0 ? 'var(--teal)' : '#B5733A';
+    var pr = act ? Math.min(1, Math.abs(FSW.dx) / FSW_TRIGGER) : 0;
+    bg.querySelector('.l').style.opacity = dx > 0 ? pr : 0;
+    bg.querySelector('.r').style.opacity = dx < 0 ? pr : 0;
+  });
+  function fswEnd(){
+    if(!FSW) return; var s = FSW; FSW = null;
+    s.card.style.transition = 'transform .22s cubic-bezier(.2,.8,.2,1)';
+    s.card.style.transform = 'translateX(0)';
+    var bg = s.row.querySelector('.flw-bg');
+    if(bg){ bg.querySelector('.l').style.opacity = 0; bg.querySelector('.r').style.opacity = 0; }
+    var cfg = FLOW_SWIPE[s.d.k] || {}, act = s.dx > 0 ? cfg.right : cfg.left;
+    if(act && Math.abs(s.dx) >= FSW_TRIGGER){ try { act.fn(s.d); } catch(err){ console.warn('[flow swipe]', err); } return; }
+    if(!s.lock) flowOpen(s.d.to, s.d.sn);   // no drag at all => plain tap
+  }
+  document.addEventListener('pointerup', fswEnd);
+  document.addEventListener('pointercancel', fswEnd);
+
+  window.renderFlow = function(){
+    var host = document.getElementById('flw-pipe'); if(!host) return;
+    var cols = stages();
+    var term = ((document.getElementById('flw-q')||{}).value||'').trim().toLowerCase();
+    host.innerHTML = cols.map(function(st){
+      var items = term ? st.items.filter(function(it){ return ((it.sn||it.spaSn||'')+' '+(it.dealer||it.dealerName||'')+' '+(it.pos||'')).toLowerCase().indexOf(term)!==-1; }) : st.items;
+      var cards = items.map(function(it){
+        var sn = it.sn || it.spaSn || it.dealer || '(no S/N)';
+        var type = it.type || 'hot';
+        var pos = it.pos && it.pos !== '—' ? '<span class="flw-pos">' + E(it.pos) + '</span>' : '';
+        var dealer = it.dealer || it.dealerName || '';
+        var hold = it.onHold ? '<span class="flw-hold">HOLD</span>' : '';
+        var swc = FLOW_SWIPE[st.key] || {};
+        var A = function(v){ return String(v==null?'':v).replace(/"/g,'').replace(/</g,''); };
+        return '<div class="flw-row" data-k="' + st.key + '" data-to="' + st.to + '" data-id="' + A(it.id) + '" data-sn="' + A(sn) + '" data-dealer="' + A(dealer) + '">'
+             + '<div class="flw-bg"><span class="l">' + (swc.right ? E(swc.right.ic + ' ' + swc.right.t) : '') + '</span><span class="r">' + (swc.left ? E(swc.left.t + ' ' + swc.left.ic) : '') + '</span></div>'
+             + '<div class="flw-card">'
+             + '<div class="flw-sn">' + E(sn) + '<span class="flw-tag" style="color:' + tagColor(type) + ';background:' + tagBg(type) + '">' + E(type) + '</span>' + hold + '</div>'
+             + '<div class="flw-meta">' + E(dealer) + (pos ? ' · ' + pos : '') + '</div>'
+             + '</div></div>';
+      }).join('') || '<div class="flw-empty">Nothing here</div>';
+      return '<div class="flw-col"><div class="flw-ch"><span class="flw-cd" style="background:' + st.color + '"></span><b>' + st.label + '</b><span class="flw-n">' + items.length + '</span></div>' + cards + '</div>';
+    }).join('');
+    var note = document.getElementById('flw-note');
+    if(note) note.innerHTML = 'Read-only view. Shows the main flow (factory → dealer). Floor shows spa types only (hot / swim / extra). Returns to factory and the outbound loading bay aren\u2019t shown here yet — tell me if you want them as extra columns.';
+  };
+
+  if(document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot); else boot();
+})();
+</script>
+<!-- ════════════════════════════════════════════════════════════════════════
+     ASPEN TODAY VIEW · v5.43 — additive, action-first landing. Read-only.
+     Big scan entry + four verb tiles + a prioritized "needs action" queue,
+     all computed live from your arrays. Card taps only navigate. Same safety
+     contract as the Flow module: delete this block and the app is untouched.
+     ════════════════════════════════════════════════════════════════════════ -->
+<style>
+#view-today .tdy-scan{width:100%;border:none;cursor:pointer;text-align:left;border-radius:var(--r-lg);background:linear-gradient(135deg,var(--accent),var(--teal));color:#fff;padding:18px 18px;display:flex;align-items:center;gap:15px;box-shadow:var(--sh-lg);position:relative;overflow:hidden}
+#view-today .tdy-scan::after{content:"";position:absolute;right:-30px;bottom:-42px;width:150px;height:150px;border-radius:50%;background:radial-gradient(circle,rgba(255,255,255,.22),transparent 70%)}
+#view-today .tdy-scan .r{width:52px;height:52px;border-radius:15px;background:rgba(255,255,255,.18);display:grid;place-items:center;flex:0 0 auto;position:relative;z-index:1}
+#view-today .tdy-scan .r svg{width:28px;height:28px}
+#view-today .tdy-scan .tx{position:relative;z-index:1}
+#view-today .tdy-scan .tx b{font-size:18px;font-weight:700;display:block}
+#view-today .tdy-scan .tx span{font-size:13px;opacity:.9}
+#view-today .tdy-verbs{display:grid;grid-template-columns:1fr 1fr;gap:11px;margin-top:14px}
+#view-today .tdy-verb{background:var(--bg2);border:1px solid var(--line);border-radius:var(--r-lg);padding:14px;box-shadow:var(--sh);text-align:left;cursor:pointer;transition:transform .12s}
+#view-today .tdy-verb:active{transform:scale(.97)}
+#view-today .tdy-verb .vi{width:36px;height:36px;border-radius:11px;display:grid;place-items:center;margin-bottom:9px;font-size:17px}
+#view-today .tdy-verb b{font-size:14.5px;font-weight:700;display:block;color:var(--text1)}
+#view-today .tdy-verb .c{font-size:12.5px;color:var(--text2);margin-top:1px}
+#view-today .tdy-h{font-size:15px;font-weight:700;color:var(--text1);margin:22px 2px 11px;font-family:inherit}
+#view-today .tdy-q{display:flex;align-items:center;gap:12px;background:var(--bg2);border:1px solid var(--line);border-left:4px solid var(--line);border-radius:10px;padding:12px 13px;margin-bottom:9px;box-shadow:var(--sh);cursor:pointer}
+#view-today .tdy-q.urgent{border-left-color:var(--red)}
+#view-today .tdy-q.soon{border-left-color:var(--amber)}
+#view-today .tdy-q.info{border-left-color:var(--teal)}
+#view-today .tdy-q .qi{width:34px;height:34px;border-radius:9px;background:var(--bg3);display:grid;place-items:center;font-size:15px;flex:0 0 auto}
+#view-today .tdy-q .qb{flex:1;min-width:0}
+#view-today .tdy-q .qb b{font-size:14.5px;font-weight:600;display:block;color:var(--text1);line-height:1.25}
+#view-today .tdy-q .qb span{font-size:12.5px;color:var(--text2)}
+#view-today .tdy-q .qg{font-size:12.5px;font-weight:700;color:var(--teal);white-space:nowrap;padding:7px 11px;border-radius:9px;background:var(--teal-lt)}
+#view-today .tdy-clear{text-align:center;color:var(--text3);font-size:13px;padding:22px 0}
+</style>
+<script>
+(function(){
+  if(window.__aspenTodayInstalled) return;
+  window.__aspenTodayInstalled = true;
+
+  function G(v){ return Array.isArray(v) ? v : []; }
+  function data(){
+    return {
+      F: (typeof factory    !== 'undefined') ? G(factory)    : [],
+      U: (typeof units      !== 'undefined') ? G(units)      : [],
+      M: (typeof marriages  !== 'undefined') ? G(marriages)  : [],
+      D: (typeof dispatched !== 'undefined') ? G(dispatched) : []
+    };
+  }
+  var TERMINAL_M = ['delivered','completed','fulfilled','cancelled','rejected','purged','missing'];
+
+  function counts(){
+    var d = data();
+    var inbound = d.F.filter(function(f){ return f && (f.trackingState==='in-transit'||f.trackingState==='dispatched-from-factory') && f.transitDir!=='to-factory'; }).length;
+    var floor   = d.U.filter(function(u){ return u && ['hot','swim','extra'].indexOf(u.type)!==-1; }).length;
+    var married = d.M.filter(function(m){ return m && m.spaSn && TERMINAL_M.indexOf(m.status)===-1; }).length;
+    var onHold  = d.F.filter(function(f){ return f && f.onHold; }).length;
+    var awaiting= d.D.filter(function(x){ return x && x.deliveryStatus!=='delivered-to-dealer' && x.deliveryStatus!=='returned'; }).length;
+    var bay     = d.M.filter(function(m){ return m && m.status==='loading-bay'; }).length;
+    return {inbound:inbound, floor:floor, married:married, onHold:onHold, awaiting:awaiting, bay:bay};
+  }
+
+  window.renderToday = function(){
+    var host = document.getElementById('tdy-body'); if(!host) return;
+    var c = counts();
+    // verb tiles
+    document.getElementById('tdy-c-rx').textContent = c.inbound;
+    document.getElementById('tdy-c-mv').textContent = c.floor;
+    document.getElementById('tdy-c-mar').textContent = c.married;
+    document.getElementById('tdy-c-dx').textContent = c.awaiting;
+    // action queue — only rows that actually need a human step
+    var rows = [];
+    if(c.onHold)   rows.push({lvl:'urgent', ic:'\u26D4', t:c.onHold+' item'+(c.onHold>1?'s':'')+' on hold', s:'Blocked at the factory — review', to:'factory'});
+    if(c.married)  rows.push({lvl:'urgent', ic:'\uD83D\uDD17', t:c.married+' married spa'+(c.married>1?'s':'')+' in progress', s:'Must ship with their accessory', to:'marriages'});
+    if(c.inbound)  rows.push({lvl:'info',   ic:'\u2193', t:c.inbound+' inbound to receive', s:'In-transit to the warehouse', to:'intransit'});
+    if(c.awaiting) rows.push({lvl:'soon',   ic:'\u2191', t:c.awaiting+' dispatched, awaiting delivery', s:'Confirm delivery once picked up', to:'dispatched'});
+    host.innerHTML = rows.length ? rows.map(function(r){
+      return '<div class="tdy-q '+r.lvl+'" onclick="goV(\''+r.to+'\')"><div class="qi">'+r.ic+'</div><div class="qb"><b>'+r.t+'</b><span>'+r.s+'</span></div><div class="qg">Open</div></div>';
+    }).join('') : '<div class="tdy-clear">\u2713 Nothing needs action right now.</div>';
+  };
+
+  function boot(){
+    if(typeof goV !== 'function' || typeof PAGES === 'undefined'){ return setTimeout(boot, 200); }
+    try { PAGES.today = ['Today', 'What needs action now']; } catch(e){}
+    try {
+      if(typeof ROLES === 'object'){
+        Object.keys(ROLES).forEach(function(rk){
+          var pg = ROLES[rk] && ROLES[rk].pages;
+          if(Array.isArray(pg) && pg.indexOf('*')===-1 && pg.indexOf('today')===-1) pg.push('today');
+        });
+      }
+    } catch(e){}
+    // nav item — placed FIRST (above Dashboard)
+    try {
+      var dashNi = document.querySelector('.ni[data-page="dashboard"]');
+      if(dashNi && !document.querySelector('.ni[data-page="today"]')){
+        var ni = document.createElement('div');
+        ni.className='ni'; ni.setAttribute('data-page','today');
+        ni.setAttribute('data-section', dashNi.getAttribute('data-section')||'main');
+        ni.setAttribute('onclick', "goV('today')");
+        ni.innerHTML='<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M8 1v3M2.5 3.5l2 2M13.5 3.5l-2 2"/><circle cx="8" cy="10" r="5"/><path d="M8 8v2l1.5 1"/></svg> Today';
+        dashNi.parentNode.insertBefore(ni, dashNi);
+      }
+    } catch(e){}
+    // view container
+    try {
+      var anchor = document.getElementById('view-dashboard') || document.getElementById('view-map');
+      if(anchor && !document.getElementById('view-today')){
+        var v = document.createElement('div');
+        v.id='view-today'; v.className='view';
+        v.innerHTML =
+          '<button class="tdy-scan" onclick="if(typeof openQRScanner===\'function\')openQRScanner(\'receive\')">'
+          + '<div class="r"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2"><path d="M3 7V5a2 2 0 012-2h2M17 3h2a2 2 0 012 2v2M21 17v2a2 2 0 01-2 2h-2M7 21H5a2 2 0 01-2-2v-2"/><path d="M3 12h18" stroke-linecap="round"/></svg></div>'
+          + '<div class="tx"><b>Scan a spa</b><span>Receive &amp; place in one tap</span></div></button>'
+          + '<div class="tdy-verbs">'
+          + '<button class="tdy-verb" onclick="goV(\'intransit\')"><div class="vi" style="background:var(--teal-lt);color:var(--teal)">\u2193</div><b>Receive</b><div class="c"><span id="tdy-c-rx">0</span> inbound</div></button>'
+          + '<button class="tdy-verb" onclick="goV(\'map\')"><div class="vi" style="background:var(--accent-lt);color:var(--accent)">\u21C4</div><b>Move</b><div class="c"><span id="tdy-c-mv">0</span> on floor</div></button>'
+          + '<button class="tdy-verb" onclick="goV(\'marriages\')"><div class="vi" style="background:var(--amber-lt);color:var(--amber)">\uD83D\uDD17</div><b>Marry</b><div class="c"><span id="tdy-c-mar">0</span> in progress</div></button>'
+          + '<button class="tdy-verb" onclick="goV(\'flow\')"><div class="vi" style="background:var(--teal-lt);color:var(--teal)">\u2191</div><b>Dispatch</b><div class="c"><span id="tdy-c-dx">0</span> awaiting</div></button>'
+          + '</div>'
+          + '<div class="tdy-h">Needs action now</div><div id="tdy-body"></div>';
+        anchor.parentNode.insertBefore(v, anchor.nextSibling);
+      }
+    } catch(e){}
+    // Today becomes everyone's landing — change the role defaultPage (which your
+    // startup + welcome flow navigate to). No forced navigation, fully reversible.
+    try {
+      if(typeof ROLES === 'object'){ Object.keys(ROLES).forEach(function(rk){ if(ROLES[rk]) ROLES[rk].defaultPage = 'today'; }); }
+    } catch(e){}
+    try {
+      var _g = goV;
+      goV = function(v){ _g.apply(this, arguments); if(v==='today'){ try{ renderToday(); }catch(e){ console.warn('[today]', e); } } };
+      window.goV = goV;
+    } catch(e){}
+    // Live refresh: keep Today/Flow current when they're visible and data changes.
+    // updBadges already fires on every data change/render; we piggyback on it. The
+    // renderers only read + repaint (no writes), so there's no save/push loop.
+    try {
+      if(typeof updBadges === 'function'){
+        var _ub = updBadges;
+        updBadges = function(){
+          _ub.apply(this, arguments);
+          try {
+            if(typeof _curView !== 'undefined'){
+              if(_curView === 'today' && window.renderToday) renderToday();
+              else if(_curView === 'flow' && window.renderFlow) renderFlow();
+            }
+          } catch(e){}
+        };
+        window.updBadges = updBadges;
+      }
+    } catch(e){}
+    console.log('[today] view installed (additive, read-only, live · landing)');
+  }
+  if(document.readyState==='loading') document.addEventListener('DOMContentLoaded', boot); else boot();
+})();
+</script>
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     ASPEN LOCATE SERVICE — v5.44
+     Additive module. Paste immediately before </body>. Deleting this whole
+     block is a complete, safe revert: nothing outside it is modified.
+
+     READ-ONLY BY DESIGN. This module creates no new write paths. Every action
+     it offers delegates to a function that already exists in the app, so all
+     existing guards, role checks and sync logic stay in force.
+
+     Provides:
+       AspenLocate.index()      sn -> {kind, view, pos, state, label, rec}
+       AspenLocate.find(q)      ranked query across every collection
+       AspenLocate.goTo(sn)     navigate to the right view AND focus the unit
+       AspenLocate.card(sn)     canonical unit sheet + chain of custody
+       AspenLocate.reconcile()  read-only contradiction report
+       Ctrl/Cmd+K               universal search overlay
+     ═══════════════════════════════════════════════════════════════════════ -->
+<script>
+(function(){
+  if (window.__aspenLocateInstalled) return;
+  window.__aspenLocateInstalled = true;
+
+  var T = function(){ try{ return (typeof toast==='function') ? toast : function(m){console.log(m);}; }catch(e){ return function(){}; } }();
+  var esc = function(s){
+    try { if (typeof escapeHTML === 'function') return escapeHTML(s); } catch(e){}
+    return String(s==null?'':s).replace(/[&<>"']/g, function(c){
+      return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
+    });
+  };
+  var arr = function(x){ return Array.isArray(x) ? x : []; };
+  var norm = function(s){ return String(s==null?'':s).trim().toLowerCase(); };
+
+  /* ─────────────────────────────────────────────────────────────────────
+     1. STATE VOCABULARY — mirrors the app's own trackingState values.
+        Each maps to the view that actually shows the unit.
+     ───────────────────────────────────────────────────────────────────── */
+  var STATE_MAP = {
+    'created-at-factory':      {view:'factory',    group:'factory',  label:'At factory'},
+    'ready-for-pickup':        {view:'factory',    group:'factory',  label:'Ready for pickup'},
+    'dispatched-from-factory': {view:'intransit',  group:'transit',  label:'In transit'},
+    'in-transit':              {view:'intransit',  group:'transit',  label:'In transit'},
+    'received-at-warehouse':   {view:'loadingbay', group:'bay',      label:'Loading bay'},
+    'received-at-wh':          {view:'loadingbay', group:'bay',      label:'Loading bay'},
+    'placed-in-warehouse':     {view:'map',        group:'floor',    label:'On the floor'},
+    'ready-to-ship':           {view:'map',        group:'floor',    label:'On the floor'},
+    'returned-to-warehouse':   {view:'map',        group:'floor',    label:'On the floor'},
+    'received-back-at-factory':{view:'factory',    group:'factory',  label:'Back at factory'}
+  };
+  var GROUP_META = {
+    floor:   {label:'On the floor',  color:'#1a56db', bg:'#eff4ff', order:1},
+    bay:     {label:'Loading bay',   color:'#ea580c', bg:'#fff7ed', order:2},
+    transit: {label:'In transit',    color:'#d97706', bg:'#fffbeb', order:3},
+    factory: {label:'At factory',    color:'#7c3aed', bg:'#f5f3ff', order:4},
+    incoming:{label:'Incoming',      color:'#0891b2', bg:'#ecfeff', order:5},
+    disp:    {label:'Dispatched',    color:'#0d9e78', bg:'#ecfdf5', order:6}
+  };
+
+  /* ─────────────────────────────────────────────────────────────────────
+     2. THE INDEX. Built on demand, cached briefly. Location stops being
+        implicit across collections and becomes one queryable map.
+     ───────────────────────────────────────────────────────────────────── */
+  var _cache = null, _cacheAt = 0;
+  var CACHE_MS = 1500;
+
+  function buildIndex(){
+    var out = [];
+    var seen = {};
+
+    // Floor — the authoritative physical location
+    arr(typeof units !== 'undefined' && units).forEach(function(u){
+      if (!u) return;
+      var sn = String(u.sn == null ? '' : u.sn);
+      out.push({
+        sn: sn, key: norm(sn), kind: 'unit', group: 'floor', view: 'map',
+        pos: u.pos || '', level: u.level || 1, dealer: u.dealer || '',
+        type: u.type || '', state: 'placed-in-warehouse',
+        label: (u.pos ? u.pos : 'On the floor') + (u.level > 1 ? ' · L' + u.level : ''),
+        rec: u, id: u.id
+      });
+      if (sn) seen[norm(sn)] = true;
+    });
+
+    // Factory — trackingState decides which view actually owns it
+    arr(typeof factory !== 'undefined' && factory).forEach(function(f){
+      if (!f) return;
+      var sn = String(f.sn == null ? '' : f.sn);
+      var ts = f.trackingState || 'created-at-factory';
+      var m  = STATE_MAP[ts] || STATE_MAP['created-at-factory'];
+      // If it's already indexed on the floor, the floor record wins as the
+      // physical truth — but we still keep this one so reconcile() can see it.
+      out.push({
+        sn: sn, key: norm(sn), kind: 'factory', group: m.group, view: m.view,
+        pos: '', dealer: f.dealer || '', type: f.type || '', state: ts,
+        label: m.label, rec: f, id: f.id,
+        shadowed: !!seen[norm(sn)]
+      });
+    });
+
+    // Incoming — expected but not yet physical
+    arr(typeof incoming !== 'undefined' && incoming).forEach(function(n){
+      if (!n) return;
+      var sn = String(n.sn == null ? '' : n.sn);
+      out.push({
+        sn: sn, key: norm(sn), kind: 'incoming', group: 'incoming', view: 'incoming',
+        pos: '', dealer: n.dealer || '', type: n.type || '', state: 'expected',
+        label: 'Expected', rec: n, id: n.id
+      });
+    });
+
+    // Dispatched — gone, unless returned
+    arr(typeof dispatched !== 'undefined' && dispatched).forEach(function(d){
+      if (!d) return;
+      if (d.deliveryStatus === 'returned') return;   // it's back; floor record owns it
+      var sn = String(d.sn == null ? '' : d.sn);
+      out.push({
+        sn: sn, key: norm(sn), kind: 'dispatched', group: 'disp', view: 'dispatched',
+        pos: d.originalPos || '', dealer: d.dealer || '', type: d.type || '',
+        state: 'delivered', label: 'Dispatched ' + (d.dispatchDate || ''),
+        rec: d, id: d.id
+      });
+    });
+
+    return out;
+  }
+
+  function index(force){
+    var now = Date.now();
+    if (!force && _cache && (now - _cacheAt) < CACHE_MS) return _cache;
+    _cache = buildIndex(); _cacheAt = now;
+    return _cache;
+  }
+  function invalidate(){ _cache = null; }
+
+  /* ─────────────────────────────────────────────────────────────────────
+     3. QUERY. Matches S/N, dealer, position and type, ranked so that an
+        exact serial always outranks a dealer substring.
+     ───────────────────────────────────────────────────────────────────── */
+  function find(q, limit){
+    var s = norm(q);
+    if (!s) return [];
+    var ix = index(), hits = [];
+    for (var i = 0; i < ix.length; i++){
+      var e = ix[i], score = 0;
+      if (e.key === s) score = 100;
+      else if (e.key.indexOf(s) === 0) score = 80;
+      else if (e.key.indexOf(s) > -1) score = 60;
+      else if (norm(e.pos) === s) score = 70;
+      else if (norm(e.dealer).indexOf(s) > -1) score = 40;
+      else if (norm(e.type).indexOf(s) > -1) score = 20;
+      if (!score) continue;
+      if (e.shadowed) score -= 15;          // the floor copy is the real one
+      hits.push({e: e, score: score});
+    }
+    hits.sort(function(a, b){
+      if (b.score !== a.score) return b.score - a.score;
+      var ga = (GROUP_META[a.e.group]||{}).order || 9;
+      var gb = (GROUP_META[b.e.group]||{}).order || 9;
+      return ga - gb;
+    });
+    // One row per serial. A spa on the floor usually ALSO has a factory record;
+    // showing both would make every search look like a duplicate. The highest
+    // ranked entry wins (floor outranks factory), and dupCount lets the card
+    // warn when a serial genuinely lives in more than one collection.
+    var byKey = {}, uniq = [];
+    for (var h = 0; h < hits.length; h++){
+      var en = hits[h].e, kk = en.key || ('#' + h);
+      if (byKey[kk] != null){ uniq[byKey[kk]].dupCount++; continue; }
+      byKey[kk] = uniq.length;
+      en.dupCount = 1;
+      uniq.push(en);
+    }
+    return uniq.slice(0, limit || 25);
+  }
+
+  /* ─────────────────────────────────────────────────────────────────────
+     4. FOCUS ROUTER. goV() is NOT modified — it is wrapped. If anything
+        here fails, navigation still happened; only the highlight is lost.
+     ───────────────────────────────────────────────────────────────────── */
+  var FOCUS_CSS_ID = '__aspen_locate_css';
+  function ensureCss(){
+    if (document.getElementById(FOCUS_CSS_ID)) return;
+    var st = document.createElement('style');
+    st.id = FOCUS_CSS_ID;
+    st.textContent = [
+      '@keyframes aspLocPulse{0%,100%{box-shadow:0 0 0 0 rgba(217,119,6,.85)}',
+      '50%{box-shadow:0 0 0 6px rgba(217,119,6,0)}}',
+      '.asp-loc-focus{animation:aspLocPulse 1.4s ease-in-out 3;outline:2px solid #d97706 !important;',
+      'outline-offset:2px;border-radius:6px;position:relative;z-index:5}',
+      '@media(prefers-reduced-motion:reduce){.asp-loc-focus{animation:none}}',
+      '.asp-loc-bar{position:fixed;left:50%;transform:translateX(-50%);bottom:18px;z-index:9500;',
+      'background:#1c2b4a;color:#fff;border-radius:13px;padding:11px 14px;display:flex;',
+      'align-items:center;gap:11px;box-shadow:0 10px 30px rgba(0,0,0,.28);max-width:calc(100vw - 32px);',
+      'font-family:var(--font,system-ui);animation:aspLocIn .2s ease-out}',
+      '@keyframes aspLocIn{from{opacity:0;transform:translate(-50%,10px)}}',
+      '.asp-loc-bar b{font-size:13.5px;display:block;letter-spacing:-.01em}',
+      '.asp-loc-bar small{font-size:11.5px;color:rgba(255,255,255,.62)}',
+      '.asp-loc-bar button{border:0;background:rgba(255,255,255,.16);color:#fff;font:700 12px var(--font,system-ui);',
+      'padding:8px 12px;border-radius:8px;cursor:pointer;flex-shrink:0;min-height:36px}',
+      '.asp-chip{display:inline-flex;align-items:stretch;border-radius:6px;overflow:hidden;',
+      'border:1px solid rgba(0,0,0,.13);font-family:var(--mono,monospace);vertical-align:middle}',
+      '.asp-chip .s{padding:2px 6px;font-size:11.5px;font-weight:600;background:#fff;color:#0f172a}',
+      '.asp-chip .p{padding:2px 6px;font-size:11.5px;font-weight:700;background:#1c2b4a;color:#fff}'
+    ].join('');
+    document.head.appendChild(st);
+  }
+
+  function clearFocus(){
+    try {
+      document.querySelectorAll('.asp-loc-focus').forEach(function(n){
+        n.classList.remove('asp-loc-focus');
+      });
+    } catch(e){}
+  }
+
+  function showBar(html, onBack){
+    try {
+      var old = document.getElementById('__asp_loc_bar');
+      if (old) old.remove();
+      var b = document.createElement('div');
+      b.className = 'asp-loc-bar'; b.id = '__asp_loc_bar';
+      b.innerHTML = '<div style="flex:1;min-width:0">' + html + '</div>';
+      var btn = document.createElement('button');
+      btn.textContent = 'Dismiss';
+      btn.onclick = function(){ b.remove(); clearFocus(); if (onBack) onBack(); };
+      b.appendChild(btn);
+      document.body.appendChild(b);
+      setTimeout(function(){ if (b.parentNode) b.remove(); }, 7000);
+    } catch(e){}
+  }
+
+  // Find the DOM node for a serial inside the currently active view.
+  function focusInDom(sn){
+    if (!sn) return false;
+    var view = document.querySelector('.view.active') || document;
+    var needle = String(sn);
+    var nodes = view.querySelectorAll('tr, .uc, .card, li, .row, [data-sn]');
+    for (var i = 0; i < nodes.length; i++){
+      var n = nodes[i];
+      var ds = n.getAttribute && n.getAttribute('data-sn');
+      var hit = ds ? (String(ds) === needle)
+                   : ((n.textContent || '').indexOf(needle) > -1);
+      if (hit){
+        n.classList.add('asp-loc-focus');
+        try { n.scrollIntoView({behavior:'smooth', block:'center'}); } catch(e){ }
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function goTo(snOrEntry){
+    var e = (typeof snOrEntry === 'object' && snOrEntry) ? snOrEntry : null;
+    if (!e){
+      var r = find(snOrEntry, 1);
+      if (!r.length){ T('Not found: ' + snOrEntry, 'err'); return false; }
+      e = r[0];
+    }
+    clearFocus();
+    // Role gate is inside goV(); if the role can't see the view, goV bounces
+    // and our focus attempt simply finds nothing. No error, no broken state.
+    try { if (typeof goV === 'function') goV(e.view); } catch(err){ console.warn('[locate goV]', err); }
+
+    var run = function(){
+      var done = false;
+      // The map already has a first-class locator — reuse it rather than
+      // inventing a second one.
+      if (e.view === 'map'){
+        try {
+          var box = document.getElementById('map-srch');
+          if (box){
+            box.value = e.sn || e.pos || '';
+            if (typeof locateUnit === 'function') { locateUnit(); done = true; }
+            else if (typeof drawMap === 'function') { drawMap(); done = true; }
+          }
+        } catch(err){ console.warn('[locate map]', err); }
+      }
+      if (!done) focusInDom(e.sn);
+      var gm = GROUP_META[e.group] || {};
+      showBar('<b>' + chipHtml(e.sn, e.pos || '—') + '</b><small>' +
+              esc(gm.label || e.label || '') + (e.level > 1 ? ' · level ' + e.level : '') +
+              '</small>');
+    };
+    if (window.requestAnimationFrame) requestAnimationFrame(function(){ setTimeout(run, 90); });
+    else setTimeout(run, 140);
+    return true;
+  }
+
+  function chipHtml(sn, pos){
+    return '<span class="asp-chip"><span class="s">' + esc(sn || '—') +
+           '</span><span class="p">' + esc(pos || '—') + '</span></span>';
+  }
+
+  /* ─────────────────────────────────────────────────────────────────────
+     5. CHAIN OF CUSTODY — read straight out of the movements ledger the
+        app already writes. No new storage.
+     ───────────────────────────────────────────────────────────────────── */
+  function history(sn){
+    var s = norm(sn);
+    if (!s) return [];
+    return arr(typeof movements !== 'undefined' && movements)
+      .filter(function(m){ return m && norm(m.sn) === s; })
+      .slice(0, 40);
+  }
+
+  function fmtWhen(m){
+    try {
+      var d = m.atISO ? new Date(m.atISO) : (m.at ? new Date(m.at) : null);
+      if (!d || isNaN(d.getTime())) return '';
+      return d.toLocaleDateString(undefined,{month:'short',day:'numeric'}) + ' · ' +
+             d.toLocaleTimeString(undefined,{hour:'2-digit',minute:'2-digit'});
+    } catch(e){ return ''; }
+  }
+
+  /* ─────────────────────────────────────────────────────────────────────
+     6. THE UNIT CARD — one canonical sheet for a spa, reachable anywhere.
+        Every action delegates to an existing function.
+     ───────────────────────────────────────────────────────────────────── */
+  function card(sn){
+    // card() reads the RAW index, not find() — find() deduplicates for search,
+    // but the card must see every collection a serial lives in.
+    var target = norm(sn);
+    var hits = index().filter(function(e){ return e.key === target; });
+    if (!hits.length){ T('Not found: ' + sn, 'err'); return; }
+    hits.sort(function(a,b){
+      return (((GROUP_META[a.group]||{}).order)||9) - (((GROUP_META[b.group]||{}).order)||9);
+    });
+    var main = hits[0];
+    var gm = GROUP_META[main.group] || {};
+    var hist = history(sn);
+
+    var acts = [];
+    var u = (main.kind === 'unit') ? main.rec : null;
+    if (main.view === 'map') acts.push(['Open on map','__aspLoc.goTo("'+esc(sn)+'")','primary']);
+    if (u && typeof openMoveUnit === 'function')      acts.push(['Move','openMoveUnit('+JSON.stringify(u.id)+')','']);
+    if (u && typeof openMarriageAdd === 'function')   acts.push(['Marry','openMarriageAdd('+JSON.stringify(String(u.sn))+','+JSON.stringify(String(u.dealer||''))+')','']);
+    if (main.kind === 'dispatched' && typeof openConfirmDelivery === 'function')
+      acts.push(['Confirm delivery','openConfirmDelivery('+JSON.stringify(main.rec.id)+','+JSON.stringify(String(sn))+')','']);
+
+    var html = '';
+    html += '<div style="padding:16px 17px 0">';
+    html +=   '<div style="font:700 10.5px var(--font);letter-spacing:.09em;text-transform:uppercase;color:var(--text3)">Currently</div>';
+    html +=   '<div style="font-size:26px;font-weight:800;letter-spacing:-.04em;margin:4px 0 3px;line-height:1.15">' +
+                esc(gm.label || main.label) + (main.pos ? ' · ' + esc(main.pos) : '') + '</div>';
+    html +=   '<div style="font-size:13px;color:var(--text2);font-weight:500">' +
+                esc(main.dealer || '—') + (main.type ? ' · ' + esc(main.type) : '') +
+                (main.level > 1 ? ' · level ' + main.level : '') + '</div>';
+    html +=   '<div style="margin-top:11px">' + chipHtml(main.sn, main.pos || '—') + '</div>';
+
+    if (hits.length > 1){
+      html += '<div style="margin-top:11px;padding:9px 11px;background:#fffbeb;border:1px solid #fde68a;' +
+              'border-radius:8px;font-size:12.5px;color:#92400e">This serial appears in ' + hits.length +
+              ' collections. The floor record is treated as the physical truth.</div>';
+    }
+
+    if (acts.length){
+      html += '<div style="display:flex;gap:7px;margin-top:13px;flex-wrap:wrap">';
+      acts.forEach(function(a){
+        html += '<button onclick="__aspLoc.close();' + a[1] + '" style="flex:1;min-width:120px;min-height:44px;' +
+                'border-radius:9px;cursor:pointer;font:700 13px var(--font);' +
+                (a[2] === 'primary'
+                  ? 'background:var(--accent);border:1px solid var(--accent);color:#fff"'
+                  : 'background:#fff;border:1px solid var(--line2);color:var(--text1)"') +
+                '>' + esc(a[0]) + '</button>';
+      });
+      html += '</div>';
+    }
+    html += '</div>';
+
+    html += '<div style="padding:17px 17px 6px"><div style="font:700 11px var(--font);letter-spacing:.08em;' +
+            'text-transform:uppercase;color:var(--text3);margin-bottom:10px">Chain of custody</div>';
+    if (!hist.length){
+      html += '<div style="padding:14px;background:var(--bg3);border-radius:9px;font-size:13px;' +
+              'color:var(--text3);text-align:center">No movements logged for this serial yet.</div>';
+    } else {
+      hist.forEach(function(m, i){
+        var last = (i === hist.length - 1);
+        html += '<div style="display:flex;gap:12px;padding-bottom:' + (last ? '4' : '14') + 'px">' +
+                '<div style="width:11px;flex-shrink:0;display:flex;flex-direction:column;align-items:center">' +
+                  '<span style="width:10px;height:10px;border-radius:50%;background:' +
+                    (i === 0 ? 'var(--accent)' : '#cbd5e1') + ';margin-top:4px;flex-shrink:0"></span>' +
+                  (last ? '' : '<span style="flex:1;width:2px;background:rgba(0,0,0,.1);margin:3px 0 -14px"></span>') +
+                '</div>' +
+                '<div style="flex:1;min-width:0">' +
+                  '<b style="font-size:13.5px;font-weight:600;display:block">' + esc(m.type || 'movement') + '</b>' +
+                  (m.from || m.to
+                    ? '<div style="font:600 11.5px var(--mono);color:var(--text2);margin-top:2px">' +
+                      esc(m.from || '—') + ' → ' + esc(m.to || '—') + '</div>' : '') +
+                  '<div style="font-size:11.5px;color:var(--text3);margin-top:3px">' +
+                    fmtWhen(m) + (m.by ? ' · ' + esc(m.by) : '') + '</div>' +
+                '</div></div>';
+      });
+    }
+    html += '</div>';
+
+    openSheet(esc(sn), esc(main.dealer || ''), html);
+  }
+
+  /* ─────────────────────────────────────────────────────────────────────
+     7. RECONCILE — read-only. Surfaces exactly the contradiction classes
+        the merge simulation proved can occur. Reports; never repairs.
+     ───────────────────────────────────────────────────────────────────── */
+  function reconcile(){
+    var issues = [];
+    var U = arr(typeof units !== 'undefined' && units);
+    var F = arr(typeof factory !== 'undefined' && factory);
+    var D = arr(typeof dispatched !== 'undefined' && dispatched);
+    var M = arr(typeof marriages !== 'undefined' && marriages);
+
+    // A. Same serial twice on the floor
+    var bySn = {};
+    U.forEach(function(u){ if(!u||!u.sn) return; (bySn[norm(u.sn)] = bySn[norm(u.sn)] || []).push(u); });
+    Object.keys(bySn).forEach(function(k){
+      if (bySn[k].length > 1)
+        issues.push({sev:'high', kind:'Duplicate on floor', sn:bySn[k][0].sn,
+          detail:bySn[k].length + ' floor rows share this serial (' +
+                 bySn[k].map(function(x){return x.pos||'?';}).join(', ') + ')'});
+    });
+
+    // B. Two units claiming the same position and level
+    var byPos = {};
+    U.forEach(function(u){
+      if (!u || !u.pos) return;
+      var k = String(u.pos) + '#' + (u.level || 1);
+      (byPos[k] = byPos[k] || []).push(u);
+    });
+    Object.keys(byPos).forEach(function(k){
+      if (byPos[k].length > 1)
+        issues.push({sev:'high', kind:'Position collision', sn:byPos[k].map(function(x){return x.sn;}).join(', '),
+          detail:'Position ' + k.replace('#',' level ') + ' is claimed by ' + byPos[k].length + ' units'});
+    });
+
+    // C. Dispatched but still standing on the floor
+    var floorSns = {};
+    U.forEach(function(u){ if(u&&u.sn) floorSns[norm(u.sn)] = u; });
+    D.forEach(function(d){
+      if (!d || !d.sn || d.deliveryStatus === 'returned') return;
+      if (floorSns[norm(d.sn)])
+        issues.push({sev:'high', kind:'Dispatched yet on floor', sn:d.sn,
+          detail:'Dispatched ' + (d.dispatchDate || '?') + ' but a floor row still exists at ' +
+                 (floorSns[norm(d.sn)].pos || '?')});
+    });
+
+    // D. Factory says it's in the warehouse, but no floor row exists
+    F.forEach(function(f){
+      if (!f || !f.sn) return;
+      var ts = f.trackingState;
+      if (ts !== 'placed-in-warehouse' && ts !== 'ready-to-ship') return;
+      if (!floorSns[norm(f.sn)])
+        issues.push({sev:'med', kind:'State without a place', sn:f.sn,
+          detail:'trackingState is "' + ts + '" but no floor row exists'});
+    });
+
+    // E. Pending marriage whose spa is nowhere
+    var known = {};
+    index(true).forEach(function(e){ if(e.sn) known[norm(e.sn)] = true; });
+    M.forEach(function(m){
+      if (!m || !m.spaSn) return;
+      if (m.status === 'delivered' || m.status === 'completed' || m.status === 'fulfilled') return;
+      if (!known[norm(m.spaSn)])
+        issues.push({sev:'med', kind:'Orphan marriage', sn:m.spaSn,
+          detail:'Pending marriage "' + (m.accessoryName || '?') + '" points at a serial not found anywhere'});
+    });
+
+    // F. Floor row with no position
+    U.forEach(function(u){
+      if (u && u.sn && !u.pos)
+        issues.push({sev:'low', kind:'Missing position', sn:u.sn, detail:'Floor row carries no position'});
+    });
+
+    // G. Two rows sharing one id. ids come from a local nid++ counter, and the
+    // counter only reconciles with Math.max on sync — so two devices that both
+    // create a row while disconnected mint the same number. Nothing is lost in
+    // the merge, but every id lookup (units.find(x => x.id === id)) returns only
+    // the first match, which makes the second row unreachable from any button,
+    // and a tombstone written against that id no longer behaves predictably.
+    // Detection only: renumbering rows automatically would be riskier than the
+    // condition it fixes, so this reports and lets a human decide.
+    [['units', U], ['factory', F], ['dispatched', D], ['marriages', M]].forEach(function(pair){
+      var seen = {};
+      pair[1].forEach(function(r){
+        if (!r || r.id == null) return;
+        var k = 'id:' + r.id;
+        (seen[k] = seen[k] || []).push(r);
+      });
+      Object.keys(seen).forEach(function(k){
+        var rows = seen[k];
+        if (rows.length < 2) return;
+        issues.push({sev:'high', kind:'Duplicate id', sn:(rows[0].sn || rows[0].spaSn || k),
+          detail: rows.length + ' rows in ' + pair[0] + ' share id ' + k.slice(3) +
+                  ' — only the first is reachable by any id lookup (' +
+                  rows.map(function(r){ return r.sn || r.spaSn || '?'; }).join(', ') + ')'});
+      });
+    });
+
+    // H. Text fields carrying characters that break HTML rendering.
+    // The app interpolates record fields into markup in ~390 places without
+    // escapeHTML(). None of those are inside event handlers — that class is
+    // already clean — so the exposure is a broken-looking row, not an attack.
+    // Editing 390 render sites would introduce more risk than the condition
+    // itself, so instead this reports whether any real record actually holds a
+    // dangerous character. On clean data the whole class is a non-issue.
+    var DANGEROUS = /[<>]/;
+    var TEXT_FIELDS = ['sn','dealer','notes','name','color','model',
+                       'accessoryName','spaDealer','note','type'];
+    [['units', U], ['factory', F], ['dispatched', D], ['marriages', M]].forEach(function(pair){
+      pair[1].forEach(function(r){
+        if (!r) return;
+        for (var i = 0; i < TEXT_FIELDS.length; i++){
+          var f = TEXT_FIELDS[i], v = r[f];
+          if (typeof v !== 'string' || !DANGEROUS.test(v)) continue;
+          issues.push({sev:'med', kind:'Unsafe character in text',
+            sn:(r.sn || r.spaSn || ('id ' + r.id)),
+            detail:'Field "' + f + '" in ' + pair[0] + ' contains < or > — it will ' +
+                   'render broken wherever it appears'});
+          break;
+        }
+      });
+    });
+
+    var order = {high:0, med:1, low:2};
+    issues.sort(function(a,b){ return order[a.sev] - order[b.sev]; });
+    return issues;
+  }
+
+  function reconcileSheet(){
+    var iss = reconcile();
+    var COL = {high:['#dc2626','#fef2f2','Critical'], med:['#d97706','#fffbeb','Review'], low:['#475569','#f7f8fa','Minor']};
+    var html = '<div style="padding:15px 17px 0">';
+    if (!iss.length){
+      html += '<div style="padding:26px 16px;text-align:center">' +
+              '<div style="font-size:30px;margin-bottom:8px">✓</div>' +
+              '<div style="font-size:15px;font-weight:700">No contradictions found</div>' +
+              '<div style="font-size:13px;color:var(--text2);margin-top:5px">' +
+              'Every serial has exactly one physical location, and every position is claimed once.</div></div>';
+    } else {
+      var hi = iss.filter(function(i){return i.sev==='high';}).length;
+      html += '<div style="font-size:13.5px;color:var(--text2);margin-bottom:13px">' +
+              iss.length + ' item' + (iss.length>1?'s':'') + ' need attention' +
+              (hi ? ' · <b style="color:#dc2626">' + hi + ' critical</b>' : '') +
+              '. This check only reports — it never edits data.</div>';
+      iss.forEach(function(i){
+        var c = COL[i.sev];
+        html += '<div style="background:#fff;border:1px solid var(--line);border-left:3px solid ' + c[0] +
+                ';border-radius:0 9px 9px 0;padding:11px 13px;margin-bottom:8px;cursor:pointer" ' +
+                'onclick="__aspLoc.close();__aspLoc.card(' + JSON.stringify(String(i.sn).split(',')[0].trim()) + ')">' +
+                '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">' +
+                '<span style="font:700 9.5px var(--font);letter-spacing:.07em;text-transform:uppercase;' +
+                'background:' + c[1] + ';color:' + c[0] + ';padding:2px 7px;border-radius:20px">' + c[2] + '</span>' +
+                '<b style="font-size:13.5px">' + esc(i.kind) + '</b></div>' +
+                '<div style="font:600 12px var(--mono);color:var(--text2);margin-top:5px">' + esc(i.sn) + '</div>' +
+                '<div style="font-size:12.5px;color:var(--text3);margin-top:3px">' + esc(i.detail) + '</div></div>';
+      });
+    }
+    html += '</div>';
+    openSheet('Reconciliation', 'Read-only integrity check', html);
+  }
+
+  /* ─────────────────────────────────────────────────────────────────────
+     8. SHELL — search overlay and bottom sheet.
+     ───────────────────────────────────────────────────────────────────── */
+  function openSheet(title, sub, bodyHtml){
+    closeSheet();
+    ensureCss();
+    var ov = document.createElement('div');
+    ov.id = '__asp_sheet';
+    ov.style.cssText = 'position:fixed;inset:0;z-index:9600;background:rgba(15,23,42,.42);' +
+      'display:flex;align-items:flex-end;justify-content:center;backdrop-filter:blur(2px)';
+    ov.onclick = function(ev){ if (ev.target === ov) closeSheet(); };
+    var panel = document.createElement('div');
+    panel.style.cssText = 'background:var(--bg,#f0f2f6);width:100%;max-width:540px;max-height:88vh;' +
+      'border-radius:16px 16px 0 0;overflow:hidden;display:flex;flex-direction:column;' +
+      'box-shadow:0 -10px 40px rgba(0,0,0,.28);animation:aspSheetIn .22s cubic-bezier(.32,.72,0,1)';
+    panel.innerHTML =
+      '<div style="display:flex;align-items:center;gap:11px;padding:13px 15px;background:#fff;' +
+      'border-bottom:1px solid var(--line,rgba(0,0,0,.07));flex-shrink:0">' +
+        '<div style="flex:1;min-width:0"><div style="font-size:16px;font-weight:700;letter-spacing:-.02em">' +
+        title + '</div>' + (sub ? '<div style="font-size:11.5px;color:var(--text3);font-weight:600;' +
+        'margin-top:1px">' + sub + '</div>' : '') + '</div>' +
+        '<button onclick="__aspLoc.close()" style="width:36px;height:36px;border-radius:9px;' +
+        'border:1px solid var(--line2,rgba(0,0,0,.13));background:#fff;cursor:pointer;font-size:16px;' +
+        'color:var(--text2);flex-shrink:0;line-height:1">✕</button></div>' +
+      '<div style="flex:1;overflow-y:auto;overscroll-behavior:contain;padding-bottom:22px">' + bodyHtml + '</div>';
+    ov.appendChild(panel);
+    document.body.appendChild(ov);
+    if (!document.getElementById('__asp_sheet_kf')){
+      var k = document.createElement('style'); k.id = '__asp_sheet_kf';
+      k.textContent = '@keyframes aspSheetIn{from{transform:translateY(16px);opacity:.4}}' +
+        '@media(prefers-reduced-motion:reduce){#__asp_sheet>div{animation:none!important}}';
+      document.head.appendChild(k);
+    }
+  }
+  function closeSheet(){
+    var s = document.getElementById('__asp_sheet');
+    if (s) s.remove();
+  }
+
+  function openSearch(){
+    closeSearch(); ensureCss();
+    var ov = document.createElement('div');
+    ov.id = '__asp_search';
+    ov.style.cssText = 'position:fixed;inset:0;z-index:9700;background:rgba(15,23,42,.45);' +
+      'display:flex;align-items:flex-start;justify-content:center;padding:10vh 14px 14px;backdrop-filter:blur(3px)';
+    ov.onclick = function(ev){ if (ev.target === ov) closeSearch(); };
+    var box = document.createElement('div');
+    box.style.cssText = 'background:#fff;width:100%;max-width:520px;border-radius:14px;overflow:hidden;' +
+      'box-shadow:0 20px 60px rgba(0,0,0,.3);display:flex;flex-direction:column;max-height:76vh';
+    box.innerHTML =
+      '<div style="display:flex;align-items:center;gap:10px;padding:13px 15px;border-bottom:1px solid var(--line,rgba(0,0,0,.07))">' +
+      '<svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="#94a3b8" stroke-width="2" ' +
+      'stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>' +
+      '<input id="__asp_q" placeholder="Serial, dealer, position…" autocomplete="off" ' +
+      'style="flex:1;border:0;outline:0;font:600 16px var(--mono,monospace);color:#0f172a;min-width:0;background:transparent">' +
+      '<button onclick="__aspLoc.reconcileSheet()" title="Integrity check" ' +
+      'style="border:1px solid var(--line2,rgba(0,0,0,.13));background:#fff;border-radius:8px;' +
+      'padding:6px 10px;font:700 11px var(--font,system-ui);color:#475569;cursor:pointer;flex-shrink:0">Check</button></div>' +
+      '<div id="__asp_res" style="flex:1;overflow-y:auto;padding:6px 0 10px"></div>';
+    ov.appendChild(box);
+    document.body.appendChild(ov);
+    var inp = document.getElementById('__asp_q');
+    inp.oninput = function(){ renderResults(this.value); };
+    inp.onkeydown = function(ev){
+      if (ev.key === 'Escape') closeSearch();
+      if (ev.key === 'Enter'){
+        var r = find(this.value, 1);
+        if (r.length){ closeSearch(); goTo(r[0]); }
+      }
+    };
+    setTimeout(function(){ try{ inp.focus(); }catch(e){} }, 40);
+    renderResults('');
+  }
+  function closeSearch(){
+    var s = document.getElementById('__asp_search');
+    if (s) s.remove();
+  }
+
+  function renderResults(q){
+    var host = document.getElementById('__asp_res');
+    if (!host) return;
+    if (!norm(q)){
+      var n = index().length;
+      host.innerHTML = '<div style="padding:26px 18px;text-align:center;color:#94a3b8;font-size:13px;' +
+        'font-family:var(--font,system-ui)">' + n + ' units indexed across floor, factory, transit, ' +
+        'loading bay and dispatch.<br><span style="font-size:12px">Type a serial to jump straight to it.</span></div>';
+      return;
+    }
+    var res = find(q, 24);
+    if (!res.length){
+      host.innerHTML = '<div style="padding:26px 18px;text-align:center;color:#94a3b8;font-size:13px;' +
+        'font-family:var(--font,system-ui)">Nothing matches “' + esc(q) + '”.</div>';
+      return;
+    }
+    var groups = {};
+    res.forEach(function(e){ (groups[e.group] = groups[e.group] || []).push(e); });
+    var html = '';
+    Object.keys(groups).sort(function(a,b){
+      return ((GROUP_META[a]||{}).order||9) - ((GROUP_META[b]||{}).order||9);
+    }).forEach(function(g){
+      var gm = GROUP_META[g] || {label:g, color:'#475569', bg:'#f7f8fa'};
+      html += '<div style="display:flex;align-items:center;gap:8px;padding:11px 16px 6px">' +
+        '<span style="font:700 10.5px var(--font,system-ui);letter-spacing:.08em;text-transform:uppercase;' +
+        'color:#94a3b8">' + esc(gm.label) + '</span><span style="flex:1;height:1px;background:rgba(0,0,0,.07)"></span>' +
+        '<span style="font:700 11px var(--mono,monospace);color:#94a3b8">' + groups[g].length + '</span></div>';
+      groups[g].forEach(function(e){
+        html += '<div onclick="__aspLoc.pick(' + JSON.stringify(String(e.sn)) + ',' +
+          JSON.stringify(String(e.kind)) + ')" style="display:flex;align-items:center;gap:11px;' +
+          'padding:9px 16px;min-height:48px;cursor:pointer" ' +
+          'onmouseover="this.style.background=\'#f7f8fa\'" onmouseout="this.style.background=\'\'">' +
+          '<span style="width:3px;align-self:stretch;border-radius:2px;background:' + gm.color + ';flex-shrink:0"></span>' +
+          '<div style="flex:1;min-width:0">' + chipHtml(e.sn, e.pos || '—') +
+          '<div style="font-size:11.5px;color:#94a3b8;margin-top:3px;font-family:var(--font,system-ui);font-weight:500">' +
+          esc(e.dealer || '—') + ' · <span style="font-family:var(--mono,monospace);font-size:11px">' +
+          esc(e.state) + '</span></div></div>' +
+          '<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="#cbd5e1" stroke-width="2" ' +
+          'stroke-linecap="round"><path d="M9 6l6 6-6 6"/></svg></div>';
+      });
+    });
+    host.innerHTML = html;
+  }
+
+  /* ─────────────────────────────────────────────────────────────────────
+     9. WIRE-UP
+     ───────────────────────────────────────────────────────────────────── */
+  window.__aspLoc = {
+    goTo: goTo,
+    card: card,
+    close: function(){ closeSheet(); },
+    pick: function(sn){ closeSearch(); card(sn); },
+    reconcileSheet: reconcileSheet
+  };
+
+  window.AspenLocate = {
+    index: index, find: find, goTo: goTo, card: card,
+    history: history, reconcile: reconcile,
+    open: openSearch, invalidate: invalidate
+  };
+
+  document.addEventListener('keydown', function(ev){
+    if ((ev.metaKey || ev.ctrlKey) && (ev.key === 'k' || ev.key === 'K')){
+      ev.preventDefault(); openSearch();
+    }
+  });
+
+  // Keep the index honest. TWO sources can change stock:
+  //   saveState()          — this device wrote something
+  //   fbApplyRemoteState() — another device's write arrived
+  // Missing the second one is what makes a locator send someone to the wrong
+  // aisle after a colleague moves a tub, so both are hooked.
+  try {
+    if (typeof saveState === 'function' && !saveState.__aspLocWrapped){
+      var _save = saveState;
+      window.saveState = function(){ invalidate(); return _save.apply(this, arguments); };
+      window.saveState.__aspLocWrapped = true;
+    }
+  } catch(e){ console.warn('[locate saveState hook]', e); }
+  try {
+    if (typeof fbApplyRemoteState === 'function' && !fbApplyRemoteState.__aspLocWrapped){
+      var _apply = fbApplyRemoteState;
+      window.fbApplyRemoteState = function(){
+        var r = _apply.apply(this, arguments);
+        invalidate();                       // AFTER the merge, never before
+        return r;
+      };
+      window.fbApplyRemoteState.__aspLocWrapped = true;
+    }
+  } catch(e){ console.warn('[locate remote hook]', e); }
+
+  console.log('[AspenLocate] ready — Ctrl/Cmd+K to search, AspenLocate.reconcile() for the integrity report');
+})();
+</script>
+
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     ASPEN CYCLE COUNT + SEARCH UPGRADE — v5.45
+     Additive. Paste immediately after the ASPEN LOCATE SERVICE block.
+     Deleting this whole block is a complete, safe revert.
+
+     Requires AspenLocate (v5.44) to be present above it.
+
+     WRITE POLICY — deliberately narrow:
+       The ONLY write this module performs is postMovement({type:'CC'}), the
+       app's existing audited ledger call. It never touches units, factory,
+       dispatched or marriages. A count that finds a discrepancy does NOT
+       self-correct — it hands the user to openMoveUnit(), the existing
+       correction path, so every real stock change keeps its current guards.
+
+     Why cycle counting: a full annual inventory stops the warehouse for a day
+     and is stale the moment it ends. Counting a handful of bins per day means
+     every position is verified several times a year with no downtime, and
+     errors surface days after they happen instead of months.
+     ═══════════════════════════════════════════════════════════════════════ -->
+<script>
+(function(){
+  if (window.__aspenCycleInstalled) return;
+  window.__aspenCycleInstalled = true;
+
+  var T = function(){ try{ return (typeof toast==='function')?toast:function(m){console.log(m);}; }catch(e){ return function(){}; } }();
+  var esc = function(s){
+    try { if (typeof escapeHTML === 'function') return escapeHTML(s); } catch(e){}
+    return String(s==null?'':s).replace(/[&<>"']/g,function(c){
+      return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
+    });
+  };
+  var arr = function(x){ return Array.isArray(x)?x:[]; };
+
+  /* ═══════════════════════════════════════════════════════════════════
+     PART 1 — SEARCH UPGRADE
+     The app already has a global search button in the topbar. It covers
+     units, factory and incoming only, and its inline input is a fixed
+     280px, which overflows the topbar on a phone. Rather than adding a
+     second search, re-point the existing button at the locator overlay,
+     which covers every collection and works at any width.
+     The original functions are left intact and are used as a fallback.
+     ═══════════════════════════════════════════════════════════════════ */
+  try {
+    if (typeof toggleGlobalSearch === 'function' && !toggleGlobalSearch.__aspUpgraded){
+      var _origToggle = toggleGlobalSearch;
+      window.toggleGlobalSearch = function(){
+        try {
+          if (window.AspenLocate && typeof window.AspenLocate.open === 'function'){
+            window.AspenLocate.open();
+            return;
+          }
+        } catch(e){ console.warn('[cycle search upgrade]', e); }
+        return _origToggle.apply(this, arguments);   // fallback: original behaviour
+      };
+      window.toggleGlobalSearch.__aspUpgraded = true;
+    }
+  } catch(e){ console.warn('[cycle search hook]', e); }
+
+  /* ═══════════════════════════════════════════════════════════════════
+     PART 2 — THE COUNT PLAN
+     Deterministic from the date: no storage, no sync, no merge risk.
+     Every occupied position enters a rotation; each day's slice is a
+     stable function of the day number, so two devices opening the same
+     day see the same list without talking to each other.
+     ═══════════════════════════════════════════════════════════════════ */
+  var PER_DAY = 6;              // bins per day — a few minutes of walking
+  var CC_TYPE = 'CC';           // movement type for a verification record
+
+  function dayNumber(d){
+    d = d || new Date();
+    return Math.floor(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()) / 86400000);
+  }
+
+  // Stable hash so the rotation doesn't drift when inventory changes shape.
+  function hash(s){
+    var h = 2166136261;
+    s = String(s);
+    for (var i = 0; i < s.length; i++){
+      h ^= s.charCodeAt(i);
+      h = (h * 16777619) >>> 0;
+    }
+    return h;
+  }
+
+  function plan(forDate){
+    var day = dayNumber(forDate);
+    var pool = arr(typeof units !== 'undefined' && units)
+      .filter(function(u){ return u && u.sn && u.pos; })
+      .map(function(u){
+        return { sn:String(u.sn), pos:String(u.pos), level:u.level||1,
+                 dealer:u.dealer||'', type:u.type||'', id:u.id, rec:u };
+      });
+    if (!pool.length) return { day:day, items:[], total:0, cycleDays:0 };
+
+    // Rank by hash(sn) rotated by the day number: a stable shuffle that
+    // advances one slice per day and wraps cleanly.
+    pool.sort(function(a,b){ return hash(a.sn) - hash(b.sn); });
+    var n = pool.length;
+    var cycleDays = Math.max(1, Math.ceil(n / PER_DAY));
+    var start = (day % cycleDays) * PER_DAY;
+    var items = [];
+    for (var i = 0; i < PER_DAY && i < n; i++){
+      items.push(pool[(start + i) % n]);
+    }
+    return { day:day, items:items, total:n, cycleDays:cycleDays };
+  }
+
+  /* ── which of today's bins are already counted (read from the ledger) ── */
+  function countedToday(){
+    var out = {};
+    var todayStr = new Date().toDateString();
+    arr(typeof movements !== 'undefined' && movements).forEach(function(m){
+      if (!m || m.type !== CC_TYPE || !m.sn) return;
+      var d = null;
+      try { d = m.atISO ? new Date(m.atISO) : (m.at ? new Date(m.at) : null); } catch(e){}
+      if (!d || isNaN(d.getTime())) return;
+      if (d.toDateString() === todayStr) out[String(m.sn)] = m;
+    });
+    return out;
+  }
+
+  /* ── record a verification through the app's existing ledger ── */
+  function verify(sn, pos, note){
+    if (typeof postMovement !== 'function'){
+      T('Movement ledger unavailable', 'err');
+      return null;
+    }
+    var loc = (typeof LOC_WAREHOUSE === 'function') ? LOC_WAREHOUSE(pos) : { bin: pos };
+    var doc = postMovement({
+      type: CC_TYPE,
+      sn: String(sn),
+      material: '',
+      qty: 1,
+      from: loc,
+      to: loc,                      // a verification moves nothing
+      note: note || ('Cycle count verified at ' + pos),
+      ref: 'CC-' + dayNumber()
+    });
+    try { if (window.AspenLocate) window.AspenLocate.invalidate(); } catch(e){}
+    return doc;
+  }
+
+  /* ═══════════════════════════════════════════════════════════════════
+     PART 3 — THE SHEET
+     ═══════════════════════════════════════════════════════════════════ */
+  function chip(sn, pos){
+    return '<span class="asp-chip"><span class="s">' + esc(sn) +
+           '</span><span class="p">' + esc(pos||'—') + '</span></span>';
+  }
+
+  var _state = null;
+
+  function open(){
+    _state = plan();
+    draw();
+  }
+
+  function draw(){
+    var p = _state, done = countedToday();
+    var pending = p.items.filter(function(i){ return !done[i.sn]; });
+    var html = '';
+
+    html += '<div style="padding:15px 17px 0">';
+
+    if (!p.items.length){
+      html += '<div style="padding:26px 16px;text-align:center;color:var(--text3);font-size:13.5px">' +
+              'No positioned units on the floor to count yet.</div></div>';
+      sheet(html); return;
+    }
+
+    /* progress */
+    var doneN = p.items.length - pending.length;
+    html += '<div style="background:#fff;border:1px solid var(--line);border-radius:13px;padding:14px 15px;' +
+            'box-shadow:0 1px 3px rgba(0,0,0,.08)">' +
+            '<div style="font:700 10.5px var(--font);letter-spacing:.09em;text-transform:uppercase;' +
+            'color:var(--text3)">Today\'s count</div>' +
+            '<div style="font-size:27px;font-weight:800;letter-spacing:-.04em;margin:3px 0 2px;line-height:1.15;' +
+            'font-variant-numeric:tabular-nums">' + doneN + ' <span style="font-size:15px;font-weight:600;' +
+            'color:var(--text3)">of ' + p.items.length + ' bins</span></div>' +
+            '<div style="height:6px;background:var(--bg4);border-radius:3px;overflow:hidden;margin-top:9px">' +
+            '<div style="height:100%;width:' + Math.round(doneN / p.items.length * 100) + '%;' +
+            'background:#0d9e78;border-radius:3px;transition:width .3s"></div></div>' +
+            '<div style="font-size:12px;color:var(--text2);margin-top:9px">' +
+            p.total + ' positions on the floor · full cycle every ' + p.cycleDays + ' day' +
+            (p.cycleDays > 1 ? 's' : '') + ' at ' + PER_DAY + '/day</div></div>';
+
+    if (!pending.length){
+      html += '<div style="margin-top:13px;padding:20px 16px;text-align:center;background:#ecfdf5;' +
+              'border:1px solid #a7f3d0;border-radius:13px">' +
+              '<div style="font-size:26px">✓</div>' +
+              '<div style="font-size:14.5px;font-weight:700;margin-top:4px">Today is done</div>' +
+              '<div style="font-size:12.5px;color:#047857;margin-top:3px">' +
+              'Next slice unlocks tomorrow.</div></div>';
+    }
+
+    html += '</div><div style="padding:15px 17px 6px">';
+    html += '<div style="font:700 11px var(--font);letter-spacing:.08em;text-transform:uppercase;' +
+            'color:var(--text3);margin-bottom:10px">Walk these bins</div>';
+
+    p.items.forEach(function(it){
+      var ok = !!done[it.sn];
+      html += '<div style="background:#fff;border:1px solid ' + (ok ? '#a7f3d0' : 'var(--line)') +
+              ';border-radius:11px;padding:11px 13px;margin-bottom:8px;' +
+              (ok ? 'opacity:.72;' : '') + 'box-shadow:0 1px 3px rgba(0,0,0,.06)">' +
+              '<div style="display:flex;align-items:center;gap:10px">' +
+              '<div style="flex:1;min-width:0">' + chip(it.sn, it.pos) +
+              '<div style="font-size:11.5px;color:var(--text3);margin-top:4px;font-weight:500">' +
+              esc(it.dealer || '—') + (it.level > 1 ? ' · level ' + it.level : '') +
+              (it.type ? ' · ' + esc(it.type) : '') + '</div></div>' +
+              (ok ? '<span style="font:700 10.5px var(--font);letter-spacing:.06em;text-transform:uppercase;' +
+                    'background:#ecfdf5;color:#0d9e78;padding:4px 9px;border-radius:20px;flex-shrink:0">Counted</span>'
+                  : '') +
+              '</div>';
+      if (!ok){
+        html += '<div style="display:flex;gap:7px;margin-top:10px">' +
+                '<button onclick="__aspCC.ok(' + JSON.stringify(it.sn) + ',' + JSON.stringify(it.pos) + ')" ' +
+                'style="flex:1;min-height:44px;border-radius:9px;border:1px solid #0d9e78;background:#0d9e78;' +
+                'color:#fff;font:700 13px var(--font);cursor:pointer">It\'s here</button>' +
+                '<button onclick="__aspCC.bad(' + JSON.stringify(it.sn) + ',' + JSON.stringify(it.pos) + ',' +
+                JSON.stringify(it.id) + ')" ' +
+                'style="flex:1;min-height:44px;border-radius:9px;border:1px solid var(--line2);background:#fff;' +
+                'color:#dc2626;font:700 13px var(--font);cursor:pointer">Not here</button></div>';
+      }
+      html += '</div>';
+    });
+
+    html += '<div style="padding:6px 2px 14px;font-size:12px;color:var(--text3);line-height:1.55">' +
+            'Counting writes one audit record per bin — it never edits stock. ' +
+            'A mismatch hands you to the normal move dialog, so every correction keeps its usual checks.' +
+            '</div></div>';
+
+    sheet(html);
+  }
+
+  function sheet(html){
+    if (window.AspenLocate && window.__aspLoc){
+      // reuse the locator's sheet chrome so both features look identical
+      try { window.__aspLoc.close(); } catch(e){}
+    }
+    var old = document.getElementById('__asp_cc');
+    if (old) old.remove();
+    var ov = document.createElement('div');
+    ov.id = '__asp_cc';
+    ov.style.cssText = 'position:fixed;inset:0;z-index:9600;background:rgba(15,23,42,.42);' +
+      'display:flex;align-items:flex-end;justify-content:center;backdrop-filter:blur(2px)';
+    ov.onclick = function(e){ if (e.target === ov) close(); };
+    var panel = document.createElement('div');
+    panel.style.cssText = 'background:var(--bg,#f0f2f6);width:100%;max-width:540px;max-height:88vh;' +
+      'border-radius:16px 16px 0 0;overflow:hidden;display:flex;flex-direction:column;' +
+      'box-shadow:0 -10px 40px rgba(0,0,0,.28)';
+    panel.innerHTML =
+      '<div style="display:flex;align-items:center;gap:11px;padding:13px 15px;background:#fff;' +
+      'border-bottom:1px solid var(--line);flex-shrink:0">' +
+      '<div style="flex:1;min-width:0"><div style="font-size:16px;font-weight:700;letter-spacing:-.02em">' +
+      'Cycle count</div><div style="font-size:11.5px;color:var(--text3);font-weight:600;margin-top:1px">' +
+      'A few bins a day instead of one long shutdown</div></div>' +
+      '<button onclick="__aspCC.close()" style="width:36px;height:36px;border-radius:9px;' +
+      'border:1px solid var(--line2);background:#fff;cursor:pointer;font-size:16px;color:var(--text2);' +
+      'flex-shrink:0;line-height:1">✕</button></div>' +
+      '<div style="flex:1;overflow-y:auto;overscroll-behavior:contain;padding-bottom:22px">' + html + '</div>';
+    ov.appendChild(panel);
+    document.body.appendChild(ov);
+  }
+
+  function close(){
+    var s = document.getElementById('__asp_cc');
+    if (s) s.remove();
+  }
+
+  /* ── actions ── */
+  function markOk(sn, pos){
+    var doc = verify(sn, pos, 'Cycle count verified at ' + pos);
+    if (doc) T('Counted ' + sn + ' at ' + pos, 'ok');
+    draw();
+  }
+
+  function markBad(sn, pos, id){
+    // Never self-correct. Log the exception, then hand over to the normal
+    // move dialog so the real change goes through existing guards.
+    verify(sn, pos, 'Cycle count MISMATCH — not found at ' + pos);
+    T('Logged: ' + sn + ' not at ' + pos, 'err');
+    close();
+    try {
+      if (typeof openMoveUnit === 'function' && id != null){
+        openMoveUnit(id);
+        return;
+      }
+    } catch(e){ console.warn('[cycle openMoveUnit]', e); }
+    try { if (window.AspenLocate) window.AspenLocate.card(sn); } catch(e){}
+  }
+
+  window.__aspCC = { ok: markOk, bad: markBad, close: close, open: open };
+  window.AspenCycleCount = {
+    open: open, plan: plan, verify: verify,
+    countedToday: countedToday, perDay: PER_DAY
+  };
+
+  console.log('[AspenCycleCount] ready — AspenCycleCount.open(); search button now uses the full index');
+})();
+</script>
+
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     ASPEN PERSIST GUARD — v5.46
+     Additive. Paste immediately after the ASPEN CYCLE COUNT block.
+     Deleting this whole block is a complete, safe revert.
+
+     WHAT IT FIXES
+     An audit of every function that mutates units / factory / dispatched /
+     marriages / incoming / materials / coverInventory found that 18 of them
+     never call saveState() or flushSave(). addMarriage() calls flushSave();
+     rmMarriage() calls nothing. That asymmetry means creating a marriage
+     syncs at once while removing one only reaches localStorage and the cloud
+     when the tab is backgrounded, via _flushPendingSyncOnHide().
+
+     The data is not lost in the normal case — visibilitychange and pagehide
+     catch it. The real exposure is:
+       · other devices keep showing a row that was already deleted, for as
+         long as the tab stays open and visible;
+       · if iOS kills the tab without firing pagehide, the edit is gone and
+         the next load pulls the old row back from the cloud.
+
+     WHY A WRAPPER AND NOT 18 EDITS
+     saveState() already guards itself twice: it returns early while remote
+     state is being applied, and it compares _stateSig() so an unchanged
+     state costs nothing. It is also debounced through _saveTimer, so several
+     calls collapse into one write. That makes an unconditional call after
+     each of these functions safe even when the user cancelled the confirm()
+     dialog and nothing actually changed — the signature check turns it into
+     a no-op. Egress does not measurably increase.
+     ═══════════════════════════════════════════════════════════════════════ -->
+<script>
+(function(){
+  if (window.__aspenPersistGuardInstalled) return;
+  window.__aspenPersistGuardInstalled = true;
+
+  // Every function verified by reading its body: mutates a synced collection,
+  // calls no persistence function of its own.
+  var GAPS = [
+    'rmMarriage', 'saveMarriageEdit', 'markMarriageDelivered',
+    'rmCover', 'saveCoverAdd', 'saveCoverTransfer',
+    'rmMaterial', 'addMaterial', 'saveMaterialEdit',
+    'rmFromFactory', 'rmFromIncoming',
+    'receiveTransitItem', 'confirmPosition', 'quickReceiveSn',
+    'rejectIncoming', 'unstageUnit', 'stackDrop', 'removeFromQueue'
+  ];
+
+  // Destructive operations flush immediately instead of riding the debounce.
+  // A deletion that a colleague cannot see is worse than one extra write.
+  var IMMEDIATE = {
+    rmMarriage: 1, rmCover: 1, rmMaterial: 1,
+    rmFromFactory: 1, rmFromIncoming: 1, rejectIncoming: 1
+  };
+
+  var wrapped = [], missing = [];
+
+  GAPS.forEach(function(name){
+    var orig;
+    try { orig = window[name]; } catch(e){ orig = null; }
+    if (typeof orig !== 'function'){ missing.push(name); return; }
+    if (orig.__aspPersistWrapped) return;
+
+    var hard = !!IMMEDIATE[name];
+    var w = function(){
+      // saveState() compares _stateSig() internally, but flushSave() does NOT —
+      // it writes and pushes unconditionally. Without this check, a user who
+      // opens a delete dialog and cancels would still burn a Firebase push.
+      // Sampling the signature before and after keeps the guard cost-neutral.
+      var before = null;
+      try { if (hard && typeof _stateSig === 'function') before = _stateSig(); } catch(e){}
+      var out = orig.apply(this, arguments);
+      // Never let a persistence failure break the operation the user asked for.
+      try {
+        if (hard && typeof flushSave === 'function'){
+          var after = null;
+          try { if (typeof _stateSig === 'function') after = _stateSig(); } catch(e){}
+          // Unknown signature (helper missing) errs toward flushing.
+          if (before === null || after === null || before !== after) flushSave();
+        }
+        else if (typeof saveState === 'function') saveState();
+      } catch(e){ console.warn('[persist-guard ' + name + ']', e); }
+      // The locator index caches for a moment; a mutation must expire it.
+      try { if (window.AspenLocate) window.AspenLocate.invalidate(); } catch(e){}
+      return out;
+    };
+    w.__aspPersistWrapped = true;
+    try {
+      window[name] = w;
+      wrapped.push(name + (hard ? '*' : ''));
+    } catch(e){ missing.push(name); }
+  });
+
+  window.AspenPersistGuard = {
+    wrapped: wrapped,
+    missing: missing,
+    // Re-check at any time: returns the functions that still mutate without saving.
+    audit: function(){
+      return GAPS.filter(function(n){
+        return typeof window[n] === 'function' && !window[n].__aspPersistWrapped;
+      });
+    }
+  };
+
+  console.log('[AspenPersistGuard] ' + wrapped.length + ' functions now persist (* = immediate flush)' +
+              (missing.length ? ' · not found: ' + missing.join(', ') : ''));
+})();
+</script>
+
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     ASPEN INTEGRITY GUARD — v5.47
+     Additive. Paste immediately after the ASPEN PERSIST GUARD block.
+     Deleting this whole block is a complete, safe revert.
+
+     WHAT IT FIXES
+     runIntegrityChecks() contains 14 destructive operations across units,
+     factory, incoming, marriages and materials, and writes no tombstones.
+     It is called from two places:
+        · boot                       — deliberate, user is present
+        · fbApplyRemoteState()       — automatic, on EVERY remote merge
+
+     The automatic path is the hazard. Its deletions decide that a row is an
+     orphan by looking across collections — a floor unit is dropped when no
+     material carries its linkedMatId, a factory row is dropped when nothing
+     references it. Those cross-collection reads are only sound if every
+     collection is equally fresh, which is exactly what an eventually
+     consistent system does not promise. A device whose materials arrived a
+     beat late deletes units that are perfectly valid.
+
+     Because no tombstone is written, the deletion does not propagate as a
+     deletion. The other device still holds the rows and re-sends them on the
+     next merge, this device deletes them again, and the pair flaps — rows
+     blinking in and out, burning egress on every cycle.
+
+     THE FIX
+     Field-level repairs are useful and are kept: flipping a marriage from
+     pending to delivered fixes real inconsistencies and is idempotent.
+     Deletions during an automatic run are not kept. This wrapper snapshots
+     row ids before the checks, and if the run happened while remote state
+     was being applied, it puts back any row that disappeared and records it.
+     A boot run or a manual call is left completely untouched.
+
+     Inspect what was blocked:  AspenIntegrityGuard.blocked()
+     ═══════════════════════════════════════════════════════════════════════ -->
+<script>
+(function(){
+  if (window.__aspenIntegrityGuardInstalled) return;
+  window.__aspenIntegrityGuardInstalled = true;
+
+  var WATCHED = ['units','factory','incoming','marriages','materials','coverInventory'];
+  var blocked = [];        // audit trail of every deletion we put back
+
+  function snapshotRows(){
+    var snap = {};
+    WATCHED.forEach(function(name){
+      var a = null;
+      try { a = window[name]; } catch(e){}
+      if (!Array.isArray(a)) return;
+      var byId = {}, order = [];
+      for (var i = 0; i < a.length; i++){
+        var r = a[i];
+        if (!r || r.id == null) continue;
+        byId['id:' + r.id] = r;
+        order.push('id:' + r.id);
+      }
+      snap[name] = { byId: byId, order: order, len: a.length };
+    });
+    return snap;
+  }
+
+  function restoreDeleted(snap, reason){
+    var restoredTotal = 0;
+    WATCHED.forEach(function(name){
+      var before = snap[name];
+      if (!before) return;
+      var now = null;
+      try { now = window[name]; } catch(e){}
+      if (!Array.isArray(now)) return;
+
+      var present = {};
+      for (var i = 0; i < now.length; i++){
+        var r = now[i];
+        if (r && r.id != null) present['id:' + r.id] = true;
+      }
+      var missing = [];
+      for (var k = 0; k < before.order.length; k++){
+        var key = before.order[k];
+        if (!present[key]) missing.push(before.byId[key]);
+      }
+      if (!missing.length) return;
+
+      // A row the user genuinely deleted carries a tombstone. Honour those:
+      // only put back rows that nobody asked to remove.
+      var keep = missing.filter(function(row){
+        try {
+          if (typeof _TOMB_MAP === 'undefined') return true;
+          var map = _TOMB_MAP[name];
+          if (!map || !cfg || !cfg[map]) return true;
+          return !cfg[map]['id:' + row.id];       // no tombstone → not a real delete
+        } catch(e){ return true; }
+      });
+      if (!keep.length) return;
+
+      try {
+        Array.prototype.push.apply(now, keep);
+        restoredTotal += keep.length;
+        blocked.push({
+          at: new Date().toISOString(),
+          collection: name,
+          count: keep.length,
+          ids: keep.map(function(r){ return r.id; }).slice(0, 20),
+          reason: reason
+        });
+      } catch(e){ console.warn('[integrity-guard restore ' + name + ']', e); }
+    });
+    if (blocked.length > 200) blocked.splice(0, blocked.length - 200);
+    return restoredTotal;
+  }
+
+  try {
+    if (typeof runIntegrityChecks === 'function' && !runIntegrityChecks.__aspGuarded){
+      var _orig = runIntegrityChecks;
+      var guarded = function(){
+        // Is this the automatic post-merge run, or a deliberate one?
+        var duringMerge = false;
+        try { duringMerge = (typeof _fbApplyingRemote !== 'undefined') && !!_fbApplyingRemote; } catch(e){}
+
+        if (!duringMerge) return _orig.apply(this, arguments);   // boot / manual: untouched
+
+        var snap = snapshotRows();
+        var out = _orig.apply(this, arguments);
+        var n = restoreDeleted(snap, 'post-merge integrity run');
+        if (n){
+          console.warn('[integrity-guard] blocked ' + n + ' automatic deletion(s) during a ' +
+                       'remote merge and restored the rows. AspenIntegrityGuard.blocked() for detail.');
+          try {
+            if (Array.isArray(out)) {
+              out.push('Integrity guard: ' + n + ' automatic deletion(s) held back — ' +
+                       'cross-collection checks are not reliable mid-merge');
+            }
+          } catch(e){}
+          // The index must not keep pointing at rows that just came back.
+          try { if (window.AspenLocate) window.AspenLocate.invalidate(); } catch(e){}
+        }
+        return out;
+      };
+      guarded.__aspGuarded = true;
+      window.runIntegrityChecks = guarded;
+    }
+  } catch(e){ console.warn('[integrity-guard install]', e); }
+
+  window.AspenIntegrityGuard = {
+    blocked: function(){ return blocked.slice(); },
+    clear: function(){ blocked.length = 0; },
+    // Run the checks the safe way on demand, reporting without deleting.
+    dryRun: function(){
+      var snap = snapshotRows();
+      var out = [];
+      try { out = runIntegrityChecks() || []; } catch(e){ console.warn(e); }
+      var n = restoreDeleted(snap, 'manual dry run');
+      return { findings: out, wouldDelete: n, detail: blocked.slice(-5) };
+    }
+  };
+
+  console.log('[AspenIntegrityGuard] ready — automatic deletions during remote merges are held back');
+})();
+</script>
 
 </body>
 </html>
