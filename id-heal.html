@@ -1,0 +1,206 @@
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     ASPEN ID HEAL — v5.54
+     Additive. Paste immediately after the ASPEN INTEGRITY GUARD block.
+     Deleting this whole block is a complete, safe revert.
+
+     THE PROBLEM
+     Row ids come from a local nid++ counter that only reconciles with
+     Math.max on sync, so two devices working while disconnected mint the
+     same number. Four marriage pairs currently share an id (6234, 7581,
+     7877, 8414). Nothing is lost — but marriages.find(m => m.id === id)
+     returns only the first match, so the second row is unreachable from
+     every button in the UI.
+
+     WHY DELETING IS THE WRONG FIX
+     _mergeMarriages keys rows by 'm:' + spaSn + '|a' + accessoryId, NOT by
+     id. To that merge the two rows are genuinely DIFFERENT records that
+     happen to collide on a number, which is exactly why both survive.
+     Tombstones, on the other hand, are keyed by id — so tombstoning 6234
+     would delete BOTH rows on every device. A previous attempt renumbered
+     the row locally before deleting, which meant the tombstone named an id
+     no other device had ever seen; the factory device simply re-sent its
+     copy on the next merge and the pair came back.
+
+     THE FIX — CONVERGENT BY CONSTRUCTION
+     Give the unreachable row a new id derived deterministically from its own
+     merge key. Every device computes the same key for the same row, so every
+     device computes the same new id, with no coordination. There is no
+     delete, no tombstone, and therefore no race: whoever runs it first or
+     last, the result is identical.
+
+     Ordering inside a collision group is by merge key (a stable string sort),
+     so the row that keeps the original id is the same on every device. That
+     matters because units reference marriages through linkedMatId — keeping
+     the first row's id intact preserves those links, and any link pointing at
+     a renumbered row is repaired in the same pass.
+
+     Runs at boot and again after each remote merge, so a device that receives
+     a stale copy re-normalises it instead of drifting.
+     ═══════════════════════════════════════════════════════════════════════ -->
+<script>
+(function(){
+  if (window.__aspenIdHealInstalled) return;
+  window.__aspenIdHealInstalled = true;
+
+  var ID_BASE = 900000000000;   // far above any nid++ value, so no new collisions
+
+  function fnv1a(str){
+    var h = 2166136261;
+    str = String(str);
+    for (var i = 0; i < str.length; i++){
+      h ^= str.charCodeAt(i);
+      h = (h * 16777619) >>> 0;
+    }
+    return h;
+  }
+
+  // Byte-for-byte the same key _mergeMarriages uses. If that ever changes,
+  // this must change with it or the two will disagree.
+  function marriageKey(m){
+    if (!m) return '';
+    var sn  = (m.spaSn != null && String(m.spaSn).trim() !== '') ? String(m.spaSn).trim() : '';
+    var acc = (m.accessoryId != null && m.accessoryId !== '')
+                ? ('a' + m.accessoryId)
+                : (m.accessoryName || '');
+    return 'm:' + sn + '|' + acc;
+  }
+
+  function stableId(key){
+    // Two hashes over different salts widen the space enough that an accidental
+    // clash between two real rows is not a practical concern at this scale.
+    return ID_BASE + (fnv1a(key) % 1000000) * 1000 + (fnv1a('salt|' + key) % 1000);
+  }
+
+  function heal(){
+    var M = null;
+    try { M = (typeof marriages !== 'undefined') ? marriages : null; } catch(e){}
+    if (!Array.isArray(M) || !M.length) return { changed:0, detail:[] };
+
+    // group by id
+    var groups = {};
+    M.forEach(function(m){
+      if (!m || m.id == null) return;
+      var k = 'id:' + m.id;
+      (groups[k] = groups[k] || []).push(m);
+    });
+
+    var taken = {};
+    M.forEach(function(m){ if (m && m.id != null) taken['id:' + m.id] = true; });
+
+    var changed = 0, detail = [];
+
+    Object.keys(groups).forEach(function(gk){
+      var rows = groups[gk];
+      if (rows.length < 2) return;
+
+      // Deterministic order, and semantically the right way round: the row that
+      // keeps the original id should be the one the business actually worked on.
+      //   1. a row with updatedAt outranks one without (it has been touched)
+      //   2. among those, the most recently touched wins
+      //   3. merge key breaks any remaining tie, so the order is identical on
+      //      every device without needing to agree on anything
+      // Sorting on the merge key alone put a typo'd ghost first in one real
+      // case, because a backtick sorts before the pipe separator.
+      rows.sort(function(a, b){
+        var ua = (a && a.updatedAt) || '', ub = (b && b.updatedAt) || '';
+        if (ua && !ub) return -1;
+        if (ub && !ua) return 1;
+        if (ua !== ub) return ua > ub ? -1 : 1;
+        var ka = marriageKey(a), kb = marriageKey(b);
+        return ka < kb ? -1 : (ka > kb ? 1 : 0);
+      });
+
+      // rows[0] keeps the original id so linkedMatId references stay valid.
+      for (var i = 1; i < rows.length; i++){
+        var row = rows[i];
+        var key = marriageKey(row);
+        if (!key || key === 'm:|'){
+          // No usable key — fall back to something stable for this row.
+          key = 'noKey|' + gk + '|' + i;
+        }
+        var oldId = row.id;
+        var nid2  = stableId(key);
+        // Extremely unlikely, but never land on an id already in use.
+        var guard = 0;
+        while (taken['id:' + nid2] && guard < 50){ nid2 = nid2 + 1; guard++; }
+        if (nid2 === oldId) continue;
+
+        row.id = nid2;
+        taken['id:' + nid2] = true;
+        changed++;
+        detail.push({ from: oldId, to: nid2, spaSn: row.spaSn, acc: row.accessoryName, status: row.status });
+
+        // Repair any unit that pointed at the renumbered row. Only rows that
+        // resolved to THIS one are moved; links to rows[0] are left alone.
+        try {
+          if (typeof units !== 'undefined' && Array.isArray(units)){
+            units.forEach(function(u){
+              if (u && u.linkedMatId === oldId && u.__healMatKey === key) u.linkedMatId = nid2;
+            });
+          }
+        } catch(e){}
+      }
+    });
+
+    if (changed){
+      // Stamp so the change wins the last-edit-wins pass and propagates.
+      detail.forEach(function(d){
+        var row = M.filter(function(m){ return m && m.id === d.to; })[0];
+        if (row){
+          try { row.updatedAt = (typeof editStamp === 'function') ? editStamp() : new Date().toISOString(); }
+          catch(e){ row.updatedAt = new Date().toISOString(); }
+        }
+      });
+      try { if (window.AspenLocate) window.AspenLocate.invalidate(); } catch(e){}
+      try { if (typeof flushSave === 'function') flushSave(); else if (typeof saveState === 'function') saveState(); } catch(e){}
+      try { if (typeof renderMarriages === 'function') renderMarriages(); } catch(e){}
+      try { if (typeof updBadges === 'function') updBadges(); } catch(e){}
+      console.warn('[id-heal] renumbered ' + changed + ' duplicate-id marriage row(s):', detail);
+    }
+    return { changed: changed, detail: detail };
+  }
+
+  // Boot pass, once the app's own state is loaded.
+  try { setTimeout(heal, 1200); } catch(e){}
+
+  // And after every remote merge, so a stale copy from another device gets
+  // normalised on arrival instead of re-introducing the collision.
+  try {
+    if (typeof fbApplyRemoteState === 'function' && !fbApplyRemoteState.__aspIdHealWrapped){
+      var _apply = fbApplyRemoteState;
+      window.fbApplyRemoteState = function(){
+        var r = _apply.apply(this, arguments);
+        try { heal(); } catch(e){ console.warn('[id-heal post-merge]', e); }
+        return r;
+      };
+      window.fbApplyRemoteState.__aspIdHealWrapped = true;
+    }
+  } catch(e){ console.warn('[id-heal hook]', e); }
+
+  window.AspenIdHeal = {
+    run: heal,
+    key: marriageKey,
+    stableId: stableId,
+    // Report only — shows what a run would do without touching anything.
+    preview: function(){
+      var M = (typeof marriages !== 'undefined') ? marriages : [];
+      var g = {}, out = [];
+      M.forEach(function(m){ if (m && m.id != null) (g['id:'+m.id] = g['id:'+m.id] || []).push(m); });
+      Object.keys(g).forEach(function(k){
+        var rows = g[k].slice().sort(function(a,b){
+          var ka = marriageKey(a), kb = marriageKey(b);
+          return ka < kb ? -1 : (ka > kb ? 1 : 0);
+        });
+        if (rows.length < 2) return;
+        rows.forEach(function(r, i){
+          out.push({ id:r.id, spaSn:r.spaSn, key:marriageKey(r), status:r.status,
+                     accion: i === 0 ? 'conserva su id' : ('-> ' + stableId(marriageKey(r))) });
+        });
+      });
+      return out;
+    }
+  };
+
+  console.log('[AspenIdHeal] ready — deterministic renumbering, runs at boot and after each merge');
+})();
+</script>
