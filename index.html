@@ -4756,7 +4756,7 @@ let _fbInitAttempts = 0;
 //   /app_version/current  (in Firebase console, manually, OR call
 //   pushVersionToFirebase() from the Admin console at deploy time)
 // ══════════════════════════════════════════════════════════════════
-const APP_VERSION = 'v5.54';
+const APP_VERSION = 'v5.56';
 // v5.23 (#1): paste your reCAPTCHA v3 site key here AFTER enabling App Check in
 // the Firebase console (Build → App Check → Register app → reCAPTCHA v3). Until
 // then it stays '', everything works exactly as before.
@@ -13565,6 +13565,7 @@ function unstageMarriage(mid){
   const m = marriages.find(x => x.id === mid); if(!m) return;
   const id = m.location;
   m.location = null;
+  m.updatedAt = editStamp();   // v5.56 — last-edit-wins: a stale remote must not revert the unstage
   if(typeof saveState==='function') saveState();
   addAct(`Marriage unstaged from ${id}`, 'var(--amber)');
   toast('Marriage unstaged', 'ok');
@@ -13578,6 +13579,7 @@ function assignMarriageHere(id, pos){
   if(!m) return;
   snapshot('marriage-assign-loc');
   m.location = pos;
+  m.updatedAt = editStamp();   // v5.56 — last-edit-wins: protect the shelf assignment from stale sync
   if(typeof addAct === 'function') addAct(`💍 Marriage #${id} assigned to ${pos} (${m.accessoryName || ''})`, '#db2777');
   if(typeof saveState === 'function') saveState();
   if(typeof drawMap === 'function') drawMap();
@@ -13607,6 +13609,7 @@ function moveMarriageLocation(id){
   snapshot('marriage-move-loc');
   const oldLoc = m.location;
   m.location = dest;
+  m.updatedAt = editStamp();   // v5.56 — last-edit-wins: protect the move from stale sync
   if(typeof addAct === 'function') addAct(`💍 Marriage #${id} moved ${oldLoc}→${dest}`, '#db2777');
   if(typeof saveState === 'function') saveState();
   if(typeof drawMap === 'function') drawMap();
@@ -14031,7 +14034,9 @@ function adjustQty(pos, delta){
   const u=cu[0];
   u.qty=(u.qty||1)+delta;
   if(u.qty<0)u.qty=0;
+  touchUnit(u);   // v5.56 — stamp: qty edits were silently reverted by any stale sync
   addAct(`${u.dealer} at ${pos}: ${delta>0?'+'+delta:delta} (now ${u.qty})`,'var(--teal)');
+  saveState();    // v5.56 — persist: qty edits were lost on reload (not in PersistGuard's list)
   drawMap();
 }
 
@@ -14622,7 +14627,9 @@ function stackDrop(e,targetUid,pos){
 function adjustQtyId(id, delta){
   const u=units.find(x=>x.id===id);if(!u)return;
   u.qty=Math.max(0,(u.qty||1)+delta);
+  touchUnit(u);   // v5.56 — stamp (see adjustQty)
   addAct(`${u.dealer}: ${delta>0?'+'+delta:delta} (now ${u.qty})`,'var(--teal)');
+  saveState();    // v5.56 — persist (see adjustQty)
   const cu=units.filter(x=>x.pos===u.pos);
   showCellPanel(u.pos,cu);
   drawMap();
@@ -28749,6 +28756,21 @@ window._exclusivityVerdict = _exclusivityVerdict;
 
 function runIntegrityChecks(){
   const findings = [];
+  // ═══ v5.55 — AUTHORITATIVE-REMOVAL REGISTRY ═══════════════════════════════
+  // Two kinds of deletions live in this function and they must be treated
+  // differently by AspenIntegrityGuard:
+  //   · LAG-PRONE deletions (orphan checks: a row is dropped because a row in
+  //     ANOTHER collection is missing). Unsound mid-merge — the guard rightly
+  //     restores these. They do NOT vouch.
+  //   · AUTHORITATIVE verdicts (11b/c/d/e, 17, 18): judged from positive
+  //     evidence — a dispatch record, a fresher stamp, the exclusivity rule.
+  //     These are final. Each one registers ("vouches for") the rows it
+  //     removes, and the guard skips restoring vouched rows. Without this the
+  //     guard vetoed the reconciler on every merge and dispatched spas piled
+  //     up on the floor. ONE rule: checks that judge, vouch; checks that
+  //     guess, don't.
+  const _authRm = (window.__aspAuthRemoved = new Set());
+  const _vouch = (coll, row) => { try { if(row && row.id != null) _authRm.add(coll + ':id:' + row.id); } catch(e){} };
 
   // ─── Check 1: Marriages stuck on 'pending' while accessory is in-transit/received ───
   try {
@@ -28984,12 +29006,13 @@ function runIntegrityChecks(){
           return true;                            // keep the in-transit row
         }
         droppedTransit++;
+        _vouch('factory', f);                     // v5.55 — stamp-judged verdict: final
         return false;                             // placed/received more recently → drop in-transit
       });
       let droppedFloor = 0;
       if(floorIdsToDrop.size){
         const before = units.length;
-        units = units.filter(u => !floorIdsToDrop.has(u.id));
+        units = units.filter(u => { if(floorIdsToDrop.has(u.id)){ _vouch('units', u); return false; } return true; });   // v5.55 — vouch
         droppedFloor = before - units.length;
       }
       if(droppedTransit > 0) findings.push(`Removed ${droppedTransit} stale factory in-transit record(s) for spa(s) already on the floor`);
@@ -29013,7 +29036,8 @@ function runIntegrityChecks(){
       factory = factory.filter(f => {
         if(!f || f.type === 'accessory' || f.type === 'misc') return true;
         if(f.sn == null) return true;
-        return !dispatchedOut.has(String(f.sn).trim());
+        if(dispatchedOut.has(String(f.sn).trim())){ _vouch('factory', f); return false; }   // v5.55 — dispatch record is authoritative
+        return true;
       });
       const dropped = before - factory.length;
       if(dropped > 0) findings.push(`Removed ${dropped} stale factory row(s) for spa(s) already dispatched to a dealer`);
@@ -29040,11 +29064,29 @@ function runIntegrityChecks(){
       const beforeU = units.length;
       const removedIds = [];
       units = units.filter(u => {
-        if(u && u.sn != null && dispatchedOut.has(String(u.sn).trim())){ removedIds.push(u.id); return false; }
+        if(u && u.sn != null && dispatchedOut.has(String(u.sn).trim())){
+          removedIds.push(u.id);
+          // v5.55 — write a tombstone for the removed ghost. Without it the deletion
+          // never propagated (the stale source re-sent the row forever) and, worse,
+          // AspenIntegrityGuard restored the row on every post-merge run — dispatched
+          // spas piled up on the floor fleet-wide. A tombstoned removal is honoured
+          // by the guard AND syncs to every device via the cfg merge, so the ghost
+          // dies everywhere. A genuine return re-adds with a fresher stamp and wins.
+          try { if(typeof _tombstoneUnitRow === 'function') _tombstoneUnitRow(u); } catch(e){}
+          _vouch('units', u);
+          return false;
+        }
         return true;
       });
       const beforeI = incoming.length;
-      incoming = incoming.filter(it => !(it && it.sn != null && dispatchedOut.has(String(it.sn).trim())));
+      incoming = incoming.filter(it => {
+        if(it && it.sn != null && dispatchedOut.has(String(it.sn).trim())){
+          try { if(typeof _tombstoneIncomingRow === 'function') _tombstoneIncomingRow(it); } catch(e){}   // v5.55 — same rationale as above
+          _vouch('incoming', it);
+          return false;
+        }
+        return true;
+      });
       if(removedIds.length && typeof queue !== 'undefined' && Array.isArray(queue)){
         const rm = new Set(removedIds);
         queue = queue.filter(q => !rm.has(q.id));
@@ -29081,7 +29123,7 @@ function runIntegrityChecks(){
         if(!it || it.sn == null) return;
         const f = facBack.get(String(it.sn).trim());
         if(!f) return;
-        if(facTs(f) >= incTs(it)) dropIncIds.push(it.id); else dropFacIds.push(f.id);
+        if(facTs(f) >= incTs(it)){ dropIncIds.push(it.id); _vouch('incoming', it); } else { dropFacIds.push(f.id); _vouch('factory', f); }   // v5.55 — vouch
       });
       if(dropIncIds.length){
         const rm = new Set(dropIncIds);
@@ -29169,6 +29211,29 @@ function runIntegrityChecks(){
     if(stamped > 0) findings.push(`Backfilled updatedAt on ${stamped} factory row(s) in an advanced state (revert-proofing)`);
   } catch(e){ console.warn('[check 15]', e); }
 
+  // ─── Check 15b (v5.55): dispatched records missing updatedAt ───
+  // ROOT CAUSE of the floor-flood class: _mergeUnits' dispatch-supersession guard
+  // explicitly skips dispatch records without a stamp ("legacy records never drop
+  // rows"), and dispatch-time unit tombstones prune after 60 days — so a ghost
+  // floor copy of any tub dispatched >60 days ago sailed straight through the
+  // merge. The dispatched array itself is permanent, so give every legacy record
+  // a stamp and the merge-level guard becomes permanent evidence too. Same
+  // doctrine as Check 15: backfill from the record's OWN dispatch date, NEVER
+  // "now" — end-of-day so the dispatch (the last event of that tub's floor life
+  // that day) outranks any same-day floor edit. Records with no date at all are
+  // left for Check 11d, which needs no stamp. Idempotent.
+  try {
+    let dStamped = 0;
+    (Array.isArray(dispatched) ? dispatched : []).forEach(d => {
+      if(!d || d.updatedAt) return;
+      const raw = d.dispatchDate || d.date || '';
+      if(!/^\d{4}-\d{2}-\d{2}/.test(String(raw))) return;   // no usable date → leave for 11d
+      d.updatedAt = String(raw).slice(0, 10) + 'T23:59:59.999Z';
+      dStamped++;
+    });
+    if(dStamped > 0) findings.push(`Backfilled updatedAt on ${dStamped} legacy dispatch record(s) — merge-level resurrection guard now covers them permanently`);
+  } catch(e){ console.warn('[check 15b]', e); }
+
   // ─── Check 16 (v5.31): FUTURE-STAMP QUARANTINE ───
   // A device with a fast clock stamps rows "in the future"; those rows then beat
   // every honest edit in last-edit-wins until the skew ages out (the ghost-revert:
@@ -29225,6 +29290,7 @@ function runIntegrityChecks(){
       const sn = String(f.sn).trim();
       if(_recvSns.has(sn) || _floorSns.has(sn)){
         console.warn('[check 17] retiring stuck factory row', { sn, state: f.trackingState, stamp: f.updatedAt || '(none)' });
+        _vouch('factory', f);   // v5.55 — arrival/floor evidence is authoritative
         factory.splice(i, 1);
         _retired++;
       }
@@ -29273,6 +29339,7 @@ function runIntegrityChecks(){
       for(const it of items){
         if(!Array.isArray(arr) || !arr[it.idx]) continue;
         console.warn('[check 18] retiring ' + coll + ' row (superseded by ' + it.winner + ')', { sn: it.sn, retiredStamp: it.stamp || '(none)', winnerStamp: it.winnerStamp });
+        _vouch(coll, arr[it.idx]);   // v5.55 — the reconciler's verdict is final; the guard must not veto it
         arr.splice(it.idx, 1); total++;
       }
     }
@@ -32297,6 +32364,25 @@ document.addEventListener('keydown', e=>{
       // only put back rows that nobody asked to remove.
       var keep = missing.filter(function(row){
         try {
+          // v5.55 — a removal vouched for by an authoritative check (dispatch
+          // evidence, exclusivity verdict, stamp-judged reconciliation) is final:
+          // never restore it. The guard exists ONLY for the lag-prone orphan
+          // checks, which don't vouch.
+          if (window.__aspAuthRemoved && window.__aspAuthRemoved.has(name + ':id:' + row.id)) return false;
+          // v5.55 — units & factory tombstone into cfg._deletedUnits and incoming
+          // into cfg._deletedIncoming, keyed 'sn:<sn>' (fallback 'id:<id>') — the
+          // exact keys _tombstoneUnitRow/_tombstoneFactoryRow/_tombstoneIncomingRow
+          // write. The old lookup used _TOMB_MAP (which has no entry for these
+          // three) and only ever tried 'id:' — so for units the guard restored
+          // EVERY deletion unconditionally, including the anti-resurrection check
+          // that keeps dispatched spas off the floor. That was the floor flood.
+          var direct = (name === 'units' || name === 'factory') ? '_deletedUnits'
+                     : (name === 'incoming') ? '_deletedIncoming' : null;
+          if (direct && typeof cfg !== 'undefined' && cfg && cfg[direct]){
+            var snStr = (row.sn != null) ? String(row.sn).trim() : '';
+            if (snStr && cfg[direct]['sn:' + snStr]) return false;   // tombstoned → real delete, stay deleted
+            if (cfg[direct]['id:' + row.id]) return false;
+          }
           if (typeof _TOMB_MAP === 'undefined') return true;
           var map = _TOMB_MAP[name];
           if (!map || !cfg || !cfg[map]) return true;
@@ -32574,6 +32660,254 @@ document.addEventListener('keydown', e=>{
   };
 
   console.log('[AspenIdHeal] ready — deterministic renumbering, runs at boot and after each merge');
+})();
+</script>
+
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     v5.56 AspenIdHealX — duplicate-id healing for units / factory / incoming /
+     dispatched (delete-block)
+
+     Same disease AspenIdHeal (v5.54) cured for marriages, same cure: `nid++`
+     on two offline devices mints the same id for two different rows; the
+     merges key by S/N, so both rows rightly survive — but every
+     `.find(x => x.id === id)` in the UI reaches only the first. Deleting or
+     tombstoning would kill both copies fleet-wide (tombstones are id-keyed).
+
+     THE FIX — CONVERGENT BY CONSTRUCTION (verbatim from AspenIdHeal):
+     the colliding row that was touched most recently keeps the id; every
+     other row in the group gets a new id derived deterministically from its
+     own merge identity (its S/N), so every device computes the same result
+     with no coordination, no delete, no tombstone, no race.
+
+     SCOPE GUARDRAILS (why this cannot break references):
+       · Only rows WITH an S/N are renumbered — a row's S/N is its merge
+         identity. S/N-less rows (accessories, material-units, pallets) are
+         exactly the ones other collections point at by id
+         (marriages.accessoryId, materials.linkedUnitId), so they are left
+         untouched and merely REPORTED by preview().
+       · Cross-collection references to spas travel by S/N (movements,
+         marriages.spaSn, dispatchRequests), so renumbering a spa row breaks
+         nothing.
+       · The one true id mirror — a queue row created from an incoming entry
+         (_fromIncoming shares the incoming id) — is renumbered in lockstep.
+
+     Runs at boot and after every merge, chained AFTER AspenIdHeal's hook.
+       AspenIdHealX.preview()  — what a run would do, plus unhealable dupes
+       AspenIdHealX.run()      — heal now
+     ═══════════════════════════════════════════════════════════════════════ -->
+<script>
+(function(){
+  if (window.__aspenIdHealXInstalled) return;
+  window.__aspenIdHealXInstalled = true;
+
+  var ID_BASE = 910000000000;   // distinct band from AspenIdHeal's 900000000000
+
+  function fnv1a(str){
+    var h = 2166136261;
+    str = String(str);
+    for (var i = 0; i < str.length; i++){ h ^= str.charCodeAt(i); h = (h * 16777619) >>> 0; }
+    return h;
+  }
+  function stableId(key){
+    return ID_BASE + (fnv1a(key) % 1000000) * 1000 + (fnv1a('salt|' + key) % 1000);
+  }
+  function snOf(r){ return (r && r.sn != null && String(r.sn).trim() !== '') ? String(r.sn).trim() : ''; }
+
+  // A row's merge identity. dispatched can hold the same S/N legitimately more
+  // than once (dispatched → returned → dispatched again), so its key includes
+  // the dispatch date + dealer to keep those episodes distinct.
+  var COLLS = [
+    { name:'units',      get:function(){ try { return (typeof units      !== 'undefined') ? units      : null; } catch(e){ return null; } },
+      key:function(r){ var s = snOf(r); return s ? ('u:' + s) : null; } },
+    { name:'factory',    get:function(){ try { return (typeof factory    !== 'undefined') ? factory    : null; } catch(e){ return null; } },
+      key:function(r){ var s = snOf(r); return s ? ('f:' + s) : null; } },
+    { name:'incoming',   get:function(){ try { return (typeof incoming   !== 'undefined') ? incoming   : null; } catch(e){ return null; } },
+      key:function(r){ var s = snOf(r); return s ? ('i:' + s) : null; },
+      repair:function(oldId, newId, row){
+        try {
+          // Only the mirror of THE renumbered row moves — match by id AND S/N.
+          // (Two colliding incoming rows share the old id; matching by id alone
+          // would drag the wrong mirror onto the new number.)
+          var s = snOf(row);
+          if (typeof queue !== 'undefined' && Array.isArray(queue)){
+            queue.forEach(function(q){ if (q && q._fromIncoming && q.id === oldId && snOf(q) === s) q.id = newId; });
+          }
+        } catch(e){}
+      } },
+    { name:'dispatched', get:function(){ try { return (typeof dispatched !== 'undefined') ? dispatched : null; } catch(e){ return null; } },
+      key:function(r){ var s = snOf(r); return s ? ('d:' + s + '|' + (r.dispatchDate || r.date || '') + '|' + (r.dealer || '')) : null; } }
+  ];
+
+  function healColl(c){
+    var A = c.get();
+    if (!Array.isArray(A) || !A.length) return { changed:0, detail:[] };
+    var groups = {}, taken = {};
+    A.forEach(function(r){ if (r && r.id != null){ (groups['id:'+r.id] = groups['id:'+r.id] || []).push(r); taken['id:'+r.id] = true; } });
+    var changed = 0, detail = [];
+    Object.keys(groups).forEach(function(gk){
+      var rows = groups[gk];
+      if (rows.length < 2) return;
+      // Same ordering doctrine as AspenIdHeal: the row the business actually
+      // touched keeps the id; key breaks ties identically on every device.
+      rows.sort(function(a, b){
+        var ua = (a && a.updatedAt) || '', ub = (b && b.updatedAt) || '';
+        if (ua && !ub) return -1;
+        if (ub && !ua) return 1;
+        if (ua !== ub) return ua > ub ? -1 : 1;
+        var ka = c.key(a) || '', kb = c.key(b) || '';
+        return ka < kb ? -1 : (ka > kb ? 1 : 0);
+      });
+      for (var i = 1; i < rows.length; i++){
+        var row = rows[i];
+        var key = c.key(row);
+        if (!key){ detail.push({ coll:c.name, id:row.id, sn:'(none)', accion:'sin S/N — no se toca (revisar a mano)' }); continue; }
+        var oldId = row.id;
+        var nid2 = stableId(key), guard = 0;
+        while (taken['id:'+nid2] && guard < 50){ nid2 = nid2 + 1; guard++; }
+        if (nid2 === oldId) continue;
+        row.id = nid2;
+        taken['id:'+nid2] = true;
+        try { row.updatedAt = (typeof editStamp === 'function') ? editStamp() : new Date().toISOString(); } catch(e){ row.updatedAt = new Date().toISOString(); }
+        if (typeof c.repair === 'function'){ try { c.repair(oldId, nid2, row); } catch(e){} }
+        changed++;
+        detail.push({ coll:c.name, from:oldId, to:nid2, sn:snOf(row) });
+      }
+    });
+    return { changed:changed, detail:detail };
+  }
+
+  function heal(){
+    var total = 0, all = [];
+    COLLS.forEach(function(c){
+      var r = healColl(c);
+      total += r.changed;
+      all = all.concat(r.detail.filter(function(d){ return d.from != null; }));
+    });
+    if (total){
+      try { if (window.AspenLocate) window.AspenLocate.invalidate(); } catch(e){}
+      try { if (typeof flushSave === 'function') flushSave(); else if (typeof saveState === 'function') saveState(); } catch(e){}
+      try { if (typeof updBadges === 'function') updBadges(); } catch(e){}
+      console.warn('[id-heal-x] renumbered ' + total + ' duplicate-id row(s):', all);
+    }
+    return { changed: total, detail: all };
+  }
+
+  try { setTimeout(heal, 1400); } catch(e){}   // boot pass, after AspenIdHeal's
+
+  try {
+    if (typeof window.fbApplyRemoteState === 'function' && !window.fbApplyRemoteState.__aspIdHealXWrapped){
+      var _apply = window.fbApplyRemoteState;
+      window.fbApplyRemoteState = function(){
+        var r = _apply.apply(this, arguments);
+        try { heal(); } catch(e){ console.warn('[id-heal-x post-merge]', e); }
+        return r;
+      };
+      window.fbApplyRemoteState.__aspIdHealXWrapped = true;
+    }
+  } catch(e){ console.warn('[id-heal-x hook]', e); }
+
+  window.AspenIdHealX = {
+    run: heal,
+    stableId: stableId,
+    preview: function(){
+      var out = [];
+      COLLS.forEach(function(c){
+        var A = c.get(); if (!Array.isArray(A)) return;
+        var g = {};
+        A.forEach(function(r){ if (r && r.id != null) (g['id:'+r.id] = g['id:'+r.id] || []).push(r); });
+        Object.keys(g).forEach(function(k){
+          if (g[k].length < 2) return;
+          g[k].forEach(function(r, i){
+            var key = c.key(r);
+            out.push({ coll:c.name, id:r.id, sn:snOf(r) || '(none)',
+                       accion: !key ? 'sin S/N — revisar a mano' : (i === 0 ? 'conserva su id' : ('-> ' + stableId(key))) });
+          });
+        });
+      });
+      return out;
+    }
+  };
+
+  console.log('[AspenIdHealX] ready — duplicate-id healing now covers units, factory, incoming and dispatched');
+})();
+</script>
+
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     v5.55 AspenGhostAudit — dispatched-vs-floor cross report (delete-block)
+
+     Answers "which tubs on the floor already LEFT?" against the live data:
+       AspenGhostAudit.report()   console.table of every floor row whose S/N
+                                  also has a dispatch record — dealer, dispatch
+                                  date, both stamps, verdict (GHOST / returned)
+       AspenGhostAudit.purge()    removes every GHOST row, tombstones it (so
+                                  the deletion propagates fleet-wide) and logs
+                                  a 601-style note. Confirm-gated. Check 11d
+                                  does the same automatically at boot/merge —
+                                  this is the immediate, visible version.
+     Read-only unless purge() is called. Safe to delete this whole block.
+     ═══════════════════════════════════════════════════════════════════════ -->
+<script>
+(function(){
+  if (window.AspenGhostAudit) return;
+
+  function rows(){
+    var out = [];
+    try {
+      var newest = {};   // sn → freshest non-null dispatch record
+      (Array.isArray(dispatched) ? dispatched : []).forEach(function(d){
+        if(!d || d.sn == null || String(d.sn).trim() === '') return;
+        var k = String(d.sn).trim(), cur = newest[k];
+        if(!cur || String(d.updatedAt || '') > String(cur.updatedAt || '')) newest[k] = d;
+      });
+      (Array.isArray(units) ? units : []).forEach(function(u){
+        if(!u || u.sn == null || String(u.sn).trim() === '') return;
+        var d = newest[String(u.sn).trim()];
+        if(!d) return;
+        var returned = d.deliveryStatus === 'returned';
+        out.push({
+          sn: String(u.sn).trim(), pos: u.pos || '—', floorStamp: u.updatedAt || '(none)',
+          dealer: d.dealer || '', dispatchDate: d.dispatchDate || d.date || '(none)',
+          dispatchStamp: d.updatedAt || '(none)',
+          verdict: returned ? 'OK — marked returned' : 'GHOST — dispatched but still on the floor'
+        });
+      });
+    } catch(e){ console.warn('[ghost-audit]', e); }
+    return out;
+  }
+
+  window.AspenGhostAudit = {
+    report: function(){
+      var r = rows(), g = r.filter(function(x){ return x.verdict.indexOf('GHOST') === 0; });
+      try { console.table(r); } catch(e){ console.log(r); }
+      console.log('[ghost-audit] ' + g.length + ' ghost(s) among ' + r.length + ' floor rows with a dispatch record · units total: ' + units.length);
+      return r;
+    },
+    purge: function(){
+      if (typeof canEdit === 'function' && !canEdit()){ console.warn('[ghost-audit] view-only role'); return 0; }
+      var g = rows().filter(function(x){ return x.verdict.indexOf('GHOST') === 0; });
+      if (!g.length){ console.log('[ghost-audit] floor is clean — nothing to purge'); return 0; }
+      if (!confirm('Remove ' + g.length + ' ghost tub(s) from the floor?\nEach removal is tombstoned so it propagates to every device.')) return 0;
+      var gone = new Set(g.map(function(x){ return x.sn; }));
+      var removed = 0;
+      units = units.filter(function(u){
+        if(u && u.sn != null && gone.has(String(u.sn).trim())){
+          try { if(typeof _tombstoneUnitRow === 'function') _tombstoneUnitRow(u); } catch(e){}
+          removed++; return false;
+        }
+        return true;
+      });
+      try { if(typeof addAct === 'function') addAct('🧹 Ghost audit: purged ' + removed + ' dispatched tub(s) still shown on the floor', 'var(--red)'); } catch(e){}
+      try { saveState(); } catch(e){}
+      try { if(typeof drawMap === 'function') drawMap(); } catch(e){}
+      try { if(typeof updBadges === 'function') updBadges(); } catch(e){}
+      try { if(typeof renderMobileFloorFinder === 'function') renderMobileFloorFinder(''); } catch(e){}
+      try { if(window.AspenLocate) window.AspenLocate.invalidate(); } catch(e){}
+      console.log('[ghost-audit] purged ' + removed + ' ghost(s) — tombstoned, will sync out');
+      return removed;
+    }
+  };
+
+  console.log('[AspenGhostAudit] ready — AspenGhostAudit.report() compares the dispatch log against the floor');
 })();
 </script>
 
