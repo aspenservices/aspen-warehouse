@@ -4756,7 +4756,7 @@ let _fbInitAttempts = 0;
 //   /app_version/current  (in Firebase console, manually, OR call
 //   pushVersionToFirebase() from the Admin console at deploy time)
 // ══════════════════════════════════════════════════════════════════
-const APP_VERSION = 'v5.59';
+const APP_VERSION = 'v5.60';
 // v5.23 (#1): paste your reCAPTCHA v3 site key here AFTER enabling App Check in
 // the Firebase console (Build → App Check → Register app → reCAPTCHA v3). Until
 // then it stays '', everything works exactly as before.
@@ -30685,7 +30685,12 @@ document.addEventListener('keydown', e=>{
     for(const c of cands){ try { c.st = JSON.parse(c.raw); c.total = (c.st.factory||[]).length + (c.st.units||[]).length + (c.st.marriages||[]).length; } catch(e){ c.bad = true; } }
     const valid = cands.filter(c => !c.bad && c.total > 0);
     if(!valid.length){ alert('No snapshot has data.'); return; }
-    valid.sort((a,b) => (b.total - a.total) || (b.ts - a.ts));
+    // v5.60 — RANK BY RECENCY, NOT SIZE. The old (b.total - a.total) ranking
+    // crowned the FATTEST snapshot as "BEST" — i.e. the oldest pre-cleanup
+    // state with every ghost still inside always beat the current clean state,
+    // which has fewer rows BECAUSE deletions are legitimate business facts.
+    // Pressing this during a data-loss scare mass-resurrected the floor.
+    valid.sort((a,b) => (b.ts - a.ts) || (b.total - a.total));
     const best = valid[0];
     if(!confirm(`🏆 BEST\n\n${best.src}\n${new Date(best.ts).toLocaleString('en-US')}\n\nFactory: ${(best.st.factory||[]).length}\nUnits: ${(best.st.units||[]).length}\nMarriages: ${(best.st.marriages||[]).length}\n\nRestore?`)) return;
     _bypassNextSafePull = true; _bypassNextSafePush = true;
@@ -32863,50 +32868,39 @@ document.addEventListener('keydown', e=>{
 </script>
 
 <!-- ═══════════════════════════════════════════════════════════════════════════
-     v5.59 AspenElderCleanup — ONE-SHOT auto-repair of evidence-less elder
-     ghosts (delete-block)
+     v5.60 AspenElderCleanup — RECURRING sweep of evidence-less elder ghosts
+     (delete-block; replaces the v5.59 one-shot)
 
-     THE RESIDUE THIS CURES
-     The jul-2026 flood resurrected floor rows so old that every form of
-     evidence had expired: no dispatch record (created before the log, or
-     bulk-cleaned in ways that left none) and no live tombstone (the old
-     60-day TTL). The automatic checks rightly refuse to delete without
-     evidence — so this module MANUFACTURES the evidence from the one source
-     left: the data profile itself, encoded with the owner's verdict that
-     these tubs are not physically present.
+     WHY THE v5.59 ONE-SHOT FAILED IN PRODUCTION (both lessons encoded here):
+       1. It trusted updatedAt as "a human recently handled this tub → real".
+          False: boot normalizers, checks and heals re-stamp rows across
+          sessions, so machine writes wear a human disguise. updatedAt is NOT
+          usable evidence for this decision — the gate is GONE.
+       2. It burned a one-shot cfg flag on that crippled first pass, locking
+          itself out fleet-wide. There is no flag anymore: the sweep is
+          idempotent by construction — everything it moves gains a Dispatch
+          Log record, and rows with ANY dispatch record are outside its
+          jurisdiction forever after.
 
-     WHAT IT DOES (once, fleet-wide, cfg-flagged)
-     For every floor spa that is ALL of:
-       · entry date parseable and older than 400 days
-       · untouched for 180+ days (updatedAt absent or stale — anything a
-         human placed, moved, or edited recently is skipped)
-       · has NO dispatch record at all (a 'returned' record = proof it came
-         back = REAL, skipped)
-       · has no inbound stock movement in the last 180 days
-     …it does NOT delete. It writes a clearly-labeled record into the
-     Dispatch Log (dealer: "⚠ AUTO-CLEANUP — elder ghost") and removes the
-     floor copy with a PERMANENT tombstone. Three birds:
-       1. the floor is clean immediately;
-       2. the record IS permanent evidence — if any stale device re-sends
-          the row in 2029, Check 11d executes it on arrival, forever;
-       3. any mistake is one click: the record sits in the Dispatch Log
-          with the normal ↩ Return button, which restores the tub through
-          the standard flow.
-     One-shot by design: from v5.58 on, every removal leaves permanent
-     evidence, so this class of evidence-less residue can never form again —
-     a recurring version would eventually eat real slow-moving stock.
-     Deleting this whole block is a safe no-op revert (the flag just stays).
+     STANDING BUSINESS RULE (owner's verdict, encoded):
+       a spa sitting on the floor map for 400+ days with ZERO paper trail —
+       no dispatch record of any kind, no inbound stock movement in 180 days —
+       is presumed not physically present. It is MOVED (never deleted) to the
+       Dispatch Log as "⚠ AUTO-CLEANUP — elder ghost", with a permanent
+       tombstone. One click on ↩ Return restores a false positive AND writes
+       the paper trail ('returned') that makes it immune to the sweep forever.
+
+     Runs at boot and again after every remote merge, so a stale device or a
+     fat old snapshot that re-injects elders is cleaned within seconds — the
+     floor converges to clean automatically, with no human step.
+     Deleting this whole block is a safe revert.
      ═══════════════════════════════════════════════════════════════════════ -->
 <script>
 (function(){
   if (window.__aspenElderCleanupInstalled) return;
   window.__aspenElderCleanupInstalled = true;
 
-  var ELDER_DAYS = 400, TOUCH_DAYS = 180, FLAG = '_elderCleanup2026Jul';
-  // Boot normalizers (stack/level assignment, migrations) re-stamp rows they
-  // touch — a machine stamp from THIS page load must not masquerade as a human
-  // keeping the tub alive. Only touches from BEFORE this session count.
-  var _bootT = Date.now() - 10000;
+  var ELDER_DAYS = 400, LEDGER_DAYS = 180;
 
   function candidates(){
     var now = Date.now();
@@ -32921,36 +32915,35 @@ document.addEventListener('keydown', e=>{
         (Array.isArray(movements) ? movements : []).forEach(function(mv){
           if (!mv || mv.sn == null) return;
           var t = Date.parse(mv.at || mv.date || '');
-          if (isNaN(t) || (now - t) > TOUCH_DAYS * 864e5) return;
+          if (isNaN(t) || (now - t) > LEDGER_DAYS * 864e5) return;
           var mt = (typeof MOVEMENT_TYPES !== 'undefined' && MOVEMENT_TYPES[mv.type]) || null;
           if (mt && mt.dir === 'in') recentIn[String(mv.sn).trim()] = 1;
         });
       } catch(e){}
       (Array.isArray(units) ? units : []).forEach(function(u){
         if (!u || u.sn == null || String(u.sn).trim() === '') return;
-        if (['hot','swim','extra'].indexOf(u.type) < 0) return;      // spas only — materials/misc live long legitimately
+        if (['hot','swim','extra'].indexOf(u.type) < 0) return;      // spas only
         var sn = String(u.sn).trim();
         var entryT = Date.parse(u.entry || '');
         if (isNaN(entryT) || (now - entryT) < ELDER_DAYS * 864e5) return;
-        var touchT = Date.parse(u.updatedAt || '');
-        if (!isNaN(touchT) && touchT < _bootT && (now - touchT) < TOUCH_DAYS * 864e5) return;   // recently handled by a HUMAN (pre-boot stamp) → real; boot-generated stamps don't count
-        if (hasDisp[sn]) return;                                     // any dispatch record → Check 11d's jurisdiction (or returned → real)
-        if (recentIn[sn]) return;                                    // recently received per the ledger → real
+        if (hasDisp[sn]) return;      // ANY dispatch record → outside our jurisdiction ('returned' = immune; AUTO-CLEANUP = Check 11d owns it)
+        if (recentIn[sn]) return;     // received per the ledger recently → real
         out.push(u);
       });
-    } catch(e){ console.warn('[elder-cleanup]', e); }
+    } catch(e){ console.warn('[elder-sweep]', e); }
     return out;
   }
 
+  var _busy = false;
   function run(){
+    if (_busy) return;
+    _busy = true;
     try {
-      if (typeof cfg === 'undefined' || !cfg) return;
-      if (cfg[FLAG]) return;                                         // already done somewhere in the fleet
+      if (typeof units === 'undefined' || typeof dispatched === 'undefined') return;
       var ghosts = candidates();
-      cfg[FLAG] = (typeof editStamp === 'function') ? editStamp() : new Date().toISOString();
-      if (!ghosts.length){ try { saveState(); } catch(e){} console.log('[elder-cleanup] nothing to repair — flag set'); return; }
+      if (!ghosts.length) return;
       var today = (typeof toISO === 'function') ? toISO() : new Date().toISOString().slice(0,10);
-      var base = Date.now() * 1000;                                  // same uniqueness pattern the app uses for events
+      var base = Date.now() * 1000;
       var moved = [];
       ghosts.forEach(function(u, i){
         var rec = {
@@ -32959,7 +32952,7 @@ document.addEventListener('keydown', e=>{
           originalPos: u.pos, entryDate: u.entry || '—',
           dispatchDate: today, dispatchTime: '', authorizedBy: 'system',
           deliveryStatus: 'delivered',
-          notes: 'jul-2026 flood cleanup: on the floor map ' + (u.entry || '?') + ' → today with no dispatch record, no tombstone, no recent activity. Not physically present per owner. If this tub IS real, press ↩ Return to restore it.'
+          notes: 'Standing rule: on the floor map since ' + (u.entry || '?') + ' with no dispatch record and no recent stock movement — presumed not physically present. If this tub IS real, press ↩ Return: it comes back to the floor and becomes permanently immune to this sweep.'
         };
         dispatched.unshift((typeof _born === 'function') ? _born(rec) : rec);
         try { if (typeof _tombstoneUnitRow === 'function') _tombstoneUnitRow(u); } catch(e){}
@@ -32968,30 +32961,44 @@ document.addEventListener('keydown', e=>{
       var gone = new Set(ghosts.map(function(u){ return u.id; }));
       units = units.filter(function(u){ return !(u && gone.has(u.id)); });
       try { console.table(moved); } catch(e){}
-      console.warn('[elder-cleanup] moved ' + moved.length + ' evidence-less elder(s) to the Dispatch Log (AUTO-CLEANUP) — reversible via ↩ Return');
-      try { if (typeof addAct === 'function') addAct('🧹 Auto-cleanup: ' + moved.length + ' tina(s) antiguas sin evidencia movidas al Dispatch Log — usa ↩ Return si alguna es real', 'var(--red)'); } catch(e){}
+      console.warn('[elder-sweep] moved ' + moved.length + ' evidence-less elder(s) to the Dispatch Log — reversible via ↩ Return');
+      try { if (typeof addAct === 'function') addAct('🧹 Elder sweep: ' + moved.length + ' tina(s) de 400+ días sin evidencia movidas al Dispatch Log — ↩ Return si alguna es real', 'var(--red)'); } catch(e){}
       try { if (typeof flushSave === 'function') flushSave(); else saveState(); } catch(e){}
       try { if (typeof fbForcePush === 'function') fbForcePush(); } catch(e){}
       try { if (typeof drawMap === 'function') drawMap(); } catch(e){}
       try { if (typeof updBadges === 'function') updBadges(); } catch(e){}
       try { if (window.AspenLocate) window.AspenLocate.invalidate(); } catch(e){}
-    } catch(e){ console.warn('[elder-cleanup run]', e); }
+    } catch(e){ console.warn('[elder-sweep run]', e); }
+    finally { _busy = false; }
   }
 
-  try { setTimeout(run, 2600); } catch(e){}   // after boot checks + both id-heal passes
+  try { setTimeout(run, 2600); } catch(e){}   // boot pass, after checks + heals
+
+  // After every remote merge — a stale device or fat old snapshot that
+  // re-injects elders is cleaned within seconds, automatically.
+  try {
+    if (typeof window.fbApplyRemoteState === 'function' && !window.fbApplyRemoteState.__aspElderSweepWrapped){
+      var _apply = window.fbApplyRemoteState;
+      window.fbApplyRemoteState = function(){
+        var r = _apply.apply(this, arguments);
+        try { setTimeout(run, 400); } catch(e){}
+        return r;
+      };
+      window.fbApplyRemoteState.__aspElderSweepWrapped = true;
+    }
+  } catch(e){ console.warn('[elder-sweep hook]', e); }
 
   window.AspenElderCleanup = {
     run: run,
     preview: function(){
-      var c = candidates().map(function(u){ return { sn: u.sn, pos: u.pos || '—', entry: u.entry || '', updatedAt: u.updatedAt || '(none)', dealer: u.dealer || '' }; });
+      var c = candidates().map(function(u){ return { sn: u.sn, pos: u.pos || '—', entry: u.entry || '', dealer: u.dealer || '' }; });
       try { console.table(c); } catch(e){ console.log(c); }
-      console.log('[elder-cleanup] ' + c.length + ' candidate(s)' + (cfg && cfg[FLAG] ? ' · already ran (' + cfg[FLAG] + ') — use run() only if you cleared the flag' : ''));
+      console.log('[elder-sweep] ' + c.length + ' candidate(s) right now');
       return c;
-    },
-    reset: function(){ try { if (cfg){ delete cfg[FLAG]; saveState(); console.log('[elder-cleanup] flag cleared — will run again next boot'); } } catch(e){} }
+    }
   };
 
-  console.log('[AspenElderCleanup] armed — one-shot repair of evidence-less elders, reversible via Dispatch Log ↩ Return');
+  console.log('[AspenElderCleanup] recurring sweep armed — evidence-less 400d+ elders auto-move to the Dispatch Log (↩ Return restores + immunizes)');
 })();
 </script>
 
