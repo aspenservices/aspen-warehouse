@@ -4756,7 +4756,7 @@ let _fbInitAttempts = 0;
 //   /app_version/current  (in Firebase console, manually, OR call
 //   pushVersionToFirebase() from the Admin console at deploy time)
 // ══════════════════════════════════════════════════════════════════
-const APP_VERSION = 'v5.56';
+const APP_VERSION = 'v5.58';
 // v5.23 (#1): paste your reCAPTCHA v3 site key here AFTER enabling App Check in
 // the Firebase console (Build → App Check → Register app → reCAPTCHA v3). Until
 // then it stays '', everything works exactly as before.
@@ -6410,13 +6410,38 @@ let _lastMapMergeKept = 0;
 // the orchestrator re-pushes the merged state when we contributed records the
 // incoming state lacked.
 
-// Tombstone writers — mirror _tombstoneFactoryRow: same cfg map style, 60-day prune.
+// Tombstone writers — same cfg map style. Identity maps (units/incoming) are PERMANENT (see _tombCompact); ephemeral maps keep a 60-day TTL.
+// ═══ v5.58 — DELETION IS A PERMANENT BUSINESS FACT ═══════════════════════════
+// The identity tombstone maps (_deletedUnits, _deletedIncoming — keyed by S/N)
+// are the ONLY evidence that a manually-removed tub is gone. Any age-based
+// expiry, however long, reopens the resurrection hole the day it lapses: a
+// device or backup older than the window re-sends the row and no rule can
+// condemn it. So these maps never expire by age. The safety valve is by SIZE:
+// ~45 bytes/entry × 4000 cap ≈ 180 KB, reached only after ~a decade of
+// removals — and if the cap is ever hit, the entries dropped are the OLDEST,
+// which by then are overwhelmingly backed by the (permanent) dispatch log.
+// Ephemeral id-keyed maps (queue, event groups, materials…) keep their short
+// TTLs — they are workflow residue, not identity evidence.
+function _tombCompact(map, cap){
+  try{
+    if(!map) return;
+    const _cap = cap || 4000;
+    const keys = Object.keys(map);
+    if(keys.length <= _cap) return;
+    keys.sort((a, b) => (map[a] < map[b] ? -1 : 1));   // oldest stamp first
+    const excess = keys.length - _cap;
+    for(let i = 0; i < excess; i++) delete map[keys[i]];
+    console.warn('[tombstone compact] size cap ' + _cap + ' reached — dropped ' + excess + ' oldest entr' + (excess > 1 ? 'ies' : 'y'));
+  }catch(e){}
+}
+window._tombCompact = _tombCompact;
+
 function _tombstoneEventGroup(gid){
   if(gid == null) return;
   try{
     cfg._deletedEventGroups = cfg._deletedEventGroups || {};
     cfg._deletedEventGroups[String(gid)] = editStamp();
-    const _cut = new Date(Date.now() - 60*864e5).toISOString();
+    const _cut = new Date(Date.now() - 60*864e5).toISOString();   // v5.58 — ephemeral workflow map: short TTL is correct here
     for(const k in cfg._deletedEventGroups){ if(cfg._deletedEventGroups[k] < _cut) delete cfg._deletedEventGroups[k]; }
   }catch(e){ console.warn('[event tombstone]', e); }
 }
@@ -6427,7 +6452,7 @@ function _tombstoneQueueItem(id){
   try{
     cfg._deletedQueueIds = cfg._deletedQueueIds || {};
     cfg._deletedQueueIds[String(id)] = editStamp();
-    const _cut = new Date(Date.now() - 60*864e5).toISOString();
+    const _cut = new Date(Date.now() - 60*864e5).toISOString();   // v5.58 — ephemeral workflow map: short TTL is correct here
     for(const k in cfg._deletedQueueIds){ if(cfg._deletedQueueIds[k] < _cut) delete cfg._deletedQueueIds[k]; }
   }catch(e){ console.warn('[queue tombstone]', e); }
 }
@@ -15476,9 +15501,7 @@ function rmUnit(id){
     cfg._deletedUnits = cfg._deletedUnits || {};
     const _tk = (u.sn != null && String(u.sn).trim() !== '') ? ('sn:' + String(u.sn).trim()) : ('id:' + u.id);
     cfg._deletedUnits[_tk] = editStamp();
-    // Prune tombstones older than 60 days so cfg can't grow without bound.
-    const _cut = new Date(Date.now() - 60*864e5).toISOString();
-    for(const k in cfg._deletedUnits){ if(cfg._deletedUnits[k] < _cut) delete cfg._deletedUnits[k]; }
+    _tombCompact(cfg._deletedUnits);   // v5.58 — PERMANENT: a deletion is a business fact like a dispatch; size-capped, never age-expired
   } catch(e){ console.warn('[tombstone write]', e); }
   units.filter(x => !(x.id!==id)).forEach(_tombstoneUnitRow);   // v5.41
   units=units.filter(x=>x.id!==id);
@@ -24247,8 +24270,7 @@ function _tombstoneIncomingRow(it){
     const snStr = (it.sn != null) ? String(it.sn).trim() : '';
     const _tk = (snStr !== '') ? ('sn:' + snStr) : ('id:' + it.id);
     cfg._deletedIncoming[_tk] = editStamp();
-    const _cut = new Date(Date.now() - 60*864e5).toISOString();
-    for(const k in cfg._deletedIncoming){ if(cfg._deletedIncoming[k] < _cut) delete cfg._deletedIncoming[k]; }
+    _tombCompact(cfg._deletedIncoming);   // v5.58 — PERMANENT (see _tombCompact)
   }catch(e){ console.warn('[incoming tombstone write]', e); }
 }
 window._tombstoneIncomingRow = _tombstoneIncomingRow;
@@ -24260,8 +24282,7 @@ function _tombstoneUnitRow(u){
     const snStr = (u.sn != null) ? String(u.sn).trim() : '';
     const _tk = (snStr !== '') ? ('sn:' + snStr) : ('id:' + u.id);
     cfg._deletedUnits[_tk] = editStamp();
-    const _cut = new Date(Date.now() - 60*864e5).toISOString();
-    for(const k in cfg._deletedUnits){ if(cfg._deletedUnits[k] < _cut) delete cfg._deletedUnits[k]; }
+    _tombCompact(cfg._deletedUnits);   // v5.58 — PERMANENT: a deletion is a business fact like a dispatch; size-capped, never age-expired
   }catch(e){ console.warn('[unit tombstone write]', e); }
 }
 window._tombstoneUnitRow = _tombstoneUnitRow;
@@ -24278,8 +24299,7 @@ function _tombstoneFactoryRow(f){
     cfg._deletedUnits = cfg._deletedUnits || {};
     const _tk = (snStr !== '') ? ('sn:' + snStr) : ('id:' + f.id);
     cfg._deletedUnits[_tk] = editStamp();
-    const _cut = new Date(Date.now() - 60*864e5).toISOString();
-    for(const k in cfg._deletedUnits){ if(cfg._deletedUnits[k] < _cut) delete cfg._deletedUnits[k]; }
+    _tombCompact(cfg._deletedUnits);   // v5.58 — PERMANENT: a deletion is a business fact like a dispatch; size-capped, never age-expired
   }catch(e){ console.warn('[factory tombstone write]', e); }
 }
 window._tombstoneFactoryRow = _tombstoneFactoryRow;
@@ -24364,9 +24384,7 @@ function rmFromFactory(id){
       cfg._deletedUnits = cfg._deletedUnits || {};
       const _tk = (snStr !== '') ? ('sn:' + snStr) : ('id:' + f.id);
       cfg._deletedUnits[_tk] = editStamp();
-      // Prune tombstones older than 60 days so cfg can't grow without bound.
-      const _cut = new Date(Date.now() - 60*864e5).toISOString();
-      for(const k in cfg._deletedUnits){ if(cfg._deletedUnits[k] < _cut) delete cfg._deletedUnits[k]; }
+      _tombCompact(cfg._deletedUnits);   // v5.58 — PERMANENT: a deletion is a business fact like a dispatch; size-capped, never age-expired
     }
   } catch(e){ console.warn('[factory tombstone write]', e); }
   factory.filter(x => !(x.id !== id)).forEach(_tombstoneFactoryRow);   // v5.41
@@ -28852,10 +28870,22 @@ function runIntegrityChecks(){
     check(marriages, 'marriages');
     check(dispatchRequests, 'dispatchRequests');
     if(dupes.length) findings.push(`⚠ Duplicate IDs detected (manual review needed): ${dupes.slice(0, 5).join(', ')}${dupes.length > 5 ? ' …':''}`);
-    // Advance nid past the highest seen id so new items get fresh IDs
+    // Advance nid past the highest seen id so new items get fresh IDs.
+    // v5.57 — IGNORE the healed-id bands (AspenIdHeal 900B, AspenIdHealX 910B):
+    // those ids are deterministic hashes, not counter output. Chasing them
+    // poisoned nid INTO the band — and since every device computes the same
+    // maximum from the same synced data, every device landed on the SAME next
+    // id: a guaranteed fleet-wide collision on the next created row, the very
+    // disease the healers exist to cure. The counter tracks ordinary ids only;
+    // if it already jumped into the band, pull it back down — computed from
+    // the same data everywhere, so the repair itself converges.
+    const HEAL_BAND = 900000000000;
     let maxId = 0;
-    [factory, units, dispatched, incoming, materials, marriages, dispatchRequests].forEach(arr => arr.forEach(x => { if(x && typeof x.id === 'number' && x.id > maxId) maxId = x.id; }));
-    if(maxId >= nid){
+    [factory, units, dispatched, incoming, materials, marriages, dispatchRequests].forEach(arr => arr.forEach(x => { if(x && typeof x.id === 'number' && x.id < HEAL_BAND && x.id > maxId) maxId = x.id; }));
+    if(typeof nid === 'number' && nid >= HEAL_BAND){
+      nid = maxId + 1;
+      findings.push(`Pulled nid counter back out of the healed-id band → ${nid}`);
+    } else if(maxId >= nid){
       nid = maxId + 1;
       findings.push(`Advanced nid counter to ${nid} (past highest seen id ${maxId})`);
     }
@@ -32876,6 +32906,57 @@ document.addEventListener('keydown', e=>{
   }
 
   window.AspenGhostAudit = {
+    // v5.57 — floor rows the automatic checks CANNOT condemn: no dispatch
+    // record and no live tombstone (removed so long ago the tombstone expired,
+    // or dispatched before the log existed). These need a HUMAN verdict — the
+    // code refuses to delete without evidence; that refusal is what makes it
+    // safe. elders() lists them oldest-first; walk the floor, then purge what
+    // is physically gone with purgeSns([...]). Each purge is tombstoned (400d
+    // retention now), so the verdict propagates and sticks fleet-wide.
+    elders: function(days){
+      var minDays = (typeof days === 'number' ? days : 365);
+      var cut = Date.now() - minDays * 864e5;
+      var withDisp = {};
+      try { (Array.isArray(dispatched) ? dispatched : []).forEach(function(d){ if(d && d.sn != null) withDisp[String(d.sn).trim()] = 1; }); } catch(e){}
+      var out = [];
+      try {
+        (Array.isArray(units) ? units : []).forEach(function(u){
+          if(!u || u.sn == null || String(u.sn).trim() === '') return;
+          var t = Date.parse(u.entry || '');
+          if(isNaN(t) || t > cut) return;
+          out.push({ sn: String(u.sn).trim(), pos: u.pos || '—', dealer: u.dealer || '', entry: u.entry || '',
+                     days: Math.round((Date.now() - t) / 864e5),
+                     dispatchRecord: withDisp[String(u.sn).trim()] ? 'yes (returned?)' : 'NONE — human verdict needed' });
+        });
+      } catch(e){ console.warn('[ghost-audit elders]', e); }
+      out.sort(function(a, b){ return b.days - a.days; });
+      try { console.table(out); } catch(e){ console.log(out); }
+      console.log('[ghost-audit] ' + out.length + ' floor row(s) older than ' + minDays + ' days — verify physically, then AspenGhostAudit.purgeSns([\'sn\', ...]) for the ones that are gone');
+      return out;
+    },
+    purgeSns: function(snList){
+      if (typeof canEdit === 'function' && !canEdit()){ console.warn('[ghost-audit] view-only role'); return 0; }
+      if (!Array.isArray(snList) || !snList.length){ console.warn('[ghost-audit] pass an array of serial numbers'); return 0; }
+      var want = new Set(snList.map(function(s){ return String(s).trim(); }));
+      var hit = units.filter(function(u){ return u && u.sn != null && want.has(String(u.sn).trim()); });
+      if (!hit.length){ console.log('[ghost-audit] none of those serials are on the floor'); return 0; }
+      if (!confirm('Remove ' + hit.length + ' tub(s) from the floor?\n' + hit.map(function(u){ return u.sn + ' @ ' + (u.pos || '?'); }).join('\n') + '\nEach removal is tombstoned (400-day retention) so it propagates and sticks.')) return 0;
+      var removed = 0;
+      units = units.filter(function(u){
+        if(u && u.sn != null && want.has(String(u.sn).trim())){
+          try { if(typeof _tombstoneUnitRow === 'function') _tombstoneUnitRow(u); } catch(e){}
+          removed++; return false;
+        }
+        return true;
+      });
+      try { if(typeof addAct === 'function') addAct('🧹 Ghost audit: purged ' + removed + ' unit(s) after physical verification', 'var(--red)'); } catch(e){}
+      try { saveState(); } catch(e){}
+      try { if(typeof drawMap === 'function') drawMap(); } catch(e){}
+      try { if(typeof updBadges === 'function') updBadges(); } catch(e){}
+      try { if(window.AspenLocate) window.AspenLocate.invalidate(); } catch(e){}
+      console.log('[ghost-audit] purged ' + removed + ' unit(s) — tombstoned for 400 days, syncing out');
+      return removed;
+    },
     report: function(){
       var r = rows(), g = r.filter(function(x){ return x.verdict.indexOf('GHOST') === 0; });
       try { console.table(r); } catch(e){ console.log(r); }
