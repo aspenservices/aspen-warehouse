@@ -4756,7 +4756,7 @@ let _fbInitAttempts = 0;
 //   /app_version/current  (in Firebase console, manually, OR call
 //   pushVersionToFirebase() from the Admin console at deploy time)
 // ══════════════════════════════════════════════════════════════════
-const APP_VERSION = 'v5.70';
+const APP_VERSION = 'v5.71';
 // v5.23 (#1): paste your reCAPTCHA v3 site key here AFTER enabling App Check in
 // the Firebase console (Build → App Check → Register app → reCAPTCHA v3). Until
 // then it stays '', everything works exactly as before.
@@ -7875,7 +7875,8 @@ function fbRerenderActiveView(){
   // all render functions exist for all roles, and they're defined in different scopes.
   const renderMap = {
     'view-dashboard': () => updBadges?.(),
-    'view-map': () => { try{drawMap?.();}catch(e){} try{renderQueue?.();}catch(e){} try{renderMobileFloorFinder?.(document.getElementById('mob-floor-search')?.value || '');}catch(e){} },
+    'view-map': () => { if(typeof _deferRedraw === 'function' && _deferRedraw()) return;   // v5.71 — no rebuild mid-drag
+                        try{drawMap?.();}catch(e){} try{renderQueue?.();}catch(e){} try{renderMobileFloorFinder?.(document.getElementById('mob-floor-search')?.value || '');}catch(e){} },
     'view-schedule': () => { try{renderCal?.();}catch(e){} },
     'view-incoming': () => renderIncoming?.(),
     'view-truck': () => renderTruck?.(),
@@ -8551,7 +8552,7 @@ function partnerCell(pos){
 // into one wider "swim spa zone".
 function swimPairOwnerOf(pos){
   // Is there a swim spa at this exact pos?
-  if(units.some(u => u.pos === pos && u.type === 'swim')) return pos;
+  if(unitsAt(pos).some(u => u.type === 'swim')) return pos;   // v5.71 — índice O(1) en vez de recorrer las 266 tinas por celda
   // Is this the right-half of a pair?
   const p = parsePos(pos);
   if(!p.valid || p.rowKey.startsWith('15')) return null;
@@ -8620,6 +8621,40 @@ let nid = 1000;
 let filt = 'all';
 let selPos = null;
 let dragUnit = null;
+
+// ═══ v5.71 — DON'T REBUILD THE FLOOR WHILE THE USER IS DRAGGING ════════════
+// drawMap() does `floor.innerHTML = ''` and rebuilds every cell. A sync landing
+// mid-drag therefore destroyed the very elements the drag was using: the drop
+// then fired on a detached node and the tub silently did not move. That is the
+// intermittent "sometimes it doesn't move" — it only happens when a remote
+// update arrives inside the second or two you are holding the tub.
+// Remote-driven redraws are now deferred until the drag ends. The drop's own
+// redraw is never deferred: that one is the user's action completing.
+let _dragActive = false, _redrawPending = false;
+function _beginDrag(){ _dragActive = true; }
+function _endDrag(){
+  _dragActive = false;
+  if(_redrawPending){
+    _redrawPending = false;
+    try { drawMap(); } catch(e){}
+    try { updBadges(); } catch(e){}
+  }
+}
+// True when a redraw should be held back (and remembered for later).
+function _deferRedraw(){
+  if(!_dragActive) return false;
+  _redrawPending = true;
+  return true;
+}
+window._beginDrag = _beginDrag; window._endDrag = _endDrag;
+// Safety net: if a drop never fires (dragged off-window, cancelled), the flag
+// must not stay stuck or the floor would stop updating entirely.
+try {
+  document.addEventListener('dragend', () => _endDrag(), true);
+  document.addEventListener('drop', () => setTimeout(_endDrag, 0), true);
+  document.addEventListener('mouseup', () => { if(_dragActive) setTimeout(_endDrag, 0); }, true);
+  document.addEventListener('touchend', () => { if(_dragActive) setTimeout(_endDrag, 0); }, true);
+} catch(e){}
 let matPhotoData = null;
 let calYear = new Date().getFullYear();
 let calMonth = new Date().getMonth();
@@ -10836,7 +10871,7 @@ function cellStacks(pos){
   // Normal cell: one stack, up to 3 hot tubs high
   const stack = Array(MAX_LEVELS_HOT).fill(null);
   const overflow = [];
-  units.filter(u => u.pos === pos && isStackedType(u.type)).forEach(u => {
+  unitsAt(pos).filter(u => isStackedType(u.type)).forEach(u => {   // v5.71 — índice O(1) en vez de recorrer las 266 tinas por celda
     // A hot tub in a cell that's the RIGHT half of a swim pair is invalid
     // — but we don't get here in that case (handled above).
     const lv = u.level || 1;
@@ -10862,7 +10897,7 @@ function cellStacks(pos){
 }
 
 function cellSpaCount(pos){
-  return units.filter(u => u.pos === pos && isStackedType(u.type)).length;
+  return unitsAt(pos).filter(u => isStackedType(u.type)).length;   // v5.71 — índice O(1) en vez de recorrer las 266 tinas por celda
 }
 
 function cellHasSpaCapacity(pos){
@@ -12349,6 +12384,7 @@ function quickPlaceFromQueue(queueId){
 }
 
 function startQueueDrag(e,id){
+  try { _beginDrag(); } catch(e){}   // v5.71
   dragQueueItem=queue.find(i=>i.id===id);
   dragUnit=null; // clear map drag
   const el=document.getElementById('qi-'+id);
@@ -12578,7 +12614,7 @@ function showCoverCellPanel(pos){
   const canAdd = (typeof canEdit !== 'function') || canEdit();
   // Safety: pstor cells used to also hold tubs/materials via the item panel.
   // If any items are stored here, surface a link so they're never hidden. (v4.92)
-  const _itemsHere = (Array.isArray(units) ? units.filter(u => u.pos === pos) : []);
+  const _itemsHere = unitsAt(pos);   // v5.71 — índice O(1) en vez de recorrer las 266 tinas por celda
   const _itemsHtml = _itemsHere.length
     ? `<div style="background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:8px 11px;margin:0 0 10px;font-size:11.5px;color:#92400e;display:flex;justify-content:space-between;align-items:center;gap:8px">
         <span>📦 ${_itemsHere.length} ítem(s) guardado(s) en esta posición.</span>
@@ -12675,7 +12711,7 @@ function selPosPanel(pos){
       showCoverCellPanel(pos); return;
     }
   }
-  const cu = units.filter(u => u.pos === pos);
+  const cu = unitsAt(pos);   // v5.71 — índice O(1) en vez de recorrer las 266 tinas por celda
   // Include swim-pair partner units (right half of a pair)
   const owner = swimPairOwnerOf(pos);
   if(owner && owner !== pos){
@@ -12722,11 +12758,52 @@ function setMapZoom(delta){
 }
 window.setMapZoom = setMapZoom;
 
+// ═══ v5.71 — POSITION INDEX: drawMap was quadratic ═════════════════════════
+// Measured on Alberto's real data (266 tubs): ONE drawMap scanned the units
+// array 731 times — once per cell, for each of several per-cell predicates —
+// which is ~194,000 element visits and took 520-720 ms of blocked main thread.
+// That is why dragging a tub felt slow and why a drop sometimes appeared to do
+// nothing: the browser was busy rebuilding the whole floor synchronously, and
+// an event that landed inside that window hit a cell that was about to be
+// replaced.
+//
+// The fix is to stop asking "which tubs are at this position?" once per cell
+// and instead answer it once for the whole floor. The index is built at the
+// start of each draw (AFTER normalizeFloorStacks, which may move rows) and
+// released at the end, so any call outside a draw behaves exactly as before —
+// no cache to invalidate, no staleness possible.
+let _posIdx = null, _posIdxDepth = 0;
+function _buildPosIndex(){
+  const m = new Map();
+  const arr = Array.isArray(units) ? units : [];
+  for(let i = 0; i < arr.length; i++){
+    const u = arr[i];
+    if(!u || u.pos == null) continue;
+    let a = m.get(u.pos);
+    if(!a){ a = []; m.set(u.pos, a); }
+    a.push(u);
+  }
+  return m;
+}
+// Single accessor every per-cell lookup goes through. O(1) during a draw,
+// identical semantics (a fresh filter) outside one.
+function unitsAt(pos){
+  if(_posIdx) return _posIdx.get(pos) || [];
+  const arr = Array.isArray(units) ? units : [];
+  return arr.filter(u => u && u.pos === pos);
+}
+window.unitsAt = unitsAt;
+
 function drawMap(){
   // Safety net: re-seat any colliding/gapped stack levels before drawing so the
   // floor is ALWAYS shown consistent, no matter how the conflict arose (sync,
   // import, legacy data). Idempotent + deterministic → a no-op on healthy data.
   try { if(typeof normalizeFloorStacks === 'function') normalizeFloorStacks(); } catch(e){ console.warn('[normalize on draw]', e); }
+  // Build AFTER the normalizer (it can move rows) and count depth so a nested
+  // draw cannot release the index out from under the outer one.
+  if(_posIdxDepth === 0) _posIdx = _buildPosIndex();
+  _posIdxDepth++;
+  try {
   try { _applyMapZoom(); } catch(e){}
   const floor = document.getElementById('floor');
   const q = (document.getElementById('map-srch')?.value||'').toLowerCase().trim();
@@ -12860,13 +12937,14 @@ function drawMap(){
   // Helper: turn a cell into a drag source — picks up the TOP-of-stack
   // unit at this position and lets it be dropped onto another cell.
   const setupCellDragSource = (cell, pos) => {
-    const list = units.filter(u => u.pos === pos && isStackedType(u.type));
+    const list = unitsAt(pos).filter(u => isStackedType(u.type));   // v5.71 — índice O(1) en vez de recorrer las 266 tinas por celda
     if(!list.length) return;   // nothing to drag from this cell
     // Top-of-stack unit (highest level wins as the most accessible one)
     const top = list.slice().sort((a,b) => (b.level||0) - (a.level||0))[0];
     cell.setAttribute('draggable', 'true');
     cell.style.cursor = 'grab';
     cell.addEventListener('dragstart', e => {
+      _beginDrag();   // v5.71
       // Row-level OR cell-level lock check
       const p = parsePos(pos);
       const rowLocked = (p.valid && p.rowKey && !p.rowKey.startsWith('15') && isRowLocked(+p.rowKey));
@@ -12996,10 +13074,10 @@ function drawMap(){
 
     // Search highlight
     if(q){
-      const matches = units.filter(u => u.pos === pos && (
+      const matches = unitsAt(pos).filter(u =>   // v5.71 — índice O(1)
         String(u.sn||'').toLowerCase().includes(q) ||
         String(u.dealer||'').toLowerCase().includes(q)
-      ));
+      );
       if(matches.length){
         cell.style.boxShadow = '0 0 0 2.5px #facc15, 0 4px 12px rgba(250,204,21,.4)';
       }
@@ -13008,7 +13086,7 @@ function drawMap(){
     // Header: pos code + count + (optional) "already in WH" amber pill
     const hdr = el('div','');
     hdr.style.cssText = 'display:flex;justify-content:space-between;align-items:center;line-height:1;margin-bottom:5px;padding:0 1px';
-    const anyAlready = units.some(u => u.pos === pos && u.alreadyInWh);
+    const anyAlready = unitsAt(pos).some(u => u.alreadyInWh);   // v5.71 — índice O(1) en vez de recorrer las 266 tinas por celda
     const alreadyPill = anyAlready
       ? `<span style="display:inline-flex;align-items:center;gap:2px;font-size:7px;font-weight:800;color:#854d0e;background:#fde68a;border:.5px solid #d97706;padding:1px 4px;border-radius:4px;letter-spacing:.04em;line-height:1;margin-left:5px" title="Pre-existing inventory">📍 WH</span>`
       : '';
@@ -13110,6 +13188,7 @@ function drawMap(){
         // Per-tub drag source — pick up THIS exact tub, not just the top one.
         row.setAttribute('draggable','true');
         row.addEventListener('dragstart', e => {
+          _beginDrag();   // v5.71
           e.stopPropagation();   // take precedence over the cell-level drag source
           const p = parsePos(pos);
           const rowLocked = (p.valid && p.rowKey && !p.rowKey.startsWith('15') && isRowLocked(+p.rowKey));
@@ -13461,6 +13540,10 @@ function drawMap(){
 
   // If 3D view is the active mode, also refresh it
   if (typeof mapView !== 'undefined' && mapView === '3d' && W3D && W3D.state && W3D.state.inited) update3D();
+  } finally {
+    _posIdxDepth--;
+    if(_posIdxDepth <= 0){ _posIdxDepth = 0; _posIdx = null; }
+  }
 }
 
 function el(tag,cls=''){const e=document.createElement(tag||'div');if(cls)e.className=cls;return e;}
@@ -14175,7 +14258,7 @@ window.resetCellOverride = resetCellOverride;
 
 // Adjust quantity of cover/inventory items at a position
 function adjustQty(pos, delta){
-  const cu=units.filter(u=>u.pos===pos);
+  const cu=unitsAt(pos);   // v5.71 — índice O(1) en vez de recorrer las 266 tinas por celda
   if(!cu.length)return;
   const u=cu[0];
   u.qty=(u.qty||1)+delta;
@@ -14660,7 +14743,7 @@ function quickAddSpa(pos){
   const tag = alreadyInWh ? ' (pre-existing)' : '';
   addAct(`Spa ${sn||dealer} added at ${pos}${slot?` (S${slot.stack}-${LEVEL_SHORT(slot.level)})`:''}${tag}`,'var(--accent)');
   toast(`${sn||dealer} → ${pos}${slot?` · S${slot.stack}-${LEVEL_SHORT(slot.level)}`:''}${tag}`,'ok');
-  const cu=units.filter(u=>u.pos===pos);
+  const cu=unitsAt(pos);   // v5.71 — índice O(1) en vez de recorrer las 266 tinas por celda
   showCellPanel(pos,cu);
   drawMap();updBadges();
 }
@@ -14672,7 +14755,7 @@ function stackSlotAdd(pos, stack, level){
   if(!canEdit()){ toast('View-only mode — switch to Admin or Warehouse Manager to edit','err'); return; }
   _slotHint = {pos, stack, level};
   // Re-render panel to show the selection highlighted, then focus on the form
-  const cu = units.filter(u=>u.pos===pos);
+  const cu = unitsAt(pos);   // v5.71 — índice O(1) en vez de recorrer las 266 tinas por celda
   showCellPanel(pos, cu);
   setTimeout(()=>{
     // Make sure spa tab is active
@@ -14697,7 +14780,7 @@ function quickAddCover(pos){
   units.push(_born({id:nid++,pos,dealer:name,sn:'',type:'misc',entry:date,qty,color}));
   addAct(`Cover "${name}" (${qty} ${color||''}) added at ${pos}`,'var(--teal)');
   toast(`${qty}x ${name} added to ${pos}`,'ok');
-  const cu=units.filter(u=>u.pos===pos);
+  const cu=unitsAt(pos);   // v5.71 — índice O(1) en vez de recorrer las 266 tinas por celda
   showCellPanel(pos,cu);
   drawMap();updBadges();
 }
@@ -14728,7 +14811,7 @@ function quickAddMaterial(pos){
   quickPhotoData=null;
   addAct(`Material "${name}" (${qty}) received at ${pos}`,'var(--orange)');
   toast(`${name} logged at ${pos}`,'ok');
-  const cu=units.filter(u=>u.pos===pos);
+  const cu=unitsAt(pos);   // v5.71 — índice O(1) en vez de recorrer las 266 tinas por celda
   showCellPanel(pos,cu);
   drawMap();updBadges();
 }
@@ -14772,7 +14855,7 @@ function stackDrop(e,targetUid,pos){
   toast(`Stack at ${pos} reordered`,'ok');
 
   // Refresh panel
-  const cu=units.filter(u=>u.pos===pos);
+  const cu=unitsAt(pos);   // v5.71 — índice O(1) en vez de recorrer las 266 tinas por celda
   showCellPanel(pos,cu);
   drawMap();
 }
