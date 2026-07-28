@@ -4756,7 +4756,7 @@ let _fbInitAttempts = 0;
 //   /app_version/current  (in Firebase console, manually, OR call
 //   pushVersionToFirebase() from the Admin console at deploy time)
 // ══════════════════════════════════════════════════════════════════
-const APP_VERSION = 'v5.60';
+const APP_VERSION = 'v5.70';
 // v5.23 (#1): paste your reCAPTCHA v3 site key here AFTER enabling App Check in
 // the Firebase console (Build → App Check → Register app → reCAPTCHA v3). Until
 // then it stays '', everything works exactly as before.
@@ -6527,7 +6527,7 @@ function trashRestore(id){
     } else if(e.kind === 'cover'){
       const c = e.payload;
       if(coverInventory.some(x => x && x.id === c.id)){ toast('That cover row already exists — restore blocked','err'); return; }
-      coverInventory.push(Object.assign({}, c, { updated: stampNow() }));
+      coverInventory.push(Object.assign({}, c, { updated: stampNow(), updatedAt: editStamp() }));   // v5.65
     } else { toast('Unknown trash kind: '+e.kind,'err'); return; }
   }catch(err){ console.warn('[trash restore]', err); toast('Restore failed: '+err.message,'err'); return; }
   e.status = 'restored'; e.updatedAt = editStamp();
@@ -6878,6 +6878,20 @@ function _mergeUnits(local, remote, restored){
       const mySt = (u && u.updatedAt) || '';
       if(!mySt || blockSt >= mySt) return;   // no evidence of freshness on our side → respect (legacy behavior)
     }
+    // v5.67 — REGISTER LOCAL-ONLY ROWS IN THE INDEX TOO.
+    // The remote array is de-duplicated on the way in, but a local array holding
+    // two rows for the SAME identity pushed both straight through, so the merge —
+    // the one place that should guarantee one row per identity — propagated the
+    // duplicate instead of healing it. Property testing over 4800 random states
+    // caught it. Registering the row makes a second local row with the same key
+    // resolve by last-edit-wins like any other conflict.
+    const _dk = keyOf(u);
+    if(_dk && mergedIdx.has(_dk)){
+      const _di = mergedIdx.get(_dk);
+      if(((u && u.updatedAt) || '') > ((merged[_di] && merged[_di].updatedAt) || '')) merged[_di] = u;
+      return;
+    }
+    if(_dk) mergedIdx.set(_dk, merged.length);
     merged.push(u); kept++;         // local-only & fresher than any elsewhere-claim → KEEP
   });
   // ── HONOR DELETE TOMBSTONES (v4.91) ──────────────────────────────────────
@@ -6980,8 +6994,19 @@ function _mergeMaterials(local, remote, remoteCfg){
   remote = Array.isArray(remote) ? remote : [];
   const norm  = s => String(s == null ? '' : s).trim().toLowerCase();
   const keyOf = m => norm(m.cat || 'other') + '\u0000' + norm(m.source || 'warehouse') + '\u0000' + norm(m.name);
+  // v5.65 — PREFER THE FULL-PRECISION STAMP. `updated`/`date` on a material are
+  // toISO(), which is DAY granularity ('2026-07-24'), so two edits on the same
+  // day tied and the tie went to remote — your edit vanished. Worse, the merged
+  // row kept whichever `updatedAt` came with the winner, which could be older
+  // than the row actually was, and then an older tombstone deleted it. Same
+  // defect the cover merge had; a fleet simulation lost materials this way.
+  // `updatedAt` (editStamp(), millisecond precision) is what every other
+  // collection resolves on, so it leads here, with the day-level fields as the
+  // fallback for legacy rows.
   const stamp = m => {
-    let t = String(m.updated || m.date || '');
+    let t = String((m && m.updatedAt) || '');
+    const day = String((m && (m.updated || m.date)) || '');
+    if(!t || day > t) t = t || day;      // legacy row with no updatedAt
     if(Array.isArray(m.history) && m.history.length){
       const last = m.history[m.history.length - 1];
       const ht = last && String(last.t || last.date || last.at || '');
@@ -7016,6 +7041,11 @@ function _mergeMaterials(local, remote, remoteCfg){
     const winner = stamp(m) > stamp(cur) ? m : cur;
     const merged = Object.assign({}, winner);
     merged.history = mergeHist(cur.history, m.history);
+    // v5.65 — carry the freshest stamp forward, never the winner's stale one:
+    // the tombstone filter compares against updatedAt, so a merged row that
+    // inherited an older stamp could be deleted by an older tombstone.
+    const _best = stamp(m) > stamp(cur) ? stamp(m) : stamp(cur);
+    if(_best) merged.updatedAt = _best;
     byKey.set(k, merged);
   };
   remote.forEach(consider);   // remote first → it is 'cur'; ties resolve to remote (shared doc)
@@ -7168,6 +7198,20 @@ function _mergeIncoming(local, remote, remoteCfg){
       }
       return;
     }
+    // v5.67 — REGISTER LOCAL-ONLY ROWS IN THE INDEX TOO.
+    // The remote array is de-duplicated on the way in, but a local array holding
+    // two rows for the SAME identity pushed both straight through, so the merge —
+    // the one place that should guarantee one row per identity — propagated the
+    // duplicate instead of healing it. Property testing over 4800 random states
+    // caught it. Registering the row makes a second local row with the same key
+    // resolve by last-edit-wins like any other conflict.
+    const _dk = keyOf(it);
+    if(_dk && mergedIdx.has(_dk)){
+      const _di = mergedIdx.get(_dk);
+      if(((it && it.updatedAt) || '') > ((merged[_di] && merged[_di].updatedAt) || '')) merged[_di] = it;
+      return;
+    }
+    if(_dk) mergedIdx.set(_dk, merged.length);
     merged.push(it); kept++;           // local-only arrival -> KEEP (never vanish on stale remote / id collision)
   });
   // v5.38 — HONOR DELETE TOMBSTONES: a placed/removed arrival must not resurrect
@@ -7362,13 +7406,27 @@ function _mergeFactory(local, remote, localIncoming, remoteCfg){
     if(onFloorSns.has(sn)) return true;
     return false;
   };
-  const merged = remote.filter(f => f && !isStaleFactoryRow(f));
-  // Index surviving (non-stale) remote rows by key so we can do LAST-EDIT-WINS:
-  // when the same spa exists on both sides, keep the copy edited most recently
-  // (by updatedAt). Without this the remote always won, so a local edit — e.g.
-  // fixing Hot Tub → Swim Spa, colors, notes — got reverted on the next sync.
+  // v5.67 — collapse same-key duplicates inside the REMOTE array (units and
+  // incoming already did; factory only indexed the FIRST occurrence and left the
+  // rest in place, so a cloud state carrying two rows for one spa propagated both
+  // forever and last-edit-wins only ever updated one of them).
+  const merged = [];
   const mergedIdx = new Map();
-  merged.forEach((f, i) => { const k = keyOf(f); if(k != null && !mergedIdx.has(k)) mergedIdx.set(k, i); });
+  let _fDups = 0;
+  (Array.isArray(remote) ? remote : []).forEach(f => {
+    if(!f || isStaleFactoryRow(f)) return;
+    const k = keyOf(f);
+    if(k == null){ merged.push(f); return; }
+    if(mergedIdx.has(k)){
+      const i = mergedIdx.get(k);
+      if(((f.updatedAt) || '') > ((merged[i] && merged[i].updatedAt) || '')) merged[i] = f;
+      _fDups++;
+      return;
+    }
+    mergedIdx.set(k, merged.length);
+    merged.push(f);
+  });
+  if(_fDups > 0){ try { console.warn('[merge-canary] factory: collapsed ' + _fDups + ' duplicate row(s) in the incoming cloud array (kept freshest)'); } catch(e){} }
   let kept = 0;
   local.forEach(f => {
     if(!f) return;
@@ -7403,6 +7461,20 @@ function _mergeFactory(local, remote, localIncoming, remoteCfg){
       }
       return;
     }
+    // v5.67 — REGISTER LOCAL-ONLY ROWS IN THE INDEX TOO.
+    // The remote array is de-duplicated on the way in, but a local array holding
+    // two rows for the SAME identity pushed both straight through, so the merge —
+    // the one place that should guarantee one row per identity — propagated the
+    // duplicate instead of healing it. Property testing over 4800 random states
+    // caught it. Registering the row makes a second local row with the same key
+    // resolve by last-edit-wins like any other conflict.
+    const _dk = keyOf(f);
+    if(_dk && mergedIdx.has(_dk)){
+      const _di = mergedIdx.get(_dk);
+      if(((f && f.updatedAt) || '') > ((merged[_di] && merged[_di].updatedAt) || '')) merged[_di] = f;
+      return;
+    }
+    if(_dk) mergedIdx.set(_dk, merged.length);
     merged.push(f); kept++;            // local-only factory row -> KEEP (never vanish on id collision)
   });
   // ── HONOR DELETE TOMBSTONES (v4.97) ───────────────────────────────────────
@@ -7486,9 +7558,28 @@ function _mergeCovers(local, remote, remoteCfg){
   remote = Array.isArray(remote) ? remote : [];
   local  = Array.isArray(local)  ? local  : [];
   const keyOf = c => c ? [String(c.color||'').trim().toLowerCase(), String(c.model||'').trim().toLowerCase(), String(c.source||'warehouse').trim().toLowerCase()].join('|') : null;
-  const merged = remote.slice();
+  // v5.67 — collapse same-key duplicates inside the REMOTE array first (units,
+  // factory and incoming already did this; covers did not, so a cloud state that
+  // carried two rows for the same colour+model propagated them forever and the
+  // stale one could win later comparisons). Keep the freshest.
+  const merged = [];
   const idx = new Map();
-  merged.forEach((c, i) => { const k = keyOf(c); if(k && !idx.has(k)) idx.set(k, i); });
+  let _cvDups = 0;
+  (Array.isArray(remote) ? remote : []).forEach(c => {
+    const k = keyOf(c);
+    if(!k){ merged.push(c); return; }
+    if(idx.has(k)){
+      const i = idx.get(k);
+      const a = (merged[i] && (merged[i].updatedAt || merged[i].updated)) || '';
+      const b = (c && (c.updatedAt || c.updated)) || '';
+      if(b > a) merged[i] = c;
+      _cvDups++;
+      return;
+    }
+    idx.set(k, merged.length);
+    merged.push(c);
+  });
+  if(_cvDups > 0){ try { console.warn('[merge-canary] covers: collapsed ' + _cvDups + ' duplicate row(s) in the incoming cloud array (kept freshest)'); } catch(e){} }
   let kept = 0;
   local.forEach(c => {
     const k = keyOf(c); if(!k) return;
@@ -7560,15 +7651,29 @@ function _mergeCovers(local, remote, remoteCfg){
       const pendMap = new Map();
       [...(Array.isArray(rem.pending)?rem.pending:[]), ...(Array.isArray(c.pending)?c.pending:[])]
         .forEach(p => { if(p){ const s = String(p.spaSn||'') + '~' + (p.queuedAt||''); if(!pendMap.has(s)) pendMap.set(s, p); } });
-      const lt = (c && c.updated) || '';
-      const rt = (rem && rem.updated) || '';
+      // v5.65 — COMPARE ON A FULL-PRECISION STAMP.
+      // Cover rows carry `updated: toISO()`, and toISO() is DAY granularity
+      // ('2026-07-24'). Two edits on the same day therefore tied, and the tie
+      // fell to `rem` — so an edit you just made was silently replaced by
+      // whatever another device happened to hold, any time both touched the
+      // cover on the same day. Worse, the merged row then inherited the remote
+      // row's `updatedAt`, which could be older than yours: a tombstone newer
+      // than that stale stamp deleted a cover that was in fact freshly re-added.
+      // A 80-device fleet simulation lost covers exactly this way.
+      // Every other collection resolves on `updatedAt` (editStamp(), millisecond
+      // precision), so covers now do too, with `updated` as the fallback for
+      // legacy rows that never got one.
+      const _cvStamp = r => (r && typeof r.updatedAt === 'string' && r.updatedAt) ? r.updatedAt : ((r && r.updated) || '');
+      const lt = _cvStamp(c);
+      const rt = _cvStamp(rem);
       const newer = (lt > rt) ? c : rem;
       merged[i] = Object.assign({}, newer, {
         base: base,
         qty: mergedQty,
         history: Array.from(histMap.values()),
         pending: Array.from(pendMap.values()),
-        updated: (lt > rt ? lt : rt)
+        updated: (((c && c.updated) || '') > ((rem && rem.updated) || '') ? c.updated : rem.updated),
+        updatedAt: (lt > rt ? lt : rt)
       });
       return;
     }
@@ -7654,6 +7759,20 @@ function _mergeMarriages(local, remote, remoteCfg){
       if(oursWins) merged[i] = m;   // our marriage edit is newer (and plausible) → keep ours
       return;
     }
+    // v5.67 — REGISTER LOCAL-ONLY ROWS IN THE INDEX TOO.
+    // The remote array is de-duplicated on the way in, but a local array holding
+    // two rows for the SAME identity pushed both straight through, so the merge —
+    // the one place that should guarantee one row per identity — propagated the
+    // duplicate instead of healing it. Property testing over 4800 random states
+    // caught it. Registering the row makes a second local row with the same key
+    // resolve by last-edit-wins like any other conflict.
+    const _dk = keyOf(m);
+    if(_dk && idx.has(_dk)){
+      const _di = idx.get(_dk);
+      if(((m && m.updatedAt) || '') > ((merged[_di] && merged[_di].updatedAt) || '')) merged[_di] = m;
+      return;
+    }
+    if(_dk) idx.set(_dk, merged.length);
     merged.push(m); kept++;         // local-only marriage → KEEP (don't vanish on stale remote / id collision)
   });
   merged = (typeof _dropTombstonedIn === 'function' ? _dropTombstonedIn('marriages', merged, remoteCfg, _plausibleCap) : merged);   // v5.41 — a deleted marriage must not resurrect
@@ -10343,17 +10462,17 @@ function findSpaBySn(sn){
   const s = String(sn).trim();
   if(!s) return null;
   // 1) In receiving warehouse
-  const inWh = units.find(u => u.sn === s);
+  const inWh = units.find(u => snEq(u.sn, s));   // v5.62
   if(inWh) return {dealer:inWh.dealer, location:'In Warehouse @ '+inWh.pos, type:inWh.type, source:'units'};
   // 2) At factory
-  const inFac = factory.find(f => f.sn === s && f.type !== 'accessory');
+  const inFac = factory.find(f => snEq(f.sn, s) && f.type !== 'accessory');
   if(inFac) return {dealer:inFac.dealer, location:'At Factory', type:inFac.type, source:'factory'};
   // 3) Incoming (in transit)
-  const inInc = incoming.find(i => i.sn === s && (i.status === 'pending' || i.status === 'arrived'));
+  const inInc = incoming.find(i => snEq(i.sn, s) && (i.status === 'pending' || i.status === 'arrived'));
   if(inInc) return {dealer:inInc.dealer, location: inInc.status === 'arrived' ? 'At warehouse · needs position' : 'Incoming (in transit)', type:inInc.type, source:'incoming'};
   // 4) Already dispatched (so we know who it went to). Skip returned records — the
   //    unit came back and now lives in units/factory/incoming, found above.
-  const inDsp = dispatched.find(d => d.sn === s && d.deliveryStatus !== 'returned');
+  const inDsp = dispatched.find(d => snEq(d.sn, s) && d.deliveryStatus !== 'returned');
   if(inDsp) return {dealer:inDsp.dealer, location:'Already dispatched', type:inDsp.type, source:'dispatched'};
   return null;
 }
@@ -10405,9 +10524,10 @@ function _moveUnitToFactoryTransit(sn, fallbackDealer, fallbackType, note){
       trackingHistory: [{ state: 'in-transit', at, note: 'warehouse \u2192 factory' }]
     }));
   }
-  units.filter(x => !(x.id !== u.id)).forEach(_tombstoneUnitRow);   // v5.41
-  if(u) units = units.filter(x => x.id !== u.id);
-  return !!u;
+  if(u) _tombstoneUnitRow(u);   // v5.62 — was `filter(x => !(x.id !== u.id))`, which dereferenced
+  if(u) units = units.filter(x => x.id !== u.id);   // u.id even though this very function handles u
+  return !!u;                                       // being undefined → TypeError aborted the tub's
+                                                    // move to factory transit mid-transaction.
 }
 window._moveUnitToFactoryTransit = _moveUnitToFactoryTransit;
 
@@ -10519,9 +10639,10 @@ function handleFactoryRequestScanByRole(r, role){
     // sync merge treats loading-bay tubs as gone, so it won't reappear on the floor.
     if(r.type === 'tub' && r.sn){
       _snapshotTubOnRequest(r);
-      const u = units.find(x => x.sn === r.sn);
-      units.filter(x => !(x.id !== u.id)).forEach(_tombstoneUnitRow);   // v5.41
-      if(u) units = units.filter(x => x.id !== u.id);
+      const u = units.find(x => snEq(x.sn, r.sn));   // v5.62 — type-safe S/N match
+      if(u) _tombstoneUnitRow(u);                    // v5.62 — u.id was dereferenced unguarded here:
+      if(u) units = units.filter(x => x.id !== u.id); // a request scan for a tub not on the floor threw
+                                                      // and the request never advanced.
     }
     if(!r.approvedAt){ r.approvedAt = at; r.approvedBy = 'scan:' + role; }
     r.status = 'loading-bay';
@@ -10643,8 +10764,8 @@ function findMissingDispatches(){
     if(!sn) return;
     // Skip if already dispatched — spa already left, not "missing".
     // A returned unit is back in inventory, so it does NOT count as dispatched here.
-    if(dispatched.some(d => d.sn === sn && d.deliveryStatus !== 'returned')) return;
-    const inWh = units.some(u => u.sn === sn);
+    if(dispatched.some(d => snEq(d.sn, sn) && d.deliveryStatus !== 'returned')) return;
+    const inWh = units.some(u => snEq(u.sn, sn));
     if(!inWh){
       const daysOut = Math.max(0, Math.floor((ed - today)/86400000));
       out.push({event:e, sn, daysOut});
@@ -11015,8 +11136,8 @@ function addIncomingFromMigrated(u, reason){
     incoming.unshift(_born(inc));
   }
   // Remove from units[]
-  units.filter(x => !(x.id !== u.id)).forEach(_tombstoneUnitRow);   // v5.41
-  units = units.filter(x => x.id !== u.id);
+  if(u) _tombstoneUnitRow(u);   // v5.62 — null-safe (see _moveUnitToFactoryTransit)
+  if(u) units = units.filter(x => x.id !== u.id);
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -11132,7 +11253,7 @@ function autoOrganizeUnits(){
       // Placed → drop from incoming AND the arriving queue mirror so it doesn't
       // reappear asking for a position.
       _tombstoneIncomingRow(it);   // v5.38
-      incoming = incoming.filter(x => x.id !== it.id);
+      incoming = _removeRow(incoming, it);   // v5.69 — identity, not a colliding id
       _tombstoneQueueItem(it.id);   // v5.12
       if(typeof queue !== 'undefined' && Array.isArray(queue)) queue = queue.filter(q => q.id !== it.id);
       addAct(`📦 Auto-organize: placed ${newU.sn||newU.dealer} at ${dest.pos}`, 'var(--teal)');
@@ -13575,8 +13696,8 @@ function unstageUnit(unitId){
   const u = units.find(x => x.id === unitId); if(!u) return;
   snapshot(`unstage ${u.sn||u.dealer}`);
   const id = u.pos;
-  units.filter(x => !(x.id !== unitId)).forEach(_tombstoneUnitRow);   // v5.41
-  units = units.filter(x => x.id !== unitId);
+  _tombstoneUnitRow(u);
+  units = _removeRow(units, u);   // v5.66 — remove the row itself, not everything sharing its id
   incoming.unshift(_born({ id: nid++, sn:u.sn||'', dealer:u.dealer||'', type:u.type||'hot', status:'arrived', entry:u.entry||(typeof toISO==='function'?toISO():''), notes:u.notes||'' }));
   addAct(`${u.sn?'S/N '+u.sn:u.dealer} unstaged from ${id} \u2192 Incoming`, 'var(--amber)');
   toast('Sent back to Incoming (needs position)', 'ok');
@@ -14240,6 +14361,12 @@ function renderWorkflowPassport(item, source){
 }
 
 function showCellPanel(pos,cu){
+  // v5.69 — derive the cell's units when the caller omits them. Every current
+  // call site passes both, but a one-argument call used to throw on `cu.map`,
+  // taking the whole panel down; deriving is exactly what the callers compute.
+  if(!Array.isArray(cu)){
+    try { cu = (Array.isArray(units) ? units : []).filter(u => u && u.pos === pos); } catch(e){ cu = []; }
+  }
   selPos=pos;drawMap();
   // Color chip for cover items
   const coverColors=['White','Gray','Black','Tan','Blue','Brown','Silver'];
@@ -14489,9 +14616,9 @@ function quickAddSpa(pos){
   // ── S/N duplicate check (skip when "already in warehouse" since
   // a pre-existing tub may legitimately have its S/N already on file) ──
   if(sn && !alreadyInWh){
-    const dup = factory.find(f => f.sn === sn && f.type !== 'accessory')
-             || units.find(u => u.sn === sn)
-             || incoming.find(i => i.sn === sn);
+    const dup = factory.find(f => snEq(f.sn, sn) && f.type !== 'accessory')
+             || units.find(u => snEq(u.sn, sn))
+             || incoming.find(i => snEq(i.sn, sn));
     if(dup){
       const where = factory.includes(dup) ? 'Factory'
                   : units.includes(dup) ? `Warehouse @ ${dup.pos}`
@@ -15247,9 +15374,9 @@ function addUnit(inIdx){
   if(!dealer){toast('Please enter a dealer name','err');return;}
   // ── S/N duplicate check (skipped when "already in warehouse") ──
   if(sn && !alreadyInWh){
-    const activeDup = factory.find(f => f.sn === sn && f.type !== 'accessory')
-                  || units.find(u => u.sn === sn)
-                  || incoming.find(i => i.sn === sn);
+    const activeDup = factory.find(f => snEq(f.sn, sn) && f.type !== 'accessory')
+                  || units.find(u => snEq(u.sn, sn))
+                  || incoming.find(i => snEq(i.sn, sn));
     if(activeDup){
       const where = factory.includes(activeDup) ? 'Factory'
                   : units.includes(activeDup) ? `Warehouse @ ${activeDup.pos}`
@@ -15503,12 +15630,12 @@ function rmUnit(id){
     cfg._deletedUnits[_tk] = editStamp();
     _tombCompact(cfg._deletedUnits);   // v5.58 — PERMANENT: a deletion is a business fact like a dispatch; size-capped, never age-expired
   } catch(e){ console.warn('[tombstone write]', e); }
-  units.filter(x => !(x.id!==id)).forEach(_tombstoneUnitRow);   // v5.41
-  units=units.filter(x=>x.id!==id);
+  _tombstoneUnitRow(u);
+  units = _removeRow(units, u);   // v5.66 — the row itself, not everything sharing its id
   if(u.linkedMatId){
-    materials.filter(m => !(m.id !== u.linkedMatId)).forEach(_r => _tombstoneRowIn('materials', _r));   // v5.41
-    materials.filter(m=>m.id === u.linkedMatId).forEach(_r => _tombstoneRowIn('materials', _r));   // v5.41
-  materials = materials.filter(m=>m.id !== u.linkedMatId);
+    const _lm = materials.find(m => m && m.id === u.linkedMatId);   // v5.66 — resolve the row, then act on it
+    if(_lm) _tombstoneRowIn('materials', _lm);
+    materials = _removeRow(materials, _lm);   // v5.66 — the row itself, not everything sharing its id
   }
   let msg = `Unit ${u.sn||u.dealer} removed${above.length?` (${above.length} dropped down)`:''}`;
   if(credited) msg += ' · cover credited back to inventory';
@@ -15969,7 +16096,8 @@ function rejectIncoming(id){
         plasticWrap: it.plasticWrap, cover: it.cover, looseAccessories: it.looseAccessories,
         trackingHistory: [...(it.trackingHistory||[]), {state:'in-transit', at:toISO(), by: actorName(), note: noteText, reasonCode, photo: photo||null}]
       }));
-      incoming.filter(i => !(i.id !== id)).forEach(_tombstoneIncomingRow);   // v5.41
+      const _ri = incoming.find(i => i && i.id === id);   // v5.66
+      if(_ri) _tombstoneIncomingRow(_ri);
       incoming = incoming.filter(i => i.id !== id);
       _tombstoneQueueItem(id);   // v5.42
       queue = queue.filter(q => q.id !== id);
@@ -16321,7 +16449,7 @@ function renderMarriageOverlay(){
   // tied to a spa that's in the warehouse (we draw a hint line from the spa
   // cell back toward the factory area so the marriage flow is visible on the floor map)
   const visible = marriages.filter(m =>
-    (isMarriageActive(m)) && units.some(u => u.sn === m.spaSn)
+    (isMarriageActive(m)) && units.some(u => snEq(u.sn, m.spaSn))
   );
   // Note: delivered marriages already show via the green marriage-flag badge on the cell itself,
   // so we don't need overlay lines for them. Only active (going to factory) + split-pending (going to dealer).
@@ -16348,7 +16476,7 @@ function renderMarriageOverlay(){
   };
   let html = '';
   visible.forEach(m => {
-    const unit = units.find(u => u.sn === m.spaSn);
+    const unit = units.find(u => snEq(u.sn, m.spaSn));
     if(!unit) return;
     if(m.status === 'pending' || m.status === 'ready-to-ship' || m.status === 'in-transit'){
       // Small amber dot at top-left of cell — line goes UP to the top of the map (toward factory)
@@ -17128,7 +17256,7 @@ function renderTruck(){
       </div></div>
       <div class="card-body">${bayMarriages.length
         ? `<div class="fct-grid">${bayMarriages.map(m => {
-            const inWH = units.some(u => u.sn === m.spaSn);
+            const inWH = units.some(u => snEq(u.sn, m.spaSn));
             const st = m.status || 'pending';
             const stMap = {'pending':['#fef2f2','#dc2626','\u23F3 At factory'],'ready-to-ship':['#eff6ff','#1e40af','\u{1F4E6} Ready \u00B7 truck'],'ready-for-pickup':['#f5f3ff','#5b21b6','\u{1F91D} Dealer pickup'],'in-transit':['#ecfdf5','#0d9e78','\u{1F69B} In transit'],'delivered':['#ecfdf5','#0d9e78','\u2713 Delivered']};
             const sm = stMap[st] || stMap['pending'];
@@ -17693,8 +17821,8 @@ function saveMaterialEdit(id){
     linkedUnit.entry = m.date;
   } else if(!validatedPos && linkedUnit){
     // Case 3: position removed → delete the unit
-    units.filter(u => !(u.id !== m.linkedUnitId)).forEach(_tombstoneUnitRow);   // v5.41
-    units = units.filter(u => u.id !== m.linkedUnitId);
+    _tombstoneUnitRow(linkedUnit);
+    units = _removeRow(units, linkedUnit);   // v5.66 — the row itself, not everything sharing its id
     m.linkedUnitId = undefined;
   }
   // Case 4 implicit (no-op)
@@ -17722,8 +17850,10 @@ function rmMaterial(id){
   let removedFromMap = 0;
   if(m.linkedUnitId){
     const before = units.length;
-    units.filter(u => !(u.id !== m.linkedUnitId)).forEach(_tombstoneUnitRow);   // v5.41
-    units = units.filter(u => u.id !== m.linkedUnitId);
+    // v5.66 — resolve the linked row, then act on that row. `filter(u => u.id !== link)`
+    // removes EVERY unit carrying that id, and ids come from the per-device counter.
+    const _lu = units.find(u => u && u.id === m.linkedUnitId);
+    if(_lu){ _tombstoneUnitRow(_lu); units = _removeRow(units, _lu); }
     removedFromMap = before - units.length;
   }
   // Fallback: any unit that points back to this material id via linkedMatId
@@ -17732,9 +17862,8 @@ function rmMaterial(id){
   units = units.filter(u => u.linkedMatId !== id);
   removedFromMap += (before2 - units.length);
 
-  materials.filter(x => !(x.id !== id)).forEach(_r => _tombstoneRowIn('materials', _r));   // v5.41
-  materials.filter(x => x.id === id).forEach(_r => _tombstoneRowIn('materials', _r));   // v5.41
-  materials = materials.filter(x => x.id !== id);
+  _tombstoneRowIn('materials', m);              // v5.64 — exactly the row the user confirmed
+  materials = _removeRow(materials, m);
 
   addAct(`Material removed: ${m.name}${removedFromMap > 0 ? ' (and cleaned from floor map)' : ''}`,'var(--orange)');
   toast(removedFromMap > 0 ? 'Material removed from list and floor map' : 'Material removed','ok');
@@ -17776,7 +17905,7 @@ const RETURN_REASONS = [
 
 function openReturnUnit(recId, sn){
   if(!canEdit()){ toast('View-only mode','err'); return; }
-  const rec = dispatched.find(d => d.id === recId) || dispatched.find(d => d.sn === sn);
+  const rec = dispatched.find(d => d.id === recId) || dispatched.find(d => snEq(d.sn, sn));
   if(!rec){ toast('Dispatch record not found','err'); return; }
   let overlay = document.getElementById('return-unit-overlay');
   if(overlay) overlay.remove();
@@ -17827,7 +17956,7 @@ function openReturnUnit(recId, sn){
 window.openReturnUnit = openReturnUnit;
 
 function confirmReturnUnit(recId, sn){
-  const rec = dispatched.find(d => d.id === recId) || dispatched.find(d => d.sn === sn);
+  const rec = dispatched.find(d => d.id === recId) || dispatched.find(d => snEq(d.sn, sn));
   if(!rec){ toast('Dispatch record not found','err'); return; }
   const overlay = document.getElementById('return-unit-overlay');
   const dest = overlay?.querySelector('input[name="ru-dest"]:checked')?.value || 'warehouse';
@@ -18161,7 +18290,7 @@ function renderDispatched(){
 // Optional photo (e.g. of the truck loaded, signature on paperwork).
 // Marks dispatched.deliveryStatus = 'delivered-to-dealer'.
 function openConfirmDelivery(recId, sn){
-  const rec = dispatched.find(d => d.id === recId) || dispatched.find(d => d.sn === sn);
+  const rec = dispatched.find(d => d.id === recId) || dispatched.find(d => snEq(d.sn, sn));
   if(!rec){ toast('Dispatch record not found','err'); return; }
   let overlay = document.getElementById('delivery-confirm-overlay');
   if(overlay) overlay.remove();
@@ -18736,7 +18865,7 @@ function printPreloadReport(groupId){
   const date = first.date;
   // Group rows by location for efficient picking
   const rows = grp.map(ev=>{
-    const u = units.find(x => x.sn === ev.sn);
+    const u = units.find(x => snEq(x.sn, ev.sn));
     if(u){
       const isStk = isStackedType(u.type);
       const slot = isStk ? `S${u.stack||'?'}-${LEVEL_SHORT(u.level||0)}` : '';
@@ -21655,10 +21784,10 @@ function reverseMovement(id){
 }
 function _currentLocOfSn(sn){
   try{
-    const u=units.find(x=>x.sn===sn); if(u) return {cat:'warehouse', where:'Warehouse', detail:u.pos||''};
-    const f=factory.find(x=>x.sn===sn); if(f){ const t=getStockType(f); return {cat:(t==='in-transit'?'transit':'factory'), where:(t==='in-transit'?'In transit':'Factory'), detail:f.trackingState||''}; }
-    const d=dispatched.find(x=>x.sn===sn && x.deliveryStatus!=='returned'); if(d) return {cat:'dealer', where:'Dealer', detail:d.dealer||''};
-    const i=incoming.find(x=>x.sn===sn); if(i) return {cat:(i.status==='arrived'?'warehouse':'transit'), where:(i.status==='arrived'?'Warehouse dock':'In transit'), detail:''};
+    const u=units.find(x=>snEq(x.sn,sn)); if(u) return {cat:'warehouse', where:'Warehouse', detail:u.pos||''};
+    const f=factory.find(x=>snEq(x.sn,sn)); if(f){ const t=getStockType(f); return {cat:(t==='in-transit'?'transit':'factory'), where:(t==='in-transit'?'In transit':'Factory'), detail:f.trackingState||''}; }
+    const d=dispatched.find(x=>snEq(x.sn,sn) && x.deliveryStatus!=='returned'); if(d) return {cat:'dealer', where:'Dealer', detail:d.dealer||''};
+    const i=incoming.find(x=>snEq(x.sn,sn)); if(i) return {cat:(i.status==='arrived'?'warehouse':'transit'), where:(i.status==='arrived'?'Warehouse dock':'In transit'), detail:''};
   }catch(e){}
   return {cat:'gone', where:'\u2014', detail:''};
 }
@@ -22081,9 +22210,9 @@ function addFactorySpa(){
   if(!dealer){ toast('Dealer/Customer required','err'); return; }
   // ── Hard-block duplicate S/N in active inventory ──
   // Active = factory + units + incoming. Dispatched is allowed (re-use rare but possible for returns/repairs).
-  const activeDup = factory.find(f => f.sn === sn && f.type !== 'accessory')
-                || units.find(u => u.sn === sn)
-                || incoming.find(i => i.sn === sn);
+  const activeDup = factory.find(f => snEq(f.sn, sn) && f.type !== 'accessory')
+                || units.find(u => snEq(u.sn, sn))
+                || incoming.find(i => snEq(i.sn, sn));
   if(activeDup){
     const where = factory.includes(activeDup) ? 'Factory'
                 : units.includes(activeDup) ? `Warehouse @ ${activeDup.pos}`
@@ -22092,7 +22221,7 @@ function addFactorySpa(){
     return;
   }
   // Soft-warn if S/N was previously dispatched (rare re-use case for warranty/return)
-  const dispatchedDup = dispatched.find(d => d.sn === sn);
+  const dispatchedDup = dispatched.find(d => snEq(d.sn, sn));
   if(dispatchedDup){
     if(!confirm(`ℹ S/N ${sn} was previously dispatched on ${fmtD(dispatchedDup.dispatchDate)} to ${dispatchedDup.dealer}.\n\nIs this a return/repair re-using the same S/N? Continue?`)) return;
   }
@@ -22284,7 +22413,7 @@ function decrementCoverStock(color, model, source, spaSn){
   const srcLabel = source === 'factory' ? 'Factory' : 'Warehouse';
   // Create row if it doesn't exist (with 0 stock — will go to pending)
   if(!row){
-    row = {id:++nid, color, model: model||'', qty:0, lowThreshold:1, location:'', source, updated:toISO(), history:[], pending:[]};
+    row = {id:++nid, color, model: model||'', qty:0, lowThreshold:1, location:'', source, updated:toISO(), updatedAt: editStamp(), history:[], pending:[]};
     coverInventory.push(_born(row));
     toast(`New cover row created for ${color}${model?' ('+model+')':''} at ${srcLabel} — see Cover Inventory`,'info');
   }
@@ -22492,7 +22621,7 @@ function incrementCoverStock(color, model, source, spaSn, reason){
     (!model || (c.model||'').toLowerCase() === model.toLowerCase())
   );
   if(!row){
-    row = {id:++nid, color, model: model||'', qty:0, lowThreshold:1, location:'', source, updated:toISO(), history:[]};
+    row = {id:++nid, color, model: model||'', qty:0, lowThreshold:1, location:'', source, updated:toISO(), updatedAt: editStamp(), history:[]};
     coverInventory.push(_born(row));
   }
   row.qty += 1;
@@ -23764,6 +23893,12 @@ function handleQRPayload(raw, mode){
         _tombstoneFactoryRow(item);   // v5.40 — a stale remote must not resurrect this factory row (THE receive-scan ghost)
         factory.splice(factory.indexOf(item), 1);
         renderMarriages(); renderFactory(); drawMap(); renderIncoming(); updBadges();
+        // v5.62 — PERSIST BEFORE THE EARLY RETURN. This branch marks the marriage
+        // delivered and removes the factory row, then returned — skipping the
+        // saveState() at the bottom of handleQRPayload. On mobile, where the OS can
+        // kill a backgrounded tab at any moment, that receive was lost and the
+        // factory row came back. Destructive → flush, don't ride the debounce.
+        try { if(typeof flushSave === 'function') flushSave(); else saveState(); } catch(e){}
         if(_qrScanState) _qrScanState.scanning = true;
         return;
       }
@@ -23783,6 +23918,7 @@ function handleQRPayload(raw, mode){
         setScanResult('ok', item.sn||tid, `already placed at ${dupUnit.pos||'the map'}`);
         toast(`${item.sn||'Item'} is already in the warehouse (${dupUnit.pos||'map'})`,'ok');
         renderIncoming(); renderQueue(); renderBanner(); drawMap(); updBadges();
+        try { if(typeof flushSave === 'function') flushSave(); else saveState(); } catch(e){}   // v5.62 — the factory row was already spliced above; persist it
         if(_qrScanState) _qrScanState.scanning = true;
         return;
       }
@@ -23848,6 +23984,13 @@ function handleQRPayload(raw, mode){
 
     // If we have an incoming entry needing position, close scanner and open the picker
     if(incomingIdToOpen !== null){
+      // v5.62 — THE MAIN factory→warehouse receive path. It removes the factory row,
+      // creates the incoming + queue entries, then returned here — skipping the
+      // saveState() at the bottom. Nothing was written until the operator finished
+      // assigning a position (confirmPosition saves). Close the picker, drop signal,
+      // or let iOS reap the tab, and the whole receive vanished. Persist NOW; the
+      // position assignment is a separate, later edit.
+      try { if(typeof flushSave === 'function') flushSave(); else saveState(); } catch(e){}
       setTimeout(()=>{
         closeQRScanner();
         openPositionPicker(incomingIdToOpen);
@@ -23928,6 +24071,81 @@ function handleQRPayload(raw, mode){
 }
 
 // Helper to convert ISO datetime to YYYY-MM-DD
+// v5.62 — Serial numbers are the system's real identity key, and the SYNC layer has
+// always compared them type-safely (String(x).trim()). The UI/business layer did not:
+// ~30 lookups used a raw ===, so a serial arriving as a number (JSON import, a future
+// API, an old QR payload) silently fails to match — duplicate detection passes, the
+// tub is not found on the floor, "already in the warehouse" says no. Same key, one
+// comparison everywhere.
+// ═══ v5.63 — DETERMINISTIC ACCESSORY IDs ═══════════════════════════════════
+// An accessory row has NO serial number, so every merge and every tombstone
+// identifies it by `id:<id>` — and ids came from `++nid`, a PER-DEVICE counter.
+// Two people marrying different accessories offline both minted 1042, and then:
+//   · _mergeFactory collapsed the two rows into one → an accessory VANISHED;
+//   · _mergeMarriages collapsed the two marriages (key = spaSn|a<accessoryId>)
+//     when they belonged to the same spa → a MARRIAGE VANISHED;
+//   · tombstoning one of them killed BOTH on every device.
+// AspenIdHealX could not clean this up because it deliberately skips S/N-less
+// rows (they are the ones other records point at by id), and post-merge healing
+// is too late anyway — the row is already gone.
+// The fix is to make the id BE the identity: derive it from what the accessory
+// actually is (which spa it is married to + its name + type). Two devices
+// creating the same logical accessory now compute the SAME id — which is
+// correct, it is one physical thing — and two different accessories always get
+// different ids. No counter, no collision, no coordination.
+// Band 920e9 keeps these clearly distinguishable from counter ids (<900e9) and
+// from AspenIdHeal/IdHealX bands (900e9 / 910e9).
+// v5.63 — Because an accessory's id IS its identity, "another one of the same
+// accessory for the same spa" is a QUANTITY change, not a second row. Pushing a
+// second row with the same id would recreate exactly the duplicate-id disease
+// the deterministic id was introduced to cure.
+function _upsertAccessory(row){
+  try {
+    const ex = Array.isArray(factory) ? factory.find(f => f && f.id === row.id) : null;
+    if(ex){
+      ex.qty = (parseInt(ex.qty) || 1) + (parseInt(row.qty) || 1);
+      if(row.notes && !ex.notes) ex.notes = row.notes;
+      try { ex.updatedAt = editStamp(); } catch(e){}
+      return ex;
+    }
+    factory.push(_born(row));
+    return row;
+  } catch(e){ try { factory.push(_born(row)); } catch(_){} return row; }
+}
+window._upsertAccessory = _upsertAccessory;
+
+function accessoryId(marriedSn, name){
+  try {
+    const key = 'acc|' + snKey(marriedSn) + '|' + String(name || '').trim().toLowerCase();
+    let h = 2166136261;
+    for (let i = 0; i < key.length; i++){ h ^= key.charCodeAt(i); h = (h * 16777619) >>> 0; }
+    let h2 = 5381;
+    for (let i = 0; i < key.length; i++){ h2 = ((h2 * 33) ^ key.charCodeAt(i)) >>> 0; }
+    // Bounded band: 920e9 .. 999e9 — above the heal bands (900e9/910e9) so the
+    // nid counter ignores these, and below 1e12 so ids stay comfortably inside
+    // safe integer range for JSON and Firebase keys. ~79e9 distinct slots, which
+    // makes an accidental hash collision negligible at warehouse scale.
+    //
+    // PURELY DETERMINISTIC — ON PURPOSE. An earlier draft walked to a new id when
+    // the computed one was already taken locally, and a 150-device simulation
+    // caught the flaw: "taken locally" depends on what THAT device happens to
+    // hold, so two devices computed different ids for the SAME logical accessory.
+    // Different ids meant different merge keys, which meant duplicate accessories
+    // and tombstones that missed their target — the very disease this function
+    // exists to cure. The id must be a pure function of identity and nothing else.
+    //
+    // Two accessories of the same name for the same spa are, by identity, ONE
+    // thing: the data model expresses "two of them" as accessoryQty, not as two
+    // rows, and the create path raises quantity instead of minting a second row.
+    return 920000000000 + (h % 79000) * 1000000 + (h2 % 1000000);
+  } catch(e){ return ++nid; }
+}
+window.accessoryId = accessoryId;
+
+function snKey(v){ return (v == null) ? '' : String(v).trim(); }
+function snEq(a, b){ const x = snKey(a); return x !== '' && x === snKey(b); }
+window.snKey = snKey; window.snEq = snEq;
+
 function toDateStr(iso){ return (iso||'').split('T')[0] || toISO(); }
 
 function addFactoryAccessory(){
@@ -23938,8 +24156,8 @@ function addFactoryAccessory(){
   const added = document.getElementById('fct-acc-added').value || toISO();
   if(!name){ toast('Item description required','err'); return; }
   snapshot('factory add accessory');
-  const accId = ++nid;
-  factory.push(_born({id:accId, sn:'', dealer:name, type:'accessory', qty, added, notes, marriedSn: marsn || null}));
+  const accId = accessoryId(marsn, name);   // v5.63 — identity-derived, collision-free across devices
+  _upsertAccessory({id:accId, sn:'', dealer:name, type:'accessory', qty, added, notes, marriedSn: marsn || null});
   // If a marriage was specified, also create the marriage record — look up dealer from any source
   if(marsn){
     const spa = findSpaBySn(marsn);
@@ -24227,12 +24445,93 @@ window._born = _born;
 // could silently come back. One implementation, used by all of them.
 const _TOMB_MAP = { materials:'_deletedMaterials', marriages:'_deletedMarriages',
                     events:'_deletedEventIds', coverInventory:'_deletedCovers' };
+// v5.63 — IDENTITY-KEYED TOMBSTONES.
+// A deletion has to be recorded under the SAME key the merge uses to recognise
+// the row, or the two disagree. Marriages were the worst case: the merge keys
+// them by spa + accessory, but the tombstone was written as `id:<id>` — and
+// marriage row ids come from the per-device `++nid` counter. Two people working
+// offline mint the same id for two DIFFERENT marriages; deleting one then
+// deleted the other on every device in the fleet. Silent, permanent, and
+// impossible to notice until someone asks where the Cover Lifter went.
+// Now the key mirrors the merge's own identity function. The old `id:` key is
+// still written (and still honoured on read) so a device running an older build
+// keeps working during the rollout.
+// ═══ v5.64 — DELETE THE ROW, NOT THE ID ════════════════════════════════════
+// Every delete in this app resolved its target with `find(x => x.id === id)`
+// and then removed with `filter(x => x.id !== id)` — which deletes EVERY row
+// carrying that id, not the one the user pointed at. That is normally the same
+// thing, but ids come from the per-device `++nid` counter, so two people
+// working offline mint the same id for two different records. A 100-device
+// fleet simulation reproduced the consequence on marriages: deleting a Cover
+// Lifter also deleted an unrelated marriage that happened to share its id — and
+// tombstoned it too, so the collateral deletion propagated to the whole fleet
+// and could not be undone. AspenIdHeal renumbers duplicates, but only after the
+// next boot or merge; anything deleted inside that window was collateral.
+// Removing by object identity is exact no matter what the ids say.
+function _removeRow(arr, row){
+  return Array.isArray(arr) ? arr.filter(x => x !== row) : arr;
+}
+window._removeRow = _removeRow;
+
+function _tombKeysFor(coll, row){
+  const keys = [];
+  try {
+    if(coll === 'marriages' && row){
+      // Marriages are the collection where merge-identity and tombstone-identity
+      // disagreed, so they get the identity key and ONLY the identity key. The
+      // legacy `id:` key is not written and not honoured here: it is precisely
+      // the broken one — keeping it "for compatibility" would keep deleting the
+      // wrong marriage on every device that reads it. All devices run the same
+      // single-file build and the version gate forces an update, so there is no
+      // mixed fleet to protect.
+      const sn  = (row.spaSn != null && String(row.spaSn).trim() !== '') ? String(row.spaSn).trim() : '';
+      const acc = (row.accessoryId != null && row.accessoryId !== '') ? ('a' + row.accessoryId) : (row.accessoryName || '');
+      if(sn || acc) return ['m:' + sn + '|' + acc];         // == _mergeMarriages keyOf
+      return row.id != null ? ['id:' + row.id] : [];        // identity-less row: nothing better exists
+    }
+    // v5.64 — Covers and materials have the SAME merge/tombstone mismatch that
+    // marriages had, and it bites twice:
+    //   · the deletion may not propagate at all — the same logical cover can
+    //     carry different ids on two devices (ids come from the per-device
+    //     counter, the merge identifies covers by colour+model+source), so an
+    //     `id:` tombstone simply misses the other device's copy and the row
+    //     resurrects on the next sync;
+    //   · and when it does match, it may match the WRONG row — an unrelated
+    //     cover that happens to share the id gets deleted fleet-wide.
+    // Writing the merge's own identity as the key fixes both directions at once.
+    // The legacy `id:` key is kept here (unlike marriages) because for these two
+    // collections it is a genuine extra signal, not the broken one: a row with a
+    // blank name/colour has no identity key to fall back on.
+    // Identity key ONLY, exactly as for marriages: keeping the legacy `id:` key
+    // alongside it re-opens the same hole, because `id:` is the key that matches
+    // the wrong row. It survives solely as a fallback for a row with no identity
+    // at all (blank colour/name), which the merge itself could not place either.
+    if(coll === 'coverInventory' && row){
+      const ck = [String(row.color||'').trim().toLowerCase(),
+                  String(row.model||'').trim().toLowerCase(),
+                  String(row.source||'warehouse').trim().toLowerCase()].join('|');
+      if(String(row.color||'').trim() !== '') return ['cv:' + ck];     // == _mergeCovers keyOf
+      return row.id != null ? ['id:' + row.id] : [];
+    }
+    if(coll === 'materials' && row){
+      const norm = s => String(s == null ? '' : s).trim().toLowerCase();
+      if(norm(row.name) !== ''){                                       // == _mergeMaterials keyOf
+        return ['mt:' + norm(row.cat || 'other') + '\u0000' + norm(row.source || 'warehouse') + '\u0000' + norm(row.name)];
+      }
+      return row.id != null ? ['id:' + row.id] : [];
+    }
+    // Every other collection merges by id, so an id-keyed tombstone matches.
+    if(row && row.id != null) keys.push('id:' + row.id);
+  } catch(e){}
+  return keys;
+}
 function _tombstoneRowIn(coll, row){
   if(!row) return;
   try{
     const map = _TOMB_MAP[coll]; if(!map) return;
     cfg[map] = cfg[map] || {};
-    cfg[map]['id:' + row.id] = editStamp();
+    const st = editStamp();
+    _tombKeysFor(coll, row).forEach(k => { cfg[map][k] = st; });
     const _cut = new Date(Date.now() - 60*864e5).toISOString();
     for(const k in cfg[map]){ if(cfg[map][k] < _cut) delete cfg[map][k]; }
   }catch(e){ console.warn('[tombstone ' + coll + ']', e); }
@@ -24251,8 +24550,12 @@ function _dropTombstonedIn(coll, merged, remoteCfg, cap){
     if(!Object.keys(t).length) return merged;
     const C = cap || '\uffff';
     return merged.filter(row => {
-      if(!row || row.id == null) return true;
-      const ts = t['id:' + row.id];
+      if(!row) return true;
+      // v5.63 — check every key this row could have been tombstoned under, and
+      // take the FRESHEST. The identity key is what makes a marriage deletion
+      // apply to the right marriage; the id key stays for older devices.
+      let ts = '';
+      _tombKeysFor(coll, row).forEach(k => { const v = t[k]; if(v && v > ts) ts = v; });
       if(!ts) return true;
       const ru = (typeof row.updatedAt === 'string') ? row.updatedAt : '';
       const rowFut = !!ru && ru > C, tombFut = ts > C;
@@ -24387,8 +24690,8 @@ function rmFromFactory(id){
       _tombCompact(cfg._deletedUnits);   // v5.58 — PERMANENT: a deletion is a business fact like a dispatch; size-capped, never age-expired
     }
   } catch(e){ console.warn('[factory tombstone write]', e); }
-  factory.filter(x => !(x.id !== id)).forEach(_tombstoneFactoryRow);   // v5.41
-  factory = factory.filter(x => x.id !== id);
+  _tombstoneFactoryRow(f);   // v5.64 — exactly the row the user confirmed
+  factory = _removeRow(factory, f);   // v5.64 — by identity, not by a colliding id
   addAct(`🗑 Removed from factory: ${f.sn||f.dealer}${wasMarried ? ' (+ orphaned marriages)' : ''}`, 'var(--red)');
   toast('Removed','ok');
   renderFactory(); renderMarriages(); updBadges(); drawMap();
@@ -24689,7 +24992,7 @@ function renderMarriages(){
   }
   if(useCards){
     cont.innerHTML = `<div class="mar-cards-grid">${list.map(m => {
-      const inWH = units.some(u => u.sn === m.spaSn);
+      const inWH = units.some(u => snEq(u.sn, m.spaSn));
       const sc = stCfg[m.status] || stCfg['pending'];
       // Active states + their visual cues
       const isPending = m.status === 'pending';           // accessory at factory, no action yet
@@ -24720,7 +25023,7 @@ function renderMarriages(){
       // Split-pending: show extra red banner explaining the issue
       let splitBanner = '';
       if(isSplit){
-        const dispatchedRec = dispatched.find(d => d.sn === m.spaSn);
+        const dispatchedRec = dispatched.find(d => snEq(d.sn, m.spaSn));
         const sinceDate = dispatchedRec ? fmtD(m.splitDispatchedDate||dispatchedRec.dispatchDate) : '';
         const dealerNow = m.splitDispatchSpaDealer || dispatchedRec?.dealer || 'dealer';
         splitBanner = `<div class="mar-card-split">🔴 Spa already at <b>${dealerNow}</b>${sinceDate?` since ${sinceDate}`:''} — accessory still owed</div>`;
@@ -24783,13 +25086,13 @@ function renderMarriages(){
     </tr></thead>
     <tbody>
     ${list.map(m=>{
-      const inWH = units.some(u => u.sn === m.spaSn);
+      const inWH = units.some(u => snEq(u.sn, m.spaSn));
       const cfg = stCfg[m.status] || stCfg['pending'];
       const badge = `<span style="background:${cfg.bg};color:${cfg.color};padding:3px 9px;border-radius:10px;font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;border:1px solid ${cfg.urgent?'var(--red)':cfg.color+'33'};display:inline-flex;align-items:center;gap:3px">${cfg.icon} ${cfg.label}</span>`;
       // For split-pending, find linked dispatch info to show context
       let extraInfo = '';
       if(m.status === 'split-pending'){
-        const dispatchedRec = dispatched.find(d => d.sn === m.spaSn);
+        const dispatchedRec = dispatched.find(d => snEq(d.sn, m.spaSn));
         if(dispatchedRec){
           extraInfo = `<div style="font-size:9.5px;color:var(--red);font-weight:600;margin-top:2px">→ Spa already at ${m.splitDispatchSpaDealer||dispatchedRec.dealer} since ${fmtD(m.splitDispatchedDate||dispatchedRec.dispatchDate)}</div>`;
         }
@@ -24991,8 +25294,8 @@ function addMarriage(){
       const acc = factory.find(x => x.id === accId);
       if(acc){ acc.marriedSn = sn; }
     } else {
-      accId = ++nid;
-      factory.push(_born({id:accId, sn:'', dealer:name, type:'accessory', qty, added:toISO(), notes, marriedSn:sn}));
+      accId = accessoryId(sn, name);   // v5.63 — identity-derived, collision-free across devices
+      _upsertAccessory({id:accId, sn:'', dealer:name, type:'accessory', qty, added:toISO(), notes, marriedSn:sn});
     }
     location = (typeof suggestMarriageLocation === 'function') ? suggestMarriageLocation() : 'MINV';
     stagedMsg = location ? ` · staged for shelf ${location}` : '';
@@ -25025,9 +25328,8 @@ function rmMarriage(mid){
   // Unlink from factory accessory
   const acc = factory.find(f => f.id === m.accessoryId);
   if(acc) acc.marriedSn = null;
-  marriages.filter(x => !(x.id !== mid)).forEach(_r => _tombstoneRowIn('marriages', _r));   // v5.41
-  marriages.filter(x => x.id === mid).forEach(_r => _tombstoneRowIn('marriages', _r));   // v5.41
-  marriages = marriages.filter(x => x.id !== mid);
+  _tombstoneRowIn('marriages', m);              // v5.64 — exactly the row the user confirmed
+  marriages = _removeRow(marriages, m);         //         (was: every row sharing this id)
   addAct(`🗑 Marriage removed: ${m.accessoryName} ↔ S/N ${m.spaSn}`, 'var(--red)');
   toast('Marriage removed','ok');
   renderMarriages(); renderFactory(); drawMap(); updBadges();
@@ -25157,8 +25459,8 @@ function saveMarriageEdit(mid){
         found.record.looseAccessories = found.record.looseAccessories.filter(a => norm(a)!==norm(label) && norm(a)!==norm(name));
       }
       if(m.accessoryId == null || !factory.some(f => f.id === m.accessoryId)){
-        const accId = ++nid;
-        factory.push(_born({id:accId, sn:'', dealer:name, type:'accessory', qty, added:toISO(), notes, marriedSn:sn}));
+        const accId = accessoryId(sn, name);   // v5.63
+        _upsertAccessory({id:accId, sn:'', dealer:name, type:'accessory', qty, added:toISO(), notes, marriedSn:sn});
         m.accessoryId = accId;
       }
       if(!m.location) m.location = (typeof suggestMarriageLocation === 'function') ? suggestMarriageLocation() : 'MINV';
@@ -25484,7 +25786,7 @@ function shipMarriageFromMarriages(mid){
   // loading bay AND transit entirely — that was the bug.
   let acc = factory.find(f => f.id === m.accessoryId);
   if(!acc){
-    const accId = ++nid;
+    const accId = accessoryId(m.spaSn, m.accessoryName);   // v5.63
     acc = {id:accId, sn:'', dealer:m.accessoryName, type:'accessory', qty:m.accessoryQty||1, added:toISO(), notes:m.notes||'', marriedSn:m.spaSn};
     factory.push(_born(acc));
     m.accessoryId = accId;
@@ -26543,7 +26845,7 @@ function saveCoverAdd(){
   coverInventory.push(_born({
     id: ++nid,
     color, model, location, qty, lowThreshold, source,
-    updated: toISO(),
+    updated: toISO(), updatedAt: editStamp(),   // v5.65 — full-precision stamp for last-edit-wins
     history: [{at: toISO(), action:'created', by: actorName(), qty}]
   }));
   addAct(`Added cover stock: ${color}${model?' '+model:''} × ${qty} at ${source==='factory'?'Factory':'Warehouse'}`, '#6366f1');
@@ -26677,9 +26979,8 @@ function rmCover(id){
   if(!confirm(`Remove "${c.color}" from cover inventory?\n\nCurrent qty: ${c.qty}\n\nThis only removes the inventory row — any spas already assigned this cover keep their record.`)) return;
   snapshot('remove cover row');
   _trashAdd('cover', `Cover · ${c.color}${c.model?' '+c.model:''} · qty ${c.qty}`, c);   // v5.19: 30-day restore
-  coverInventory.filter(x => !(x.id !== id)).forEach(_r => _tombstoneRowIn('coverInventory', _r));   // v5.41
-  coverInventory.filter(x => x.id === id).forEach(_r => _tombstoneRowIn('coverInventory', _r));   // v5.41
-  coverInventory = coverInventory.filter(x => x.id !== id);
+  _tombstoneRowIn('coverInventory', c);         // v5.64 — exactly the row the user confirmed
+  coverInventory = _removeRow(coverInventory, c);
   addAct(`🗑 Removed cover row: ${c.color}${c.model?' ('+c.model+')':''} — was qty ${c.qty}`, 'var(--red)');
   toast('Cover row removed','ok');
   renderCoverInventory(); updBadges();
@@ -26784,7 +27085,7 @@ function saveCoverTransfer(fromId){
       lowThreshold: fromRow.lowThreshold || 1,
       location: '',
       source: toSrc,
-      updated: toISO(),
+      updated: toISO(), updatedAt: editStamp(),   // v5.65 — full-precision stamp for last-edit-wins
       history: []
     };
     coverInventory.push(_born(toRow));
@@ -26933,7 +27234,7 @@ function renderRequests(){
         // the item's QR to approve). Covers/materials have no unique QR per
         // piece → direct approve button.
         if(r.type === 'tub' && r.sn){
-          actions.push(`<button class="btn btn-sm btn-p" onclick="openQRScanner('factory-request','${r.sn}')">📷 Scan → loading bay</button>`);
+          actions.push(`<button class="btn btn-sm btn-p" onclick="openQRScanner('factory-request','${String(r.sn||'').replace(/['\"\\]/g,'')}')">📷 Scan → loading bay</button>`);
         } else {
           actions.push(`<button class="btn btn-sm btn-p" onclick="approveRequest(${r.id})">✓ Approve</button>`);
         }
@@ -26952,7 +27253,7 @@ function renderRequests(){
         // Load onto the truck at the loading bay → moves to "in transit to factory".
         // Tub with S/N → scan the QR; cover/material → direct button.
         if(r.type === 'tub' && r.sn){
-          actions.push(`<button class="btn btn-sm btn-p" onclick="openQRScanner('factory-request','${r.sn}')">📷 Scan to load on truck</button>`);
+          actions.push(`<button class="btn btn-sm btn-p" onclick="openQRScanner('factory-request','${String(r.sn||'').replace(/['\"\\]/g,'')}')">📷 Scan to load on truck</button>`);
         } else {
           actions.push(`<button class="btn btn-sm btn-p" onclick="markRequestShipped(${r.id})">📤 Mark loaded · ship</button>`);
         }
@@ -26961,7 +27262,7 @@ function renderRequests(){
       // Outbound tub waiting in the loading bay. Warehouse/truck loads it on the truck.
       if(isAdmin || currentRole === 'warehouse' || currentRole === 'transit'){
         if(r.type === 'tub' && r.sn){
-          actions.push(`<button class="btn btn-sm btn-p" onclick="openQRScanner('factory-request','${r.sn}')">📷 Scan to load on truck</button>`);
+          actions.push(`<button class="btn btn-sm btn-p" onclick="openQRScanner('factory-request','${String(r.sn||'').replace(/['\"\\]/g,'')}')">📷 Scan to load on truck</button>`);
         }
         actions.push(`<button class="btn btn-sm btn-p" onclick="shipFromLoadingBay(${r.id})">🚚 Load on truck</button>`);
       }
@@ -26974,7 +27275,7 @@ function renderRequests(){
         // Factory receives it back → the item reappears in its warehouse.
         // Tub with S/N → scan the QR at the dock; cover/material → direct button.
         if(r.type === 'tub' && r.sn){
-          actions.push(`<button class="btn btn-sm btn-p" onclick="openQRScanner('factory-request','${r.sn}')">📷 Scan to receive at factory</button>`);
+          actions.push(`<button class="btn btn-sm btn-p" onclick="openQRScanner('factory-request','${String(r.sn||'').replace(/['\"\\]/g,'')}')">📷 Scan to receive at factory</button>`);
         } else {
           actions.push(`<button class="btn btn-sm btn-p" onclick="markRequestReceived(${r.id})">📥 Receive at factory</button>`);
         }
@@ -27206,13 +27507,13 @@ function markRequestShipped(rid){
   // For tub requests: also remove the tub from units (it's leaving the warehouse)
   let extraNote = '';
   if(r.type === 'tub' && r.sn){
-    const u = units.find(x => x.sn === r.sn);
+    const u = units.find(x => snEq(x.sn, r.sn));
     if(u){
       if(!confirm(`Ship tub ${r.sn} to factory?\n\nThis will REMOVE the tub from position ${u.pos} in the warehouse.`)) return;
       snapshot('ship tub to factory');
       const fromPos = u.pos;
-      units.filter(x => !(x.id !== u.id)).forEach(_tombstoneUnitRow);   // v5.41
-      units = units.filter(x => x.id !== u.id);
+      _tombstoneUnitRow(u);
+      units = _removeRow(units, u);   // v5.66 — remove the row itself, not everything sharing its id
       drawMap();
       extraNote = ` · Outbound from ${fromPos}`;
     } else {
@@ -27337,7 +27638,7 @@ function markRequestReceived(rid){
         model: r.coverModel || '',
         qty: 0, lowThreshold: 1, location: '',
         source: 'factory',
-        updated: toISO(),
+        updated: toISO(), updatedAt: editStamp(),   // v5.65 — full-precision stamp for last-edit-wins
         history: []
       };
       coverInventory.push(_born(invRow));
@@ -27541,13 +27842,13 @@ function pullToLoadingBay(rid){
   if(r.status !== 'approved'){ toast('Request must be approved first','err'); return; }
   let extraNote = '';
   if(r.type === 'tub' && r.sn){
-    const u = units.find(x => x.sn === r.sn);
+    const u = units.find(x => snEq(x.sn, r.sn));
     if(u){
       if(!confirm(`Pull tub ${r.sn} to the loading bay?\n\nIt leaves position ${u.pos} and waits in the bay for the truck to the factory.`)) return;
       snapshot('pull tub to loading bay');
       _snapshotTubOnRequest(r);
-      units.filter(x => !(x.id !== u.id)).forEach(_tombstoneUnitRow);   // v5.41
-      units = units.filter(x => x.id !== u.id);
+      _tombstoneUnitRow(u);
+      units = _removeRow(units, u);   // v5.66 — remove the row itself, not everything sharing its id
       drawMap();
       extraNote = ` \u00b7 Pulled from ${u.pos}`;
     } else {
@@ -28966,7 +29267,7 @@ function runIntegrityChecks(){
           m.deliveredDate = m.deliveredDate || ((it.arrivedAt || '').split('T')[0] || toISO());
         }
         if(!m.location) m.location = 'MINV';
-        incoming = incoming.filter(x => x.id !== it.id);
+        incoming = _removeRow(incoming, it);   // v5.69 — identity, not a colliding id
         if(typeof queue !== 'undefined' && Array.isArray(queue)) queue = queue.filter(q => q.id !== it.id);
         reconciled++;
       } else {
@@ -29327,6 +29628,71 @@ function runIntegrityChecks(){
     }
     if(_retired > 0) findings.push(`Retired ${_retired} stuck factory row(s) for tub(s) already received/placed (was duplicating them in Arriving + In Transit)`);
   } catch(e){ console.warn('[check 17]', e); }
+
+  // ═══ Check 19 (v5.63): A DELIVERED MARRIAGE RETIRES ITS FACTORY ACCESSORY ═══
+  // An accessory row and its marriage are two views of one physical thing, and
+  // the marriage record is the one that carries the verdict: 'delivered' means
+  // the accessory reached the warehouse, 'completed' means it left with the tub.
+  // Either way, a factory row for it is stale by definition.
+  //
+  // Found by a 120-device fleet simulation, and reachable in real life: Alberto
+  // marries an accessory and receives it (the receive scan removes + tombstones
+  // the factory row); Nela, still offline, creates the same marriage, which
+  // re-mints the accessory row with a fresh stamp — and a fresh stamp beats an
+  // older tombstone, exactly as the re-addition rule requires for genuine
+  // returns. The accessory then sits in the Loading Bay looking like it still
+  // has to ship, while its marriage says it arrived days ago.
+  //
+  // The marriage is the evidence, so this is an authoritative verdict: it vouches
+  // for what it removes, and the integrity guard leaves it alone. A tombstone
+  // goes with it so the row does not simply bounce back on the next sync.
+  try {
+    if(Array.isArray(marriages) && Array.isArray(factory)){
+      const settled = new Map();   // accessoryId -> the marriage's stamp
+      marriages.forEach(m => {
+        if(!m || m.accessoryId == null) return;
+        if(m.status !== 'delivered' && m.status !== 'completed') return;
+        const prev = settled.get(m.accessoryId) || '';
+        const st = (typeof m.updatedAt === 'string') ? m.updatedAt : '';
+        if(st >= prev) settled.set(m.accessoryId, st);
+      });
+      if(settled.size){
+        let retired = 0;
+        for(let i = factory.length - 1; i >= 0; i--){
+          const f = factory[i];
+          if(!f || f.type !== 'accessory') continue;
+          if(!settled.has(f.id)) continue;
+          // v5.68 — JUDGE ON EVIDENCE, NOT ON AN INCIDENTAL STAMP.
+          // The first version skipped the row whenever its updatedAt was newer
+          // than the marriage's, reasoning "something happened after delivery, so
+          // the human wins". Cross-collection property testing (1200 hostile
+          // states) showed that is the wrong test: ANY later touch — an edited
+          // qty, a note, a merge that refreshed the stamp — kept a stale
+          // accessory alive in the Loading Bay forever, looking like work still
+          // to be done. A stamp says something was touched; it does not say the
+          // accessory failed to arrive.
+          // The marriage status IS the evidence that it arrived. The only thing
+          // that can outrank it is evidence of a NEW shipment cycle, and that
+          // leaves a real trace: a tracking-history entry dated after the
+          // delivery. Nothing else revives the row.
+          const mstamp = settled.get(f.id) || '';
+          let lastTrack = '';
+          try {
+            (Array.isArray(f.trackingHistory) ? f.trackingHistory : []).forEach(h => {
+              const t = h && String(h.at || h.date || h.t || '');
+              if(t && t > lastTrack) lastTrack = t;
+            });
+          } catch(e){}
+          if(mstamp && lastTrack && lastTrack > mstamp) continue;   // genuine re-ship after delivery → leave it
+          _vouch('factory', f);
+          try { if(typeof _tombstoneFactoryRow === 'function') _tombstoneFactoryRow(f); } catch(e){}
+          factory.splice(i, 1);
+          retired++;
+        }
+        if(retired > 0) findings.push(`Retired ${retired} factory accessory row(s) whose marriage is already delivered/completed`);
+      }
+    }
+  } catch(e){ console.warn('[check 19]', e); }
 
   // ═══ Check 18 (v5.40): UNIFIED EXCLUSIVITY RECONCILER ═══════════════════════
   // THE ARCHITECTURAL FIX for this entire bug family (reverts, duplicates,
@@ -32818,6 +33184,7 @@ document.addEventListener('keydown', e=>{
       total += r.changed;
       all = all.concat(r.detail.filter(function(d){ return d.from != null; }));
     });
+    try { var ra = healAccessories(); total += ra.changed; all = all.concat(ra.detail); } catch(e){ console.warn('[id-heal-x acc]', e); }
     if (total){
       try { if (window.AspenLocate) window.AspenLocate.invalidate(); } catch(e){}
       try { if (typeof flushSave === 'function') flushSave(); else if (typeof saveState === 'function') saveState(); } catch(e){}
@@ -32841,7 +33208,66 @@ document.addEventListener('keydown', e=>{
     }
   } catch(e){ console.warn('[id-heal-x hook]', e); }
 
+  // ── v5.63 — S/N-LESS ACCESSORY HEALING ────────────────────────────────────
+  // Rows without a serial are keyed by `id:` everywhere (merge AND tombstone),
+  // so a duplicate id here is far more damaging than for a spa: it silently
+  // deletes an accessory or a whole marriage. IdHealX used to skip these rows
+  // because other records point at them by id — the answer is not to skip them
+  // but to repair the pointer in the same breath. New ids come from the same
+  // identity-derived function the creation path now uses, so every device lands
+  // on the same number without coordinating.
+  function healAccessories(){
+    var A = (typeof factory !== 'undefined' && Array.isArray(factory)) ? factory : null;
+    if (!A || !A.length) return { changed:0, detail:[] };
+    var groups = {}, taken = {};
+    A.forEach(function(f){ if (f && f.id != null){ (groups['id:'+f.id] = groups['id:'+f.id] || []).push(f); taken['id:'+f.id] = true; } });
+    var changed = 0, detail = [];
+    Object.keys(groups).forEach(function(gk){
+      var rows = groups[gk];
+      if (rows.length < 2) return;
+      // Only S/N-less rows are at risk here; spa rows are keyed by serial and
+      // are already handled by the main heal pass.
+      if (rows.some(function(r){ return r.sn != null && String(r.sn).trim() !== ''; })) return;
+      rows.sort(function(a, b){
+        var ua = (a && a.updatedAt) || '', ub = (b && b.updatedAt) || '';
+        if (ua !== ub) return ua > ub ? -1 : 1;
+        var ka = (a.marriedSn || '') + '|' + (a.dealer || ''), kb = (b.marriedSn || '') + '|' + (b.dealer || '');
+        return ka < kb ? -1 : (ka > kb ? 1 : 0);
+      });
+      for (var i = 1; i < rows.length; i++){
+        var row = rows[i], oldId = row.id;
+        var nid2;
+        try { nid2 = accessoryId(row.marriedSn, row.dealer); } catch(e){ continue; }
+        var guard = 0;
+        while (taken['id:'+nid2] && guard < 50){ nid2 = nid2 + 1; guard++; }
+        if (nid2 === oldId) continue;
+        row.id = nid2;
+        taken['id:'+nid2] = true;
+        try { row.updatedAt = (typeof editStamp === 'function') ? editStamp() : new Date().toISOString(); } catch(e){}
+        // Repair every pointer, matching on BOTH the old id and this row's own
+        // identity so the sibling row's marriage is never dragged along.
+        try {
+          if (typeof marriages !== 'undefined' && Array.isArray(marriages)){
+            marriages.forEach(function(m){
+              if (!m || m.accessoryId !== oldId) return;
+              var sameSpa = String(m.spaSn || '').trim() === String(row.marriedSn || '').trim();
+              var sameName = String(m.accessoryName || '').trim().toLowerCase() === String(row.dealer || '').trim().toLowerCase();
+              if (sameSpa && sameName){
+                m.accessoryId = nid2;
+                try { m.updatedAt = (typeof editStamp === 'function') ? editStamp() : new Date().toISOString(); } catch(e){}
+              }
+            });
+          }
+        } catch(e){}
+        changed++;
+        detail.push({ coll:'factory(accessory)', from:oldId, to:nid2, name:row.dealer, spa:row.marriedSn });
+      }
+    });
+    return { changed:changed, detail:detail };
+  }
+
   window.AspenIdHealX = {
+    healAccessories: healAccessories,
     run: heal,
     stableId: stableId,
     preview: function(){
@@ -32868,137 +33294,227 @@ document.addEventListener('keydown', e=>{
 </script>
 
 <!-- ═══════════════════════════════════════════════════════════════════════════
-     v5.60 AspenElderCleanup — RECURRING sweep of evidence-less elder ghosts
-     (delete-block; replaces the v5.59 one-shot)
+     v5.61 AspenAutoCleanupUndo — RESTORES every tub the v5.59/v5.60 sweep
+     wrongly removed (delete-block)
 
-     WHY THE v5.59 ONE-SHOT FAILED IN PRODUCTION (both lessons encoded here):
-       1. It trusted updatedAt as "a human recently handled this tub → real".
-          False: boot normalizers, checks and heals re-stamp rows across
-          sessions, so machine writes wear a human disguise. updatedAt is NOT
-          usable evidence for this decision — the gate is GONE.
-       2. It burned a one-shot cfg flag on that crippled first pass, locking
-          itself out fleet-wide. There is no flag anymore: the sweep is
-          idempotent by construction — everything it moves gains a Dispatch
-          Log record, and rows with ANY dispatch record are outside its
-          jurisdiction forever after.
+     THE DOCTRINE ERROR BEING UNDONE
+     v5.59/v5.60 encoded an invented rule — "400+ days on the floor with no
+     paperwork = presumed absent" — and moved those tubs off the map. That is
+     wrong. Age is not evidence of anything: a tub can legitimately sit in the
+     warehouse for years because nobody bought it yet. The ONLY event that
+     takes a tub off the floor is a DISPATCH the user performs (reversed only
+     by a Return). Inventory software must never infer absence from a
+     heuristic; the floor map is a record of physical reality, and only a human
+     action changes physical reality. The sweep is deleted, permanently.
 
-     STANDING BUSINESS RULE (owner's verdict, encoded):
-       a spa sitting on the floor map for 400+ days with ZERO paper trail —
-       no dispatch record of any kind, no inbound stock movement in 180 days —
-       is presumed not physically present. It is MOVED (never deleted) to the
-       Dispatch Log as "⚠ AUTO-CLEANUP — elder ghost", with a permanent
-       tombstone. One click on ↩ Return restores a false positive AND writes
-       the paper trail ('returned') that makes it immune to the sweep forever.
+     WHAT THIS DOES (idempotent, boot + after every merge)
+     For every dispatch record carrying the AUTO-CLEANUP marker:
+       · the tub goes back on the floor at its original position, with a FRESH
+         stamp — which beats the fabricated tombstone by the merge's own
+         re-addition rule, so it sticks fleet-wide with no coordination;
+       · the fabricated tombstone is deleted outright;
+       · the bogus dispatch record is marked 'returned' (never deleted — a
+         dispatch record is an audit fact) so it can never again be read as
+         "this tub left", by Check 11d or anything else.
+     Dealer names were overwritten by the sweep, so originals are recovered
+     from the newest snapshot that still holds each row: the local hourly
+     backup first, then the cloud auto/manual snapshots. If no snapshot has a
+     row, it is restored from the dispatch record itself and the dealer is
+     flagged for a human to retype — visible, never silently wrong.
 
-     Runs at boot and again after every remote merge, so a stale device or a
-     fat old snapshot that re-injects elders is cleaned within seconds — the
-     floor converges to clean automatically, with no human step.
-     Deleting this whole block is a safe revert.
+     Safe to delete this block once the fleet has converged (check that
+     AspenAutoCleanupUndo.preview() returns 0 on every device first).
      ═══════════════════════════════════════════════════════════════════════ -->
 <script>
 (function(){
-  if (window.__aspenElderCleanupInstalled) return;
-  window.__aspenElderCleanupInstalled = true;
+  if (window.__aspenUndoInstalled) return;
+  window.__aspenUndoInstalled = true;
 
-  var ELDER_DAYS = 400, LEDGER_DAYS = 180;
+  var MARK = 'AUTO-CLEANUP';
 
-  function candidates(){
-    var now = Date.now();
-    var out = [];
+  function pending(){
     try {
-      var hasDisp = {};
-      (Array.isArray(dispatched) ? dispatched : []).forEach(function(d){
-        if (d && d.sn != null && String(d.sn).trim() !== '') hasDisp[String(d.sn).trim()] = 1;
+      return (Array.isArray(dispatched) ? dispatched : []).filter(function(d){
+        return d && d.sn != null && String(d.dealer || '').indexOf(MARK) >= 0 && d.deliveryStatus !== 'returned';
       });
-      var recentIn = {};
-      try {
-        (Array.isArray(movements) ? movements : []).forEach(function(mv){
-          if (!mv || mv.sn == null) return;
-          var t = Date.parse(mv.at || mv.date || '');
-          if (isNaN(t) || (now - t) > LEDGER_DAYS * 864e5) return;
-          var mt = (typeof MOVEMENT_TYPES !== 'undefined' && MOVEMENT_TYPES[mv.type]) || null;
-          if (mt && mt.dir === 'in') recentIn[String(mv.sn).trim()] = 1;
+    } catch(e){ return []; }
+  }
+
+  // Pull the original rows out of the newest snapshot that still contains them.
+  function fromLocalBackup(want, found){
+    try {
+      var raw = localStorage.getItem('aspen_warehouse_state_hourly_backup_v1');
+      if (!raw) return;
+      var st = JSON.parse(raw);
+      (st && Array.isArray(st.units) ? st.units : []).forEach(function(u){
+        if (!u || u.sn == null) return;
+        var k = String(u.sn).trim();
+        if (want[k] && !found[k]) found[k] = u;
+      });
+    } catch(e){}
+  }
+
+  async function fromCloudSnapshots(want, found){
+    try {
+      if (typeof _fbDb === 'undefined' || !_fbDb || typeof _fbAuthorized === 'undefined' || !_fbAuthorized) return;
+      var missing = Object.keys(want).filter(function(k){ return !found[k]; });
+      if (!missing.length) return;
+      var snap = await _fbDb.ref('state').once('value');
+      var all = snap.val() || {};
+      var cands = [];
+      Object.keys(all).filter(function(k){ return k !== 'shared'; }).forEach(function(dev){
+        var d = all[dev] || {};
+        ['snapshots', 'manual_snapshots', 'auto_snapshots'].forEach(function(bucket){
+          if (!d[bucket]) return;
+          Object.keys(d[bucket]).forEach(function(lbl){
+            var s = d[bucket][lbl];
+            if (s && s.state) cands.push({ ts: s.timestamp || 0, raw: s.state });
+          });
         });
-      } catch(e){}
-      (Array.isArray(units) ? units : []).forEach(function(u){
-        if (!u || u.sn == null || String(u.sn).trim() === '') return;
-        if (['hot','swim','extra'].indexOf(u.type) < 0) return;      // spas only
-        var sn = String(u.sn).trim();
-        var entryT = Date.parse(u.entry || '');
-        if (isNaN(entryT) || (now - entryT) < ELDER_DAYS * 864e5) return;
-        if (hasDisp[sn]) return;      // ANY dispatch record → outside our jurisdiction ('returned' = immune; AUTO-CLEANUP = Check 11d owns it)
-        if (recentIn[sn]) return;     // received per the ledger recently → real
-        out.push(u);
+        if (d.latest && d.latest.state) cands.push({ ts: d.latest.timestamp || 0, raw: d.latest.state });
       });
-    } catch(e){ console.warn('[elder-sweep]', e); }
-    return out;
+      cands.sort(function(a, b){ return b.ts - a.ts; });   // newest first — closest to pre-sweep truth
+      for (var i = 0; i < cands.length; i++){
+        if (!Object.keys(want).some(function(k){ return !found[k]; })) break;
+        var st;
+        try { st = JSON.parse(cands[i].raw); } catch(e){ continue; }
+        (st && Array.isArray(st.units) ? st.units : []).forEach(function(u){
+          if (!u || u.sn == null) return;
+          var k = String(u.sn).trim();
+          if (want[k] && !found[k]) found[k] = u;
+        });
+      }
+    } catch(e){ console.warn('[undo] cloud snapshot scan failed', e); }
   }
 
   var _busy = false;
-  function run(){
-    if (_busy) return;
+  async function run(silent){
+    if (_busy) return 0;
     _busy = true;
     try {
-      if (typeof units === 'undefined' || typeof dispatched === 'undefined') return;
-      var ghosts = candidates();
-      if (!ghosts.length) return;
-      var today = (typeof toISO === 'function') ? toISO() : new Date().toISOString().slice(0,10);
-      var base = Date.now() * 1000;
-      var moved = [];
-      ghosts.forEach(function(u, i){
-        var rec = {
-          id: base + i,
-          sn: u.sn, dealer: '⚠ AUTO-CLEANUP — elder ghost', type: u.type,
-          originalPos: u.pos, entryDate: u.entry || '—',
-          dispatchDate: today, dispatchTime: '', authorizedBy: 'system',
-          deliveryStatus: 'delivered',
-          notes: 'Standing rule: on the floor map since ' + (u.entry || '?') + ' with no dispatch record and no recent stock movement — presumed not physically present. If this tub IS real, press ↩ Return: it comes back to the floor and becomes permanently immune to this sweep.'
-        };
-        dispatched.unshift((typeof _born === 'function') ? _born(rec) : rec);
-        try { if (typeof _tombstoneUnitRow === 'function') _tombstoneUnitRow(u); } catch(e){}
-        moved.push({ sn: u.sn, pos: u.pos || '—', entry: u.entry || '', dealer: u.dealer || '' });
+      var recs = pending();
+      if (!recs.length) return 0;
+
+      var want = {}, found = {};
+      recs.forEach(function(r){ want[String(r.sn).trim()] = 1; });
+      fromLocalBackup(want, found);
+      await fromCloudSnapshots(want, found);
+
+      // v5.70 — SECONDARY DEALER SOURCES. Snapshots are the best recovery, but a
+      // device whose snapshots have aged out still has the dealer name recorded
+      // elsewhere: a dispatch record from an earlier episode of the same tub, the
+      // marriage that names its spaDealer, or a dispatch event. Anything found is
+      // better than making the user retype it; anything not found stays visibly
+      // flagged rather than silently wrong.
+      var hint = {};
+      try {
+        (Array.isArray(dispatched) ? dispatched : []).forEach(function(x){
+          if (!x || x.sn == null) return;
+          var dn = String(x.dealer || '');
+          if (!dn || dn.indexOf(MARK) >= 0) return;
+          var k = String(x.sn).trim();
+          if (!hint[k]) hint[k] = dn;
+        });
+        (Array.isArray(marriages) ? marriages : []).forEach(function(m){
+          if (!m || m.spaSn == null || !m.spaDealer) return;
+          var k = String(m.spaSn).trim();
+          if (!hint[k]) hint[k] = String(m.spaDealer);
+        });
+        (Array.isArray(events) ? events : []).forEach(function(e){
+          if (!e || e.sn == null || !e.dealer) return;
+          var dn = String(e.dealer);
+          if (dn.indexOf(MARK) >= 0) return;
+          var k = String(e.sn).trim();
+          if (!hint[k]) hint[k] = dn;
+        });
+      } catch(e){}
+
+      var onFloor = {};
+      (Array.isArray(units) ? units : []).forEach(function(u){
+        if (u && u.sn != null) onFloor[String(u.sn).trim()] = 1;
       });
-      var gone = new Set(ghosts.map(function(u){ return u.id; }));
-      units = units.filter(function(u){ return !(u && gone.has(u.id)); });
-      try { console.table(moved); } catch(e){}
-      console.warn('[elder-sweep] moved ' + moved.length + ' evidence-less elder(s) to the Dispatch Log — reversible via ↩ Return');
-      try { if (typeof addAct === 'function') addAct('🧹 Elder sweep: ' + moved.length + ' tina(s) de 400+ días sin evidencia movidas al Dispatch Log — ↩ Return si alguna es real', 'var(--red)'); } catch(e){}
+
+      var stamp = (typeof editStamp === 'function') ? editStamp() : new Date().toISOString();
+      var restored = 0, needsDealer = [];
+
+      recs.forEach(function(rec){
+        var sn = String(rec.sn).trim();
+        if (!onFloor[sn]){
+          var orig = found[sn];
+          var row;
+          if (orig){
+            row = JSON.parse(JSON.stringify(orig));
+          } else {
+            row = { sn: sn, type: rec.type || 'hot', pos: rec.originalPos || '',
+                    dealer: hint[sn] || '⚠ REVISAR DEALER',
+                    entry: (rec.entryDate && rec.entryDate !== '—') ? rec.entryDate : '' };
+            if (!hint[sn]) needsDealer.push(sn);
+          }
+          row.id = (typeof nid !== 'undefined') ? nid++ : Date.now();
+          if (!row.pos) row.pos = rec.originalPos || '';
+          // Fresh stamp: the merge's own re-addition rule makes this beat the
+          // fabricated tombstone on every device, with no coordination needed.
+          row.updatedAt = stamp;
+          units.push(row);
+          onFloor[sn] = 1;
+          restored++;
+        }
+        // Delete the fabricated tombstone outright.
+        try {
+          if (cfg && cfg._deletedUnits){
+            delete cfg._deletedUnits['sn:' + sn];
+            delete cfg._deletedUnits['id:' + rec.id];
+          }
+        } catch(e){}
+        // Never delete a dispatch record — neutralize it. 'returned' is the
+        // app's own idiom for "it did not leave / it came back".
+        rec.deliveryStatus = 'returned';
+        rec.returnedAt = stamp;
+        rec.returnReason = 'auto-cleanup-reversed';
+        rec.notes = 'REVERTIDO (v5.61): esta tina NUNCA fue despachada. La regla automática de "400+ días" fue un error y quedó eliminada. La tina volvió al piso. ' + (rec.notes || '');
+        rec.updatedAt = stamp;
+      });
+
+      try { if (typeof addAct === 'function') addAct('↩ Reversión: ' + restored + ' tina(s) devueltas al piso — la regla automática de antigüedad fue eliminada', 'var(--green)'); } catch(e){}
+      if (needsDealer.length) console.warn('[undo] sin snapshot para el dealer original de: ' + needsDealer.join(', ') + ' — marcadas "⚠ REVISAR DEALER"');
+      console.warn('[undo] restauradas ' + restored + ' tina(s); ' + recs.length + ' registro(s) AUTO-CLEANUP neutralizados');
+
       try { if (typeof flushSave === 'function') flushSave(); else saveState(); } catch(e){}
       try { if (typeof fbForcePush === 'function') fbForcePush(); } catch(e){}
       try { if (typeof drawMap === 'function') drawMap(); } catch(e){}
       try { if (typeof updBadges === 'function') updBadges(); } catch(e){}
       try { if (window.AspenLocate) window.AspenLocate.invalidate(); } catch(e){}
-    } catch(e){ console.warn('[elder-sweep run]', e); }
+      return restored;
+    } catch(e){ console.warn('[undo run]', e); return 0; }
     finally { _busy = false; }
   }
 
-  try { setTimeout(run, 2600); } catch(e){}   // boot pass, after checks + heals
+  try { setTimeout(function(){ run(); }, 2600); } catch(e){}
 
-  // After every remote merge — a stale device or fat old snapshot that
-  // re-injects elders is cleaned within seconds, automatically.
+  // Records and tombstones can also arrive from a device that ran the sweep.
   try {
-    if (typeof window.fbApplyRemoteState === 'function' && !window.fbApplyRemoteState.__aspElderSweepWrapped){
+    if (typeof window.fbApplyRemoteState === 'function' && !window.fbApplyRemoteState.__aspUndoWrapped){
       var _apply = window.fbApplyRemoteState;
       window.fbApplyRemoteState = function(){
         var r = _apply.apply(this, arguments);
-        try { setTimeout(run, 400); } catch(e){}
+        try { setTimeout(function(){ run(); }, 500); } catch(e){}
         return r;
       };
-      window.fbApplyRemoteState.__aspElderSweepWrapped = true;
+      window.fbApplyRemoteState.__aspUndoWrapped = true;
     }
-  } catch(e){ console.warn('[elder-sweep hook]', e); }
+  } catch(e){ console.warn('[undo hook]', e); }
 
-  window.AspenElderCleanup = {
+  window.AspenAutoCleanupUndo = {
     run: run,
     preview: function(){
-      var c = candidates().map(function(u){ return { sn: u.sn, pos: u.pos || '—', entry: u.entry || '', dealer: u.dealer || '' }; });
-      try { console.table(c); } catch(e){ console.log(c); }
-      console.log('[elder-sweep] ' + c.length + ' candidate(s) right now');
-      return c;
+      var p = pending().map(function(r){ return { sn: r.sn, pos: r.originalPos || '—', entry: r.entryDate || '', onFloor: (Array.isArray(units) ? units : []).some(function(u){ return u && String(u.sn).trim() === String(r.sn).trim(); }) }; });
+      try { console.table(p); } catch(e){ console.log(p); }
+      console.log('[undo] ' + p.length + ' registro(s) AUTO-CLEANUP pendientes de revertir');
+      return p;
     }
   };
 
-  console.log('[AspenElderCleanup] recurring sweep armed — evidence-less 400d+ elders auto-move to the Dispatch Log (↩ Return restores + immunizes)');
+  console.log('[AspenAutoCleanupUndo] armed — reverting the age-based sweep; only a dispatch you perform removes a tub');
 })();
 </script>
 
