@@ -4756,7 +4756,7 @@ let _fbInitAttempts = 0;
 //   /app_version/current  (in Firebase console, manually, OR call
 //   pushVersionToFirebase() from the Admin console at deploy time)
 // ══════════════════════════════════════════════════════════════════
-const APP_VERSION = 'v5.71';
+const APP_VERSION = 'v5.72';
 // v5.23 (#1): paste your reCAPTCHA v3 site key here AFTER enabling App Check in
 // the Firebase console (Build → App Check → Register app → reCAPTCHA v3). Until
 // then it stays '', everything works exactly as before.
@@ -5413,6 +5413,14 @@ async function _fbCloudSyncInner(showToast){
         return;
       }
     } catch(e){ console.warn('[safe-push] check failed:', e); }
+  }
+  // v5.72: never push a half-loaded state. Until now the only thing standing here was
+  // the 30s boot quarantine inside __aspenSafePushCheck — which lives in a delete-block,
+  // so the protection would vanish the day someone removed it. This does not depend on it.
+  if(typeof window._whStateReady === 'function' && !(await window._whStateReady())){
+    console.warn('[wh-idb] push skipped — offloaded collections not rehydrated yet');
+    if(showToast && typeof toast === 'function') toast('⏳ Still loading — try again in a moment', 'err');
+    return;
   }
   try {
     const state = {nid, units, dispatched, incoming, materials, events, activity, queue, cfg, factory, marriages, dispatchRequests, coverInventory, colorLibrary, coverModelMapping, movements, matTransfers, _epoch: (window.ASPEN_DATA_EPOCH || 1)};
@@ -7830,8 +7838,15 @@ function fbApplyRemoteState(restored, sourceTimestamp){
     // fire after _fbApplyingRemote resets, triggering fbAutoPush and a ping-pong loop.
     try {
       const ts = sourceTimestamp || fbServerNow();
-      const state = {nid, units, dispatched, incoming, materials, events, activity, queue, cfg, factory, marriages, dispatchRequests, coverInventory, colorLibrary, coverModelMapping, movements, _saved: ts};
-      localStorage.setItem(LS_KEY, JSON.stringify(state, _blobReplacer));
+      // v5.72 fix: matTransfers was missing here too, and this runs on EVERY cloud apply —
+      // the merge above put them in memory, then this write dropped them from disk.
+      const state = {nid, units, dispatched, incoming, materials, events, activity, queue, cfg, factory, marriages, dispatchRequests, coverInventory, colorLibrary, coverModelMapping, movements, matTransfers, _saved: ts};
+      // v5.72: this is the THIRD writer of LS_KEY. Without the same dual write here,
+      // every incoming cloud sync would re-inflate localStorage with the full payload
+      // and quietly undo the offload — on a busy day that is most writes. Skipped
+      // while rehydration is pending, same reason as flushSave.
+      if(!window._whHydratePending){ try { window._whIdbSet?.('state_v1', state); } catch(e){} }
+      localStorage.setItem(LS_KEY, _whSerializeForLs(state));
       _lastSavedHash = stateHash();  // integrity watchdog baseline (reflects repaired state)
       _lastSavedSig = _stateSig();    // sig baseline — prevents saveState from echo-pushing this state back to cloud
       _fbLastLocalWriteAt = ts;       // newness guard baseline (survives reload via loadState)
@@ -20092,7 +20107,9 @@ function renderConfig(){
         if(s._saved) lastSaved = new Date(s._saved).toLocaleString();
       }
     }catch(e){}
-    const sizeKB = ((localStorage.getItem(LS_KEY)||'').length / 1024).toFixed(1);
+    // v5.72 fix: localStorage measures UTF-16 — two bytes per character. Dividing the
+    // character count by 1024 halved every reading, so a 962 KB payload showed as 481.
+    const sizeKB = ((localStorage.getItem(LS_KEY)||'').length * 2 / 1024).toFixed(1);
     bs.innerHTML = `<strong>${units.length}</strong> units · <strong>${dispatched.length}</strong> dispatched · <strong>${materials.length}</strong> materials · <strong>${events.length}</strong> events<br><span style="font-size:10px;color:var(--text3)">Autosaved · ${sizeKB} KB · Last save: ${lastSaved}</span>`;
   }
   // Cloud sync status
@@ -28050,9 +28067,51 @@ function _buildLsPayload(trimLevel){
       ? Object.assign({}, d, {trackingHistory: d.trackingHistory.slice(-8)}) : d);          // shed carried history (cloud + dispatch log keep it)
   }
   if(trimLevel >= 3) mv = [];                                                                 // last resort: drop the ledger locally (cloud has it)
-  const s = {nid, units, dispatched: disp, incoming, materials, events, activity, queue, cfg, factory, marriages, dispatchRequests, coverInventory, colorLibrary, coverModelMapping, movements: mv, _saved: Date.now(), _lsTrim: trimLevel||0};
-  return JSON.stringify(s, _blobReplacer);
+  // v5.72 fix: matTransfers was missing here. saveState persists it and loadState restores
+  // it, so the quota-relief path was the one route that silently dropped staged transfers.
+  const s = {nid, units, dispatched: disp, incoming, materials, events, activity, queue, cfg, factory, marriages, dispatchRequests, coverInventory, colorLibrary, coverModelMapping, movements: mv, matTransfers, _saved: Date.now(), _lsTrim: trimLevel||0};
+  return _whSerializeForLs(s);
 }
+
+// ── OFFLOADED COLLECTIONS (v5.72) ─────────────────────────────────────────────
+// These three live in IndexedDB instead of localStorage. They are precisely the
+// collections runIntegrityChecks() never needs at boot — measured read counts:
+// factory 75, units 32, dispatched 28, marriages 14, activity 9, dispatchRequests 3,
+// movements 4 (all four inside ONE dedup check guarded by `movements.length`, so an
+// empty array is a no-op), events 0, coverInventory 0. The synchronous boot sequence
+// therefore still repairs a COMPLETE picture of everything it actually inspects.
+// NOTHING may join this list without first deferring the integrity checks: moving
+// dispatched (28 reads) or units (32) would leave them repairing a half-loaded state,
+// which is how the v5.59/v5.60 sweep took 47 real tubs off the floor.
+const WH_OFFLOAD_KEYS = ['movements', 'events', 'coverInventory'];
+window.WH_OFFLOAD_KEYS = WH_OFFLOAD_KEYS;
+
+// Serialize a state object for localStorage. Returns the FULL payload unless
+// IndexedDB has PROVEN it holds the complete copy — _whIdbHealthy is set only after a
+// transaction actually committed. So a missing, blocked, private-mode or broken
+// IndexedDB (and this file with the AspenIdbState block deleted) behaves exactly as
+// this app did before: every collection stays in localStorage.
+function _whSerializeForLs(state){
+  // While rehydration is pending the three collections are EMPTY in memory but very
+  // much alive in IndexedDB. Writing them out as zero-length arrays would destroy the
+  // record of what is offloaded, so the payload stays slim and keeps the manifest this
+  // boot read — even though no write has proven IndexedDB healthy yet this session.
+  const pending = !!window._whHydratePending;
+  if(!window._whIdbHealthy && !pending) return JSON.stringify(state, _blobReplacer);
+  const slim = {};
+  for(const k in state){ if(WH_OFFLOAD_KEYS.indexOf(k) < 0) slim[k] = state[k]; }
+  slim._lsSlim = 1;
+  // Manifest of what was offloaded. ~40 bytes, and it turns a silent divergence
+  // between the two stores into one the boot log can shout about.
+  slim._whOff = (pending && window._whBootOff) ? window._whBootOff : {
+    mv:  Array.isArray(state.movements)      ? state.movements.length      : 0,
+    ev:  Array.isArray(state.events)         ? state.events.length         : 0,
+    cov: Array.isArray(state.coverInventory) ? state.coverInventory.length : 0
+  };
+  return JSON.stringify(slim, _blobReplacer);
+}
+window._whSerializeForLs = _whSerializeForLs;
+
 function _relieveStoragePressureAndRetry(){
   // Tier 0: evict the hourly LOCAL backup (a verbatim 2nd copy, the most expendable layer)
   // and retry the full state. Tiers 1-3: progressively trim local-only historical data.
@@ -28103,38 +28162,61 @@ function saveState(){
   _saveTimer = setTimeout(()=>{
     const now = fbServerNow();   // server-consistent clock
     const state = {nid, units, dispatched, incoming, materials, events, activity, queue, cfg, factory, marriages, dispatchRequests, coverInventory, colorLibrary, coverModelMapping, movements, matTransfers, _saved: now};
-    const payload = JSON.stringify(state, _blobReplacer);
-    let saved = false;
-    try{
-      localStorage.setItem(LS_KEY, payload);
-      saved = true;
-    }catch(err){
-      console.warn('saveState failed:', err.message);
-      // QuotaExceededError: the hourly LOCAL backup is a verbatim 2nd copy and the
-      // single most expendable consumer (cloud sync + Drive + manual backup all still
-      // cover us). Evict it and retry so the PRIMARY state still persists instead of
-      // going stale. Only warn if the state STILL doesn't fit after that.
-      if(err.name === 'QuotaExceededError' && _relieveStoragePressureAndRetry()){
+    // ── DUAL WRITE (v5.72) ──────────────────────────────────────────────────
+    // IndexedDB receives the COMPLETE state; localStorage receives the slim copy —
+    // and only AFTER IndexedDB confirms, so the offloaded collections are never
+    // homeless. The order is deliberate: if the process dies between the two writes,
+    // what survives is the COMPLETE copy, and _whIdbHydrate() adopts it at next boot.
+    // With no IndexedDB the closure runs immediately and everything below is byte-for-
+    // byte the previous behaviour.
+    const _persistLocal = () => {
+      const payload = _whSerializeForLs(state);
+      let saved = false;
+      try{
+        localStorage.setItem(LS_KEY, payload);
         saved = true;
-        console.warn('[storage] quota hit — relieved pressure (evict backup / trim local cache) and retried OK.');
-      } else if(err.name === 'QuotaExceededError'){
-        toast('⚠ Storage full — export backup soon', 'err');
+      }catch(err){
+        console.warn('saveState failed:', err.message);
+        // QuotaExceededError: the hourly LOCAL backup is a verbatim 2nd copy and the
+        // single most expendable consumer (cloud sync + Drive + manual backup all still
+        // cover us). Evict it and retry so the PRIMARY state still persists instead of
+        // going stale. Only warn if the state STILL doesn't fit after that.
+        if(err.name === 'QuotaExceededError' && _relieveStoragePressureAndRetry()){
+          saved = true;
+          console.warn('[storage] quota hit — relieved pressure (evict backup / trim local cache) and retried OK.');
+        } else if(err.name === 'QuotaExceededError'){
+          toast('⚠ Storage full — export backup soon', 'err');
+        }
       }
+      if(saved){
+        _lastSavedHash = stateHash();  // mark integrity watchdog "clean" — drift detection from here
+        _lastSavedSig = _stateSig();   // refresh sig in case more changes came in during debounce
+        // ── EDGE CASE FIX: bump local-write timestamp ──
+        // If we don't update _fbLastLocalWriteAt here, an edit made BEFORE Firebase
+        // auth completes leaves it at the loadState() value, so the realtime listener's
+        // "local newer than cloud → push" recovery wouldn't trigger and the edit would
+        // sit unpushed until the next scheduled sync. Bumping here pushes immediately.
+        // v5.72: `now` is captured BEFORE the IndexedDB round-trip, so take the max rather
+        // than assigning — this timestamp is the newness guard against stale cloud
+        // snapshots and must never move backwards, whatever order two writes resolve in.
+        if(now > _fbLastLocalWriteAt) _fbLastLocalWriteAt = now;
+        try { updateAuthBadge(); } catch(e){}   // v5.17: pending count is live while offline
+      }
+      // After persisting locally, propagate to other devices via Firebase (debounced inside).
+      // Skipped automatically when applying a remote update (echo guard).
+      try { fbAutoPush?.(); } catch(e){}
+    };
+    if(typeof window._whIdbSet === 'function' && !window._whHydratePending){
+      // _whIdbSet never throws and never rejects — it resolves false on any failure,
+      // and _whSerializeForLs then writes the FULL payload. Both handlers are wired
+      // anyway so a future change to that contract can't strand the local write.
+      window._whIdbSet('state_v1', state).then(_persistLocal, _persistLocal);
+    } else {
+      // No IndexedDB layer, or rehydration still in flight. In the second case the
+      // state in hand has EMPTY offloaded collections and must not go near the store
+      // that currently holds the real ones.
+      _persistLocal();
     }
-    if(saved){
-      _lastSavedHash = stateHash();  // mark integrity watchdog "clean" — drift detection from here
-      _lastSavedSig = _stateSig();   // refresh sig in case more changes came in during debounce
-      // ── EDGE CASE FIX: bump local-write timestamp ──
-      // If we don't update _fbLastLocalWriteAt here, an edit made BEFORE Firebase
-      // auth completes leaves it at the loadState() value, so the realtime listener's
-      // "local newer than cloud → push" recovery wouldn't trigger and the edit would
-      // sit unpushed until the next scheduled sync. Bumping here pushes immediately.
-      _fbLastLocalWriteAt = now;
-      try { updateAuthBadge(); } catch(e){}   // v5.17: pending count is live while offline
-    }
-    // After persisting locally, propagate to other devices via Firebase (debounced inside).
-    // Skipped automatically when applying a remote update (echo guard).
-    try { fbAutoPush?.(); } catch(e){}
   }, 100);
 }
 
@@ -28147,7 +28229,15 @@ function flushSave(){
   try{
     const now = fbServerNow();   // server-consistent clock
     const state = {nid, units, dispatched, incoming, materials, events, activity, queue, cfg, factory, marriages, dispatchRequests, coverInventory, colorLibrary, coverModelMapping, movements, matTransfers, _saved: now};
-    const payload = JSON.stringify(state, _blobReplacer);
+    // ── DUAL WRITE, UNLOAD PATH (v5.72) ─────────────────────────────────────
+    // flushSave runs from pagehide / visibilitychange, where nothing can be awaited —
+    // so the order inverts: localStorage first (synchronous, guaranteed), IndexedDB
+    // fire-and-forget. _whSerializeForLs only slims when IndexedDB has ALREADY proven
+    // healthy this session; otherwise this writes the full payload exactly as before.
+    // Skipped entirely while rehydration is pending: the offloaded collections are
+    // still empty in memory and would overwrite the only copy that exists.
+    if(!window._whHydratePending){ try { window._whIdbSet?.('state_v1', state); } catch(e){} }
+    const payload = _whSerializeForLs(state);
     try{
       localStorage.setItem(LS_KEY, payload);
     }catch(err){
@@ -28326,11 +28416,27 @@ async function runDiagnostics(){
   try {
     const state = {nid, units, dispatched, incoming, materials, events, activity, queue, cfg, factory, marriages, dispatchRequests, coverInventory, colorLibrary, coverModelMapping, movements, matTransfers, _epoch: (window.ASPEN_DATA_EPOCH || 1)};
     const json = JSON.stringify(state);
-    const size = (new Blob([json]).size / 1024).toFixed(1);
-    const sizeMb = (json.length / 1024 / 1024).toFixed(2);
-    log('State serializable', true, size + ' KB (' + sizeMb + ' MB / ~5 MB localStorage limit)');
-    if(parseFloat(sizeMb) > 4){
-      log('State size warning', false, 'approaching 5 MB localStorage limit — export & prune old photos');
+    // v5.72 fix: what counts against the ~5 MB cap is the payload actually IN localStorage,
+    // not the in-memory state — since v5.72 the two differ, because movements, events and
+    // coverInventory live in IndexedDB. Both readings are UTF-16 (2 bytes per character);
+    // the old ones divided characters by 1024 and reported half the real size.
+    const fullKB = (json.length * 2 / 1024).toFixed(1);
+    const lsKB   = ((localStorage.getItem(LS_KEY) || '').length * 2 / 1024).toFixed(1);
+    log('State serializable', true, lsKB + ' KB in localStorage · ' + fullKB + ' KB full state');
+    // The cap is shared by every app on aspenservices.github.io, so measure the drawer,
+    // not just our own key — a neighbour filling it is what kills writes here.
+    let originKB = 0;
+    try {
+      for(let i = 0; i < localStorage.length; i++){
+        const k = localStorage.key(i);
+        originKB += ((k || '').length + (localStorage.getItem(k) || '').length) * 2 / 1024;
+      }
+    } catch(e){}
+    const pct = Math.round(originKB / 5120 * 100);
+    log('Shared localStorage (all aspenservices apps)', pct < 75,
+        Math.round(originKB) + ' KB of ~5,120 KB (' + pct + '%)' + (pct >= 75 ? ' — export a backup and clear old keys' : ''));
+    if(parseFloat(lsKB) > 3000){
+      log('State size warning', false, 'this app alone holds over 3 MB of the shared cap — export & prune old photos');
     }
   } catch(e){
     log('State serializable', false, e.message);
@@ -28535,6 +28641,18 @@ function loadState(){
     const raw = localStorage.getItem(LS_KEY);
     if(!raw) return false;
     const s = JSON.parse(raw);
+    // ── OFFLOAD FLAGS (v5.72) — set SYNCHRONOUSLY, before anything else ──────
+    // _lsSlim marks a payload written by the offload build: movements, events and
+    // coverInventory are NOT in it, they live in IndexedDB. _whHydratePending stays
+    // true until the AspenIdbState block has read them back, and while it is true
+    // NOTHING may write those three to either store — a save fired by a boot render
+    // would otherwise persist the EMPTY arrays over the only copy that exists.
+    // A payload WITHOUT the flag (legacy, or a rollback to the previous index) leaves
+    // hydration switched off entirely: localStorage is then the live copy and the
+    // IndexedDB one is stale by definition.
+    window._whBootedSlim     = (s._lsSlim === 1);
+    window._whHydratePending = window._whBootedSlim;
+    window._whBootOff        = s._whOff || null;
     if(s.nid) nid = s.nid;
     if(Array.isArray(s.units)) units = s.units;
     if(Array.isArray(s.dispatched)) dispatched = s.dispatched;
@@ -28575,6 +28693,106 @@ function loadState(){
     return false;
   }
 }
+
+// ── REHYDRATION FROM INDEXEDDB (v5.72) ────────────────────────────────────────
+// These three helpers live HERE, in the main scope, because movements / events /
+// coverInventory are lexical `let` bindings — a script block at the end of the file
+// physically cannot assign to them. The AspenIdbState block does the IndexedDB I/O and
+// calls in. If that block is deleted, nothing calls these and they sit inert.
+//
+// Per collection the rule is: ADOPT when the in-memory array is empty (the normal case
+// — the slim payload never carried it, so there is nothing to lose, and this is exactly
+// what loadState used to do), MERGE when rows appeared during boot (never drop them).
+// A populated array is never replaced wholesale, so even a stale IndexedDB copy cannot
+// revert live data.
+function _whApplyOffloaded(stored){
+  if(!stored || typeof stored !== 'object') return false;
+  let adopted = 0;
+  const take = (incoming, local, mergeFn) => {
+    if(!Array.isArray(incoming) || !incoming.length) return local;
+    adopted++;
+    if(!Array.isArray(local) || !local.length) return incoming;
+    try { return mergeFn(local, incoming); }
+    catch(e){ console.warn('[wh-idb] merge failed, keeping local:', e && e.message); return local; }
+  };
+  movements      = take(stored.movements,      movements,      (l,r) => _mergeMovements(l, r));
+  events         = take(stored.events,         events,         (l,r) => _mergeEvents(l, r, cfg));
+  coverInventory = take(stored.coverInventory, coverInventory, (l,r) => _mergeCovers(l, r, cfg));
+  if(!adopted) return false;
+  // Same contract fbApplyRemoteState honours: data arrived, so the checks run again.
+  // At boot the movements dedup check saw an empty array and did nothing — this is the
+  // pass that actually inspects the ledger.
+  try { if(typeof runIntegrityChecks === 'function') runIntegrityChecks(); }
+  catch(e){ console.warn('[wh-idb] integrity checks after rehydration:', e); }
+  // Re-baseline the watchdog and the save signature so the now-larger state is not read
+  // as drift or as a fresh user edit. _fbLastLocalWriteAt is deliberately NOT touched:
+  // it is the newness guard against stale cloud snapshots and must never move backwards.
+  try { _lastSavedHash = stateHash(); } catch(e){}
+  try { _lastSavedSig  = _stateSig();  } catch(e){}
+  const off = window._whBootOff;
+  if(off && (movements.length < off.mv || events.length < off.ev || coverInventory.length < off.cov)){
+    console.warn('[wh-idb] rehydrated FEWER rows than localStorage recorded — expected ' +
+      off.mv + '/' + off.ev + '/' + off.cov + ', got ' +
+      movements.length + '/' + events.length + '/' + coverInventory.length +
+      ' (cloud sync should top this back up)');
+  }
+  console.log('[wh-idb] rehydrated ' + movements.length + ' movements · ' + events.length +
+              ' events · ' + coverInventory.length + ' cover rows from IndexedDB');
+  return true;
+}
+window._whApplyOffloaded = _whApplyOffloaded;
+
+// The complete state, for the post-boot write into IndexedDB.
+function _whSnapshotState(){
+  return {nid, units, dispatched, incoming, materials, events, activity, queue, cfg, factory,
+          marriages, dispatchRequests, coverInventory, colorLibrary, coverModelMapping,
+          movements, matTransfers,
+          _saved: (typeof fbServerNow === 'function' ? fbServerNow() : Date.now()),
+          // Same stamp every other snapshot builder carries. The epoch guard reads a
+          // missing one as 1 — i.e. stale — so an hourly backup without it would only
+          // restore because restoreHourlyBackup sets _bypassNextSafePull first.
+          _epoch: (window.ASPEN_DATA_EPOCH || 1)};
+}
+window._whSnapshotState = _whSnapshotState;
+
+// Resolves once the offloaded collections are back in memory — immediately when they
+// were never offloaded at all. ANYTHING that serializes the state for somewhere other
+// than this device (a cloud push, a snapshot, a downloaded backup) must await this:
+// during the hydration window movements / events / coverInventory are EMPTY, and
+// fbRestoreFromCloud replaces collections WHOLESALE from a snapshot — so a half state
+// that escapes to the cloud is a loaded gun pointed at 887 movements. Same class as the
+// boot race the hydrate lock closes, on the paths that lock does not reach.
+function _whStateReady(timeoutMs){
+  if(!window._whHydratePending) return Promise.resolve(true);
+  return new Promise(function(resolve){
+    const deadline = Date.now() + (timeoutMs || 12000);
+    (function poll(){
+      if(!window._whHydratePending) return resolve(true);
+      if(Date.now() > deadline) return resolve(false);   // failsafe already fired, or worse
+      setTimeout(poll, 100);
+    })();
+  });
+}
+window._whStateReady = _whStateReady;
+
+// Repaint + persist once hydration has finished.
+function _whFinishHydration(applied){
+  if(applied){ try { fbRerenderActiveView(); } catch(e){ console.warn('[wh-idb] rerender:', e && e.message); } }
+  try { flushSave(); } catch(e){ console.warn('[wh-idb] persist after rehydration:', e && e.message); }
+}
+window._whFinishHydration = _whFinishHydration;
+
+// FAILSAFE. If the AspenIdbState block was deleted (or never ran) nothing will ever
+// clear the pending flag, and these three collections would stay out of BOTH stores
+// forever. Release it after 10s and go back to writing everything to localStorage.
+setTimeout(function(){
+  if(window._whHydratePending){
+    window._whHydratePending = false;
+    console.warn('[wh-idb] no rehydration after 10s — reverting to full localStorage writes');
+    try { flushSave(); } catch(e){}
+  }
+}, 10000);
+
 // Hook every render to autosave (drawMap, renderQueue, renderDash all call updBadges)
 const _origUpdBadges = updBadges;
 updBadges = function(){_origUpdBadges.apply(this, arguments); saveState();};
@@ -28657,8 +28875,17 @@ function undoLast(){
   if(typeof mapView !== 'undefined' && mapView === '3d' && W3D.state.inited) update3D();
   updBadges();
 }
-function exportBackup(){
-  const state = {nid, units, dispatched, incoming, materials, events, activity, queue, cfg, factory, marriages, dispatchRequests, coverInventory, colorLibrary, coverModelMapping, movements, _exported:new Date().toISOString(), _version:"v3.53"};
+async function exportBackup(){
+  // v5.72: wait, don't refuse. A backup downloaded during the hydration window would look
+  // complete and quietly contain zero movements, zero events and zero cover rows — the
+  // worst possible artifact, because it is the one file you would trust to restore from.
+  if(typeof _whStateReady === 'function' && !(await _whStateReady())){
+    if(typeof toast === 'function') toast('⚠ Backup cancelled — state not fully loaded, reload and retry', 'err');
+    return;
+  }
+  // v5.72 fix: matTransfers was missing from the manual backup, and _version was pinned at
+  // "v3.53" — every export since has claimed to be a build from years ago.
+  const state = {nid, units, dispatched, incoming, materials, events, activity, queue, cfg, factory, marriages, dispatchRequests, coverInventory, colorLibrary, coverModelMapping, movements, matTransfers, _exported:new Date().toISOString(), _version: APP_VERSION};
   const blob = new Blob([JSON.stringify(state, null, 2)], {type:'application/json'});
   const u = URL.createObjectURL(blob);
   const a = document.createElement('a');
@@ -28688,6 +28915,7 @@ function importBackup(e){
       factory = Array.isArray(s.factory) ? s.factory : [];
       marriages = Array.isArray(s.marriages) ? s.marriages : [];
       dispatchRequests = Array.isArray(s.dispatchRequests) ? s.dispatchRequests : [];
+      matTransfers = Array.isArray(s.matTransfers) ? s.matTransfers : [];   // v5.72 fix — restored now that exportBackup writes it
       if(s.cfg && typeof s.cfg === 'object') cfg = mergeCfgPreservingPins(cfg, s.cfg);
       migratePositionsToBlueprint();
       migrateUnitsToStacks();
@@ -28701,10 +28929,15 @@ function importBackup(e){
   r.readAsText(f);
   e.target.value = '';  // allow re-importing same file
 }
-function clearAllData(){
+async function clearAllData(){
   if(!confirm(`⚠ DELETE ALL DATA?\n\nThis will erase ${units.length} units, ${dispatched.length} dispatched records, ${materials.length} materials, ${factory.length} factory items, ${marriages.length} marriages, and all settings.\n\nThis cannot be undone. Are you sure?`)) return;
   if(!confirm('Final confirmation: really clear everything?')) return;
   localStorage.removeItem(LS_KEY);
+  // v5.72: the ledger, the event log and cover stock live in IndexedDB now, and so does
+  // the hourly backup. Removing only the localStorage key left ~1.8 MB of "deleted" data
+  // behind — and restoreHourlyBackup would have brought every row of it back.
+  try { localStorage.removeItem('aspen_warehouse_state_hourly_backup_v1'); } catch(e){}
+  try { if(typeof window._whIdbClear === 'function') await window._whIdbClear(); } catch(e){}
   location.reload();
 }
 
@@ -28719,8 +28952,11 @@ async function wipeInventoryData(){
   if(!confirm(`Final confirmation:\n\nReally wipe ALL inventory? Type-in OK.`)) return;
   // Snapshot for undo
   try { snapshot('ADMIN wipe inventory'); } catch(e){}
-  // Auto-download a CSV backup as safety net
-  try { if(typeof exportBackup === 'function') exportBackup(); } catch(e){ console.warn('backup failed:', e); }
+  // Auto-download a backup as safety net. MUST be awaited: since v5.72 exportBackup is
+  // async (it waits for the offloaded collections to be back before serializing), so
+  // fire-and-forget would let the arrays below be cleared first and hand you a backup of
+  // the already-wiped state — the exact file you would reach for after a mistaken wipe.
+  try { if(typeof exportBackup === 'function') await exportBackup(); } catch(e){ console.warn('backup failed:', e); }
   // Clear inventory arrays
   units = [];
   factory = [];
@@ -30644,6 +30880,15 @@ document.addEventListener('keydown', e=>{
 
   async function saveAutoSnapshot(kind){
     if(!_fbDb || !_fbAuthorized) return;
+    // v5.72: the 'boot' snapshot fires 5s after load, and the IndexedDB layer allows itself
+    // up to 8s to open — so on a slow device this ran while the offloaded collections were
+    // still empty. Skip and come back rather than storing a half state that
+    // fbRestoreFromCloud would later apply wholesale.
+    if(window._whHydratePending){
+      console.log('[auto-snapshot] deferring ' + kind + ' — offloaded collections not rehydrated yet');
+      setTimeout(function(){ saveAutoSnapshot(kind); }, 4000);
+      return;
+    }
     // Don't auto-snapshot if data is suspiciously empty (avoid persisting bad state)
     const totalItems = (factory||[]).length + (units||[]).length + (marriages||[]).length;
     if(totalItems < 2 && kind !== 'boot'){
@@ -30717,6 +30962,10 @@ document.addEventListener('keydown', e=>{
   function installManualSnapshots(){
     window.saveLabeledSnapshot = async function(label){
       if(!_fbDb || !_fbAuthorized){ if(typeof toast==='function') toast('Firebase no conectado','err'); return; }
+      // v5.72: a restore point is only worth anything if it is complete.
+      if(typeof window._whStateReady === 'function' && !(await window._whStateReady())){
+        if(typeof toast==='function') toast('⏳ Still loading — try again in a moment','err'); return;
+      }
       if(!label){ label = prompt('Label for this restore point:\n\nE.g.: "before-tubs-19-may", "end-of-day-19-may"'); if(!label) return; }
       const safeLabel = String(label).replace(/[.#$\[\]\/\s]+/g,'_').slice(0,100);
       if(!safeLabel){ if(typeof toast==='function') toast('Invalid label','err'); return; }
@@ -30778,19 +31027,24 @@ document.addEventListener('keydown', e=>{
     console.log('[protection] ✓ manual snapshots');
   }
 
-  // ─── 5. HOURLY LOCALSTORAGE BACKUP ───────────────────────────────────
+  // ─── 5. HOURLY BACKUP ────────────────────────────────────────────────
+  // v5.72 — this used to write a verbatim SECOND copy of the state into localStorage,
+  // the one store all four aspenservices apps share. That duplicate is a large part of
+  // what fills the ~5 MB drawer and starves the primary save. It now goes to IndexedDB
+  // (~78 GB of quota) and carries the COMPLETE state, including the three collections
+  // the localStorage payload no longer holds — so it is a better backup than before,
+  // and it costs the shared drawer nothing. Without a working IndexedDB the previous
+  // localStorage behaviour is kept verbatim, size ceiling and all.
   function installHourlyLocalBackup(){
-    function maybeBackup(){
-      if(Date.now() - _hourlyBackupLast < HOURLY_BACKUP_INTERVAL) return;
+    function writeLocalCopy(){
       try {
         const main = localStorage.getItem('aspen_warehouse_state_v1');
         if(!main) return;
-        // The hourly backup is a full SECOND copy of the state. Duplicating a large
-        // state can push localStorage past the browser's ~5MB cap and starve the
-        // PRIMARY save (the "Storage full" toast). Cloud sync + Drive + manual backup
-        // already cover us, so once the live state is big we SKIP the local duplicate
-        // (and drop any stale copy to free room) — better no local hourly backup than
-        // a broken primary save. ~1.8 MB keeps headroom for the primary + small keys.
+        // Duplicating a large state can push localStorage past the browser's ~5MB cap and
+        // starve the PRIMARY save (the "Storage full" toast). Cloud sync + Drive + manual
+        // backup already cover us, so once the live state is big we SKIP the local
+        // duplicate (and drop any stale copy to free room) — better no local hourly backup
+        // than a broken primary save. ~1.8 MB keeps headroom for the primary + small keys.
         if(main.length <= 1800000){
           localStorage.setItem(HOURLY_BACKUP_KEY, main); _hourlyBackupLast = Date.now();
         } else {
@@ -30798,21 +31052,50 @@ document.addEventListener('keydown', e=>{
         }
       } catch(e){}
     }
+    function maybeBackup(){
+      if(Date.now() - _hourlyBackupLast < HOURLY_BACKUP_INTERVAL) return;
+      // Mid-boot the offloaded collections are still empty in memory — a snapshot taken
+      // now would be a half-state. Skip without stamping; the next tick picks it up.
+      if(window._whHydratePending) return;
+      if(typeof window._whIdbReady !== 'function'){ writeLocalCopy(); return; }
+      // _whIdbReady resolves as soon as the open settles either way, so there is no
+      // timeout to guess at here.
+      window._whIdbReady().then(function(ready){
+        if(!ready || typeof window._whSnapshotState !== 'function'){ writeLocalCopy(); return; }
+        window._whIdbSet('hourly_v1', window._whSnapshotState()).then(function(ok){
+          if(!ok){ writeLocalCopy(); return; }
+          _hourlyBackupLast = Date.now();
+          // Reclaim whatever the old localStorage copy is still holding in the drawer.
+          try { localStorage.removeItem(HOURLY_BACKUP_KEY); } catch(e){}
+        });
+      }).catch(function(){ writeLocalCopy(); });
+    }
     setInterval(maybeBackup, 60000);
+    // The IndexedDB layer opens and writes right after boot; these early retries let the
+    // first backup of the session land there instead of falling back to the shared drawer.
+    setTimeout(maybeBackup, 800);
+    setTimeout(maybeBackup, 4000);
     maybeBackup();
     window.restoreHourlyBackup = function(){
-      try {
-        const bak = localStorage.getItem(HOURLY_BACKUP_KEY);
-        if(!bak){ alert('No hourly backup yet'); return; }
-        const state = JSON.parse(bak);
-        if(!confirm(`Restore hourly backup?\n\nFactory: ${(state.factory||[]).length}\nUnits: ${(state.units||[]).length}\nSaved: ${state._saved ? new Date(state._saved).toLocaleString('en-US') : '?'}`)) return;
-        _bypassNextSafePull = true;
-        _bypassNextSafePush = true;
-        fbApplyRemoteState(state, state._saved || Date.now());
-        fbCloudSync(true);
-      } catch(e){ alert('Error: '+e.message); }
+      var read = (typeof window._whIdbGet === 'function')
+        ? window._whIdbGet('hourly_v1').catch(function(){ return null; })
+        : Promise.resolve(null);
+      return read.then(function(state){
+        try {
+          if(!state){
+            const bak = localStorage.getItem(HOURLY_BACKUP_KEY);
+            if(bak) state = JSON.parse(bak);
+          }
+          if(!state){ alert('No hourly backup yet'); return; }
+          if(!confirm(`Restore hourly backup?\n\nFactory: ${(state.factory||[]).length}\nUnits: ${(state.units||[]).length}\nSaved: ${state._saved ? new Date(state._saved).toLocaleString('en-US') : '?'}`)) return;
+          _bypassNextSafePull = true;
+          _bypassNextSafePush = true;
+          fbApplyRemoteState(state, state._saved || Date.now());
+          fbCloudSync(true);
+        } catch(e){ alert('Error: '+e.message); }
+      });
     };
-    console.log('[protection] ✓ hourly LS backup');
+    console.log('[protection] ✓ hourly backup (IndexedDB when available, localStorage otherwise)');
   }
 
   // ─── 6. ADMIN UI ─────────────────────────────────────────────────────
@@ -33730,6 +34013,221 @@ document.addEventListener('keydown', e=>{
   console.log('[AspenGhostAudit] ready — AspenGhostAudit.report() compares the dispatch log against the floor');
 })();
 </script>
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     v5.72 AspenIdbState — move the heavy, boot-irrelevant collections out of
+     localStorage and into IndexedDB (delete-block).
+
+     WHY: all four Aspen apps are served from aspenservices.github.io, so they
+     share ONE ~5 MB localStorage. Measured 5 Aug 2026: this app's key alone was
+     1,804 KB of a 4,212 KB total, and when the drawer filled, TECH-TICKETS'
+     Firestore died with INTERNAL ASSERTION FAILED because it could not write its
+     own sequence counter. The origin's real quota is 78,643 MB — the data is not
+     too big, it is simply in the one store that cannot grow.
+
+     WHAT MOVES: movements + events + coverInventory only. These are the three
+     collections runIntegrityChecks() does NOT read at boot (measured: factory 75
+     reads, units 32, dispatched 28, marriages 14, activity 9, movements 4 —
+     all inside ONE length-guarded dedup check — dispatchRequests 3, events 0,
+     coverInventory 0). Moving anything the checks read would leave them
+     REPAIRING a half-loaded state, which is exactly how 47 real tubs left the
+     floor in v5.59/v5.60. Scope is deliberately small for that reason.
+
+     GUARANTEE: if IndexedDB is missing, blocked or broken, _whIdbReady() is
+     false, no slim payload is ever written, and every behaviour falls back to
+     exactly what this app did before. Deleting this whole block is safe: the
+     hooks in saveState / flushSave / fbApplyRemoteState all test for these
+     functions first and write the FULL payload when they are absent.
+     ═══════════════════════════════════════════════════════════════════════ -->
+<script>
+(function(){
+  if (window._whIdbSet) return;
+
+  var DB_NAME = 'aspenWarehouse', STORE = 'state', DB_VER = 1, OPEN_TIMEOUT = 8000;
+  var _db = null, _openPromise = null;
+
+  // Sync flag other code can read without awaiting: true only after a write has
+  // actually COMMITTED at least once this session. flushSave() uses it to decide
+  // whether the slim payload is safe, because it cannot await anything.
+  window._whIdbHealthy = false;
+
+  function open(){
+    if (_openPromise) return _openPromise;
+    _openPromise = new Promise(function(resolve){
+      var idb = null;
+      try { idb = window.indexedDB; } catch(e){}
+      if (!idb || typeof idb.open !== 'function') return resolve(null);
+      var req;
+      try { req = idb.open(DB_NAME, DB_VER); } catch(e){ return resolve(null); }
+      var settled = false;
+      function done(db){ if(settled) return; settled = true; _db = db || null; resolve(_db); }
+      req.onupgradeneeded = function(ev){
+        try {
+          var db = ev.target.result;
+          if (!db.objectStoreNames.contains(STORE)) db.createObjectStore(STORE);
+        } catch(e){ console.warn('[wh-idb] upgrade failed:', e && e.message); }
+      };
+      req.onsuccess  = function(ev){
+        var db = ev.target.result;
+        // If another tab (or a future build) needs to upgrade, an open connection here
+        // would block it forever. Step aside and reopen on the next call; until then
+        // _whIdbHealthy is false, so localStorage goes back to carrying everything.
+        try {
+          db.onversionchange = function(){
+            try { db.close(); } catch(e){}
+            _db = null; _openPromise = null; window._whIdbHealthy = false;
+            console.warn('[wh-idb] another tab is upgrading the database — connection closed, will reopen');
+          };
+        } catch(e){}
+        done(db);
+      };
+      req.onerror    = function(){ done(null); };
+      req.onblocked  = function(){ done(null); };
+      // Private mode / a stuck upgrade can leave open() hanging forever. The app
+      // must never wait on it: after the timeout we simply behave as "no IndexedDB".
+      setTimeout(function(){ done(null); }, OPEN_TIMEOUT);
+    }).catch(function(){ return null; });
+    return _openPromise;
+  }
+
+  // → Promise<boolean>. Never throws.
+  window._whIdbReady = function(){
+    return open().then(function(db){ return !!db; }).catch(function(){ return false; });
+  };
+
+  // → Promise<boolean>. Resolves false on ANY failure; never throws, never rejects.
+  window._whIdbSet = function(key, val){
+    return open().then(function(db){
+      if (!db) { window._whIdbHealthy = false; return false; }
+      return new Promise(function(resolve){
+        // _whIdbHealthy is not a latch. _whSerializeForLs keys the SLIM localStorage
+        // payload off it, so if it stayed true after IndexedDB started failing — quota,
+        // corruption, site data cleared in another tab, a private-mode transition — the
+        // three offloaded collections would exist ONLY in memory until the tab closed.
+        // Every failure drops it, and the very next localStorage write is the FULL payload.
+        function done(okFlag){ window._whIdbHealthy = !!okFlag; resolve(!!okFlag); }
+        var txn;
+        try { txn = db.transaction([STORE], 'readwrite'); } catch(e){ return done(false); }
+        var wrote = false;
+        txn.oncomplete = function(){ done(wrote); };
+        txn.onerror    = function(){ done(false); };
+        txn.onabort    = function(){ done(false); };
+        try {
+          var r = txn.objectStore(STORE).put(val, key);
+          r.onsuccess = function(){ wrote = true; };
+          r.onerror   = function(){ wrote = false; };
+        } catch(e){ done(false); }
+      });
+    }).catch(function(){ window._whIdbHealthy = false; return false; });
+  };
+
+  // Remove everything this layer owns. Used by "DELETE ALL DATA", which until v5.72
+  // only cleared the localStorage key.
+  window._whIdbClear = function(){
+    return open().then(function(db){
+      if (!db) return false;
+      return new Promise(function(resolve){
+        var txn;
+        try { txn = db.transaction([STORE], 'readwrite'); } catch(e){ return resolve(false); }
+        txn.oncomplete = function(){ resolve(true); };
+        txn.onerror    = function(){ resolve(false); };
+        txn.onabort    = function(){ resolve(false); };
+        try {
+          var st = txn.objectStore(STORE);
+          st.delete('state_v1');
+          st.delete('hourly_v1');
+        } catch(e){ resolve(false); }
+      });
+    }).catch(function(){ return false; });
+  };
+
+  // → Promise<value|null>. Missing key resolves null. Never throws.
+  window._whIdbGet = function(key){
+    return open().then(function(db){
+      if (!db) return null;
+      return new Promise(function(resolve){
+        var txn;
+        try { txn = db.transaction([STORE], 'readonly'); } catch(e){ return resolve(null); }
+        var out = null;
+        txn.oncomplete = function(){ resolve(out === undefined ? null : out); };
+        txn.onerror    = function(){ resolve(null); };
+        txn.onabort    = function(){ resolve(null); };
+        try {
+          var r = txn.objectStore(STORE).get(key);
+          r.onsuccess = function(ev){ out = ev.target.result; };
+          r.onerror   = function(){ out = null; };
+        } catch(e){ resolve(null); }
+      });
+    }).catch(function(){ return null; });
+  };
+
+  // ── BOOT ROUTINE ──────────────────────────────────────────────────────────
+  // Runs after the whole synchronous boot has finished (this block is the last thing
+  // in the file). Three jobs, strictly in order:
+  //   1. read the complete copy back and hand it to _whApplyOffloaded
+  //   2. release the hydrate lock, so normal saves may touch IndexedDB again
+  //   3. write the now-complete state back — which is also what proves IndexedDB
+  //      healthy, so the first localStorage write of the session can already be slim
+  function bootRoutine(){
+    return window._whIdbReady().then(function(ready){
+      if(!ready){
+        window._whHydratePending = false;
+        console.warn('[wh-idb] IndexedDB unavailable — localStorage keeps every collection, exactly as before');
+        return null;
+      }
+      // No _lsSlim marker means localStorage is the live copy: a legacy payload, or a
+      // rollback to the previous index that ran for a while with everything local.
+      // Whatever sits in IndexedDB is stale by definition and adopting it would
+      // resurrect rows deleted since. Leave it alone; the next save overwrites it.
+      if(!window._whBootedSlim){
+        console.log('[wh-idb] localStorage payload is not slim — skipping rehydration (this is the rollback-safe path)');
+        return null;
+      }
+      return window._whIdbGet('state_v1');
+    }).then(function(stored){
+      var applied = false;
+      if(stored && window._whBootedSlim){
+        try { applied = !!(window._whApplyOffloaded && window._whApplyOffloaded(stored)); }
+        catch(e){ console.warn('[wh-idb] rehydration failed:', e && e.message); }
+      } else if(window._whBootedSlim){
+        console.warn('[wh-idb] localStorage says three collections were offloaded but IndexedDB is empty — cloud sync will restore them');
+      }
+      window._whHydratePending = false;
+      if(typeof window._whSnapshotState !== 'function') return null;
+      // Direct write. The guard added to saveState / flushSave / fbApplyRemoteState is
+      // there to stop a HALF-loaded state reaching this store; this is the one call
+      // that legitimately carries the complete, rehydrated one.
+      return window._whIdbSet('state_v1', window._whSnapshotState()).then(function(){
+        try { if(window._whFinishHydration) window._whFinishHydration(applied); } catch(e){}
+      });
+    }).catch(function(e){
+      window._whHydratePending = false;
+      console.warn('[wh-idb] boot routine failed:', e && e.message);
+    });
+  }
+  // The ledger, the event log and cover stock now live ONLY in IndexedDB on this device.
+  // Browsers evict "best-effort" storage under pressure, and iOS clears script-writable
+  // storage after ~7 idle days — which for a field tech's phone is an ordinary fortnight.
+  // Asking for persistent storage is free: if it is denied nothing changes, and cloud sync
+  // is still the real backstop. Installed PWAs are usually granted it without a prompt.
+  try {
+    if (navigator.storage && typeof navigator.storage.persist === 'function') {
+      navigator.storage.persisted().then(function(already){
+        if (already) { console.log('[wh-idb] storage already persistent'); return; }
+        return navigator.storage.persist().then(function(granted){
+          console.log('[wh-idb] persistent storage ' + (granted ? 'granted' : 'denied — cloud sync remains the backstop'));
+        });
+      }).catch(function(){});
+    }
+  } catch(e){}
+
+  // Let the synchronous boot (loadState → migrations → integrity checks → first render)
+  // finish before touching anything.
+  setTimeout(bootRoutine, 0);
+
+  console.log('[AspenIdbState] layer ready — movements/events/coverInventory can live in IndexedDB');
+})();
+</script>
+
 
 </body>
 </html>
