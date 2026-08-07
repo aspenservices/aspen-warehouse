@@ -4756,7 +4756,7 @@ let _fbInitAttempts = 0;
 //   /app_version/current  (in Firebase console, manually, OR call
 //   pushVersionToFirebase() from the Admin console at deploy time)
 // ══════════════════════════════════════════════════════════════════
-const APP_VERSION = 'v5.72';
+const APP_VERSION = 'v5.73';
 // v5.23 (#1): paste your reCAPTCHA v3 site key here AFTER enabling App Check in
 // the Firebase console (Build → App Check → Register app → reCAPTCHA v3). Until
 // then it stays '', everything works exactly as before.
@@ -7869,13 +7869,40 @@ function fbApplyRemoteState(restored, sourceTimestamp){
   try {
     if(typeof window.__aspenEnsureTubs === 'function') setTimeout(window.__aspenEnsureTubs, 300);
   } catch(e){}
-  // If the merge preserved local-only tub(s) the incoming state lacked, push the
-  // merged result so the cloud + every other device regain them (stops the
-  // appear/disappear loop instead of just patching it on this screen).
+  // If the merge preserved local-only rows the incoming state lacked, push the merged
+  // result so the cloud + every other device regain them (stops the appear/disappear loop
+  // instead of just patching it on this screen).
+  //
+  // v5.73 — THE SYNC PING-PONG. This was three hand-maintained lists that had drifted
+  // apart: the condition read ELEVEN counters, the message named TWO, and the reset
+  // cleared SIX. The five it never cleared — dispatched, events, queue, movements, map —
+  // latched on the first merge that kept anything. And because the counters are ASSIGNED
+  // (`_lastEvMergeKept = kept`) rather than accumulated, only a full apply of that same
+  // collection could ever clear them again — while a v2 PARTIAL update, the ordinary case
+  // ("collections: cfg"), never runs those merges at all. So a single latch turned every
+  // later remote apply into a re-push, the other device answered in kind, and the two
+  // machines volleyed forever. The log read "kept 0 local-only tub(s) + 0 local-only
+  // request(s)" precisely because the two counters it printed were among the six being
+  // reset — the diagnostic hid its own cause.
+  //
+  // One list now feeds all three uses, so they cannot drift apart again. Reset happens on
+  // EVERY apply, fired or not: a stale counter is the whole bug.
   try {
-    if(_lastMergeKept > 0 || _lastReqMergeKept > 0 || _lastIncMergeKept > 0 || _lastFacMergeKept > 0 || _lastCoverMergeKept > 0 || _lastMarMergeKept > 0 || _lastDispMergeKept > 0 || _lastEvMergeKept > 0 || _lastQMergeKept > 0 || _lastMvMergeKept > 0 || _lastMapMergeKept > 0){
-      console.warn('[merge] kept ' + _lastMergeKept + ' local-only tub(s) + ' + _lastReqMergeKept + ' local-only request(s) the incoming state lacked \u2192 re-pushing merged state');
-      _lastMergeKept = 0; _lastReqMergeKept = 0; _lastIncMergeKept = 0; _lastFacMergeKept = 0; _lastCoverMergeKept = 0; _lastMarMergeKept = 0;
+    const _kept = {
+      'tub(s)':       _lastMergeKept,      'request(s)':  _lastReqMergeKept,
+      'incoming':     _lastIncMergeKept,   'factory':     _lastFacMergeKept,
+      'cover(s)':     _lastCoverMergeKept, 'marriage(s)': _lastMarMergeKept,
+      'dispatched':   _lastDispMergeKept,  'event(s)':    _lastEvMergeKept,
+      'queue':        _lastQMergeKept,     'movement(s)': _lastMvMergeKept,
+      'map':          _lastMapMergeKept
+    };
+    const _held = Object.keys(_kept).filter(k => _kept[k] > 0);
+    _lastMergeKept = 0; _lastReqMergeKept = 0; _lastIncMergeKept = 0; _lastFacMergeKept = 0;
+    _lastCoverMergeKept = 0; _lastMarMergeKept = 0; _lastDispMergeKept = 0; _lastEvMergeKept = 0;
+    _lastQMergeKept = 0; _lastMvMergeKept = 0; _lastMapMergeKept = 0;
+    if(_held.length){
+      console.warn('[merge] kept local-only rows the incoming state lacked \u2192 re-pushing merged state: ' +
+                   _held.map(k => _kept[k] + ' ' + k).join(', '));
       setTimeout(() => { try { _bypassNextSafePush = true; if(typeof fbCloudSync === 'function') fbCloudSync(false); } catch(e){} }, 600);
     }
   } catch(e){}
